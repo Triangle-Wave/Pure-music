@@ -1,0 +1,93 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.4'
+          channel: stable
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # 仓库没有提交 desktop_lyric/，但 CMake 的 install 阶段会复制它。
+      # 从官方最新 portable 包里恢复完整目录，保证桌面歌词可用。
+      - name: Restore desktop_lyric from latest release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/qingyueyin/Pure-music/releases/latest" `
+            -Headers @{ "User-Agent" = "github-actions" }
+          $asset = $release.assets | Where-Object { $_.name -like "*portable.zip" } | Select-Object -First 1
+          if (-not $asset) { throw "portable.zip not found in latest release" }
+
+          $zip = Join-Path $env:RUNNER_TEMP "portable.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "portable"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+
+          $src = Get-ChildItem $extract -Recurse -Directory -Filter "desktop_lyric" | Select-Object -First 1
+          if (-not $src) { throw "desktop_lyric not found in release package" }
+
+          New-Item -ItemType Directory -Force -Path "desktop_lyric" | Out-Null
+          Copy-Item -Path (Join-Path $src.FullName "*") -Destination "desktop_lyric" -Recurse -Force
+
+          if (-not (Test-Path "desktop_lyric\desktop_lyric.exe")) {
+            throw "desktop_lyric.exe missing after restore"
+          }
+          Get-ChildItem "desktop_lyric" -Recurse | Select-Object FullName, Length
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Build release
+        run: flutter build windows --release
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/windows/x64/runner/Release"
+          $required = @(
+            "$out/pure_music.exe",
+            "$out/flutter_windows.dll",
+            "$out/dll/BASS/bass.dll",
+            "$out/dll/BASS/basswasapi.dll",
+            "$out/dll/BASS/bass_fx.dll",
+            "$out/dll/BASS/bassmix.dll",
+            "$out/desktop_lyric/desktop_lyric.exe"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path $_) })
+          if ($missing.Count -gt 0) {
+            throw "Missing build output: $($missing -join ', ')"
+          }
+          "Build output verified."
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-music-windows-x64
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error
