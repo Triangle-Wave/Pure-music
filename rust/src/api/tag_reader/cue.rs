@@ -596,6 +596,58 @@ pub(crate) fn segment_path(source_path: &str, track_number: u32) -> String {
     format!("{source_path}::track={track_number:02}")
 }
 
+/// 生成带段起止的合成路径，例如 `<source_path>::track=01::start=0::end=200000`。
+///
+/// `source_path` 原样保留，不改变大小写、分隔符、空格与中文字符。
+pub(crate) fn segment_path_with_range(
+    source_path: &str,
+    track_number: u32,
+    start_ms: u64,
+    end_ms: u64,
+) -> String {
+    format!("{source_path}::track={track_number:02}::start={start_ms}::end={end_ms}")
+}
+
+/// 合成路径的解析结果，`source_path` 借用输入字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedSegmentPath<'a> {
+    pub(crate) source_path: &'a str,
+    pub(crate) track_number: u32,
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
+}
+
+/// 解析带段起止的合成路径；格式不符、数字非法或终点早于起点时返回 None。
+pub(crate) fn parse_segment_path(path: &str) -> Option<ParsedSegmentPath<'_>> {
+    // 源路径自身可能含 `::`，取最后一个标记作为段信息的起点。
+    let marker_index = path.rfind("::track=")?;
+    let (source_path, suffix) = path.split_at(marker_index);
+    if source_path.is_empty() {
+        return None;
+    }
+    let rest = suffix.strip_prefix("::")?;
+    let mut parts = rest.split("::");
+    let track_part = parts.next()?;
+    let start_part = parts.next()?;
+    let end_part = parts.next()?;
+    // 后缀只允许三段，多余内容视为损坏的合成路径。
+    if parts.next().is_some() {
+        return None;
+    }
+    let track_number = track_part.strip_prefix("track=")?.parse::<u32>().ok()?;
+    let start_ms = start_part.strip_prefix("start=")?.parse::<u64>().ok()?;
+    let end_ms = end_part.strip_prefix("end=")?.parse::<u64>().ok()?;
+    if end_ms < start_ms {
+        return None;
+    }
+    Some(ParsedSegmentPath {
+        source_path,
+        track_number,
+        start_ms,
+        end_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +996,99 @@ mod tests {
         assert_eq!(segments[0].end_ms, 1_000);
         assert_eq!(segments[0].duration_ms(), 0);
         assert_eq!(warnings, vec!["track 1: unknown end position"]);
+    }
+
+    #[test]
+    fn builds_and_parses_segment_path_with_range() {
+        let source = "D:\\Music\\Album\\disc.flac";
+        let path = segment_path_with_range(source, 2, 0, 200_000);
+        let parsed = parse_segment_path(&path).expect("range path should parse");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.track_number, 2);
+        assert_eq!(parsed.start_ms, 0);
+        assert_eq!(parsed.end_ms, 200_000);
+    }
+
+    #[test]
+    fn keeps_special_characters_in_range_source_path() {
+        let source = "D:\\我的 音乐\\专辑 & 精选 [Disc 1]\\曲目.flac";
+        let path = segment_path_with_range(source, 1, 1_500, 61_000);
+        assert!(path.starts_with(source));
+        let parsed = parse_segment_path(&path).expect("range path should parse");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.track_number, 1);
+        assert_eq!(parsed.start_ms, 1_500);
+        assert_eq!(parsed.end_ms, 61_000);
+    }
+
+    #[test]
+    fn parses_three_digit_track_number_in_range() {
+        let source = "C:\\Music\\Album\\disc.flac";
+        let path = segment_path_with_range(source, 123, 0, 1);
+        let parsed = parse_segment_path(&path).expect("range path should parse");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.track_number, 123);
+        assert_eq!(parsed.start_ms, 0);
+        assert_eq!(parsed.end_ms, 1);
+    }
+
+    #[test]
+    fn rejects_path_without_track_marker() {
+        assert!(parse_segment_path("D:\\Music\\Album\\disc.flac").is_none());
+        assert!(parse_segment_path("D:\\Music\\Album\\disc.flac::start=0::end=200000").is_none());
+    }
+
+    #[test]
+    fn rejects_range_path_missing_start_or_end() {
+        assert!(parse_segment_path("D:\\a.flac::track=01::end=200000").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=01::start=0").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=01").is_none());
+    }
+
+    #[test]
+    fn rejects_non_numeric_range_fields() {
+        assert!(parse_segment_path("D:\\a.flac::track=xx::start=0::end=1").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=01::start=x::end=1").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=01::start=0::end=x").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=-1::start=0::end=1").is_none());
+    }
+
+    #[test]
+    fn rejects_range_with_end_before_start() {
+        assert!(parse_segment_path("D:\\a.flac::track=01::start=200000::end=0").is_none());
+        let equal = parse_segment_path("D:\\a.flac::track=01::start=5::end=5")
+            .expect("equal start and end should parse");
+        assert_eq!(equal.start_ms, 5);
+        assert_eq!(equal.end_ms, 5);
+    }
+
+    #[test]
+    fn rejects_incomplete_range_suffix() {
+        assert!(parse_segment_path("D:\\a::b.flac::track=01::start=0").is_none());
+        assert!(parse_segment_path("D:\\a.flac::track=01::start=0::end=1::extra=2").is_none());
+        assert!(parse_segment_path("D:\\a::track=b.flac").is_none());
+        // 源路径自身含 `::track=` 时取最后一个标记，仍能正确解析。
+        let source = "D:\\a::track=old.flac";
+        let path = segment_path_with_range(source, 5, 10, 20);
+        let parsed = parse_segment_path(&path).expect("last marker should be used");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.track_number, 5);
+    }
+
+    #[test]
+    fn rejects_empty_source_path_in_range() {
+        assert!(parse_segment_path("::track=01::start=0::end=200000").is_none());
+    }
+
+    #[test]
+    fn builds_range_path_in_expected_format() {
+        assert_eq!(
+            segment_path_with_range("D:\\Music\\Album\\disc.flac", 2, 0, 200_000),
+            "D:\\Music\\Album\\disc.flac::track=02::start=0::end=200000"
+        );
+        assert_eq!(
+            segment_path_with_range("Music/Album/Track.flac", 7, 1_000, 2_000),
+            "Music/Album/Track.flac::track=07::start=1000::end=2000"
+        );
     }
 }
