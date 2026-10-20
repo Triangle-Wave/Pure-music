@@ -40,7 +40,8 @@ String _formatBytes(int bytes) {
 }
 
 final _audioExtraCache = AudioDetailMetadataCache(
-  loader: (audio) => rust_tag_reader.readAudioExtraMetadata(path: audio.path),
+  loader: (audio) =>
+      rust_tag_reader.readAudioExtraMetadata(path: audio.filePath),
 );
 
 rust_tag_reader.AudioExtraMetadata _emptyAudioExtraMetadata() =>
@@ -217,7 +218,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     if (_isOpeningInExplorer) return;
     setState(() => _isOpeningInExplorer = true);
     try {
-      final result = await showInExplorer(path: audio.path);
+      final result = await showInExplorer(path: audio.filePath);
       if (!result && mounted) {
         showTextOnSnackBar('打开失败');
       }
@@ -232,7 +233,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     if (_isCopyingPath) return;
     setState(() => _isCopyingPath = true);
     try {
-      await Clipboard.setData(ClipboardData(text: audio.path));
+      await Clipboard.setData(ClipboardData(text: audio.filePath));
       if (mounted) {
         showTextOnSnackBar('已复制路径');
       }
@@ -259,6 +260,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _enterEditMode() async {
+    if (audio.isCueTrack) {
+      showTextOnSnackBar('CUE 轨暂不支持编辑标签');
+      return;
+    }
     final requestToken = ++_editRequestToken;
     await applyAudioDetailMetadataIfMounted(
       future: _getAudioExtra(audio),
@@ -298,6 +303,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _saveEdit() async {
+    if (audio.isCueTrack) {
+      showTextOnSnackBar('CUE 轨暂不支持编辑标签');
+      return;
+    }
     setState(() => _isSaving = true);
     var coverWritten = false;
     try {
@@ -531,7 +540,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _buildLyricTab(ColorScheme scheme) {
-    _lyricFuture ??= rust_tag_reader.getLyricFromPath(path: audio.path);
+    _lyricFuture ??= rust_tag_reader.getLyricFromPath(path: audio.filePath);
     return Stack(
       children: [
         SingleChildScrollView(
@@ -613,7 +622,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     );
     if (written != true || !mounted) return;
     setState(() {
-      _lyricFuture = rust_tag_reader.getLyricFromPath(path: audio.path);
+      _lyricFuture = rust_tag_reader.getLyricFromPath(path: audio.filePath);
     });
   }
 
@@ -711,8 +720,8 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
       runSpacing: 8,
       children: [
         IconButton.filledTonal(
-          tooltip: '编辑标签',
-          onPressed: _enterEditMode,
+          tooltip: audio.isCueTrack ? 'CUE 轨暂不支持编辑标签' : '编辑标签',
+          onPressed: audio.isCueTrack ? null : _enterEditMode,
           style: _headerActionStyle(),
           icon: const Icon(Symbols.edit),
         ),
@@ -1010,10 +1019,16 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     return [
       _DetailField(
         label: '格式',
-        value: p.extension(audio.path).replaceFirst('.', '').toUpperCase(),
+        value: p.extension(audio.filePath).replaceFirst('.', '').toUpperCase(),
       ),
+      if (audio.isCueTrack)
+        _DetailField(
+          label: 'CUE 轨',
+          value:
+              '${audio.track}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）',
+        ),
       _DetailField(label: '文件大小', child: _buildFileSize(data)),
-      _DetailField(label: '路径', value: audio.path, allowWrap: true),
+      _DetailField(label: '路径', value: audio.filePath, allowWrap: true),
       _DetailField(label: '修改时间', value: _formatTimestamp(audio.modified)),
       _DetailField(label: '创建时间', value: _formatTimestamp(audio.created)),
     ];
@@ -1042,7 +1057,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
       return Text(_formatBytes(fileSize.toInt()));
     }
     return FutureBuilder<io.FileStat>(
-      future: io.File(audio.path).stat(),
+      future: io.File(audio.filePath).stat(),
       builder: (context, snapshot) {
         final size = snapshot.data?.size;
         return Text(size == null ? '-' : _formatBytes(size));
@@ -1421,7 +1436,7 @@ class _LyricsEditDialogState extends State<_LyricsEditDialog> {
   Future<void> _loadEmbeddedLyric() async {
     try {
       final lyric = await rust_tag_reader.getLyricFromPath(
-        path: widget.audio.path,
+        path: widget.audio.filePath,
       );
       if (!mounted) return;
       setState(() {
@@ -1439,6 +1454,10 @@ class _LyricsEditDialogState extends State<_LyricsEditDialog> {
 
   Future<void> _save() async {
     if (_isSaving) return;
+    if (widget.audio.isCueTrack) {
+      showTextOnSnackBar('CUE 轨暂不支持写入内嵌歌词');
+      return;
+    }
     setState(() => _isSaving = true);
     try {
       final timing = await audioTagWriteScheduler.submit(
@@ -1687,10 +1706,14 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
         return;
       }
       if (writeDirectly) {
+        if (widget.audio.isCueTrack) {
+          showTextOnSnackBar('CUE 轨暂不支持写入内嵌歌词');
+          return;
+        }
         final timing = await audioTagWriteScheduler.submit(
-          path: widget.audio.path,
+          path: widget.audio.filePath,
           write: () => rust_tag_reader.writeLyricToPath(
-            path: widget.audio.path,
+            path: widget.audio.filePath,
             lyric: text,
           ),
           onWritten: () => _refreshNowPlayingLyricIfCurrent(widget.audio.path),
