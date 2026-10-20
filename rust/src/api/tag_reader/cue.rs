@@ -501,6 +501,101 @@ fn syntax(line: usize, message: impl Into<String>) -> CueError {
     }
 }
 
+/// 由 CUE 展开的可播放段，起止时间以毫秒为单位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CueSegment {
+    pub(crate) file_index: usize,
+    pub(crate) track_number: u32,
+    pub(crate) title: Option<String>,
+    pub(crate) performer: Option<String>,
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
+}
+
+impl CueSegment {
+    /// 段时长；终点早于起点时饱和为 0。
+    pub(crate) fn duration_ms(&self) -> u64 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+}
+
+/// 轨道起点：优先 INDEX 01，其次 INDEX 00，两者都缺失时为 0。
+fn track_start_ms(track: &CueTrack) -> u64 {
+    track.index01_ms.or(track.index00_ms).unwrap_or(0)
+}
+
+/// 把 CUE 轨道展开为带起止时间的段，同时返回展开过程中的告警。
+///
+/// 段顺序与 `sheet.tracks` 一致，零长度段保留。终点无法确定时按起点收尾，
+/// 由上层决定是否过滤。
+pub(crate) fn expand_segments(
+    sheet: &CueSheet,
+    file_durations_ms: &[Option<u64>],
+) -> (Vec<CueSegment>, Vec<String>) {
+    let mut segments = Vec::with_capacity(sheet.tracks.len());
+    let mut warnings = Vec::new();
+
+    for (position, track) in sheet.tracks.iter().enumerate() {
+        let start_ms = track_start_ms(track);
+        let mut end_ms = start_ms;
+
+        match sheet.tracks.get(position.saturating_add(1)) {
+            Some(next) if next.file_index == track.file_index => {
+                let next_start_ms = track_start_ms(next);
+                if next_start_ms > start_ms {
+                    end_ms = next_start_ms;
+                } else {
+                    warnings.push(format!(
+                        "track {}: next track starts before current",
+                        track.number
+                    ));
+                }
+            }
+            _ => {
+                let file_duration_ms = file_durations_ms
+                    .get(track.file_index)
+                    .copied()
+                    .flatten();
+                match file_duration_ms {
+                    Some(duration_ms) if duration_ms > start_ms => end_ms = duration_ms,
+                    _ => warnings.push(format!("track {}: unknown end position", track.number)),
+                }
+            }
+        }
+
+        segments.push(CueSegment {
+            file_index: track.file_index,
+            track_number: track.number,
+            title: track.title.clone(),
+            performer: track.performer.clone(),
+            start_ms,
+            end_ms: end_ms.max(start_ms),
+        });
+    }
+
+    (segments, warnings)
+}
+
+/// 归一化容器路径：反斜杠转斜杠、去掉尾部斜杠、转小写。
+fn normalize_container_path(path: &str) -> String {
+    let unified = path.replace('\\', "/");
+    unified.trim_end_matches('/').to_lowercase()
+}
+
+/// 生成段在容器内的稳定标识，例如 `cue:music/album#01`。
+pub(crate) fn segment_track_uid(container_path: &str, track_number: u32) -> String {
+    format!(
+        "cue:{}#{:02}",
+        normalize_container_path(container_path),
+        track_number
+    )
+}
+
+/// 生成段作为曲库条目的合成路径，保留传入路径的原始形态。
+pub(crate) fn segment_path(source_path: &str, track_number: u32) -> String {
+    format!("{source_path}::track={track_number:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +791,158 @@ mod tests {
         );
         assert_eq!(sheet.tracks[0].pregap_ms, Some(2_000));
         assert_eq!(sheet.tracks[0].postgap_ms, Some(1_400));
+    }
+
+    #[test]
+    fn expands_two_tracks_using_next_start_and_file_duration() {
+        let text = "PERFORMER \"album artist\"\nFILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nTITLE \"one\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"two\"\nINDEX 01 03:20:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(240_000)]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].file_index, 0);
+        assert_eq!(segments[0].track_number, 1);
+        assert_eq!(segments[0].title.as_deref(), Some("one"));
+        // 专辑级 PERFORMER 不回退到轨道段。
+        assert!(segments[0].performer.is_none());
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments[0].end_ms, 200_000);
+        assert_eq!(segments[0].duration_ms(), 200_000);
+        assert_eq!(segments[1].track_number, 2);
+        assert_eq!(segments[1].title.as_deref(), Some("two"));
+        assert_eq!(segments[1].start_ms, 200_000);
+        assert_eq!(segments[1].end_ms, 240_000);
+        assert_eq!(segments[1].duration_ms(), 40_000);
+    }
+
+    #[test]
+    fn last_track_without_file_duration_is_zero_length() {
+        let text = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 02:00:00\n";
+        let sheet = parse_ok(text);
+        let empty: &[Option<u64>] = &[];
+        let missing: &[Option<u64>] = &[None];
+        for durations in [empty, missing] {
+            let (segments, warnings) = expand_segments(&sheet, durations);
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0].start_ms, 120_000);
+            assert_eq!(segments[0].end_ms, 120_000);
+            assert_eq!(segments[0].duration_ms(), 0);
+            assert_eq!(warnings, vec!["track 1: unknown end position"]);
+        }
+    }
+
+    #[test]
+    fn falls_back_to_index00_when_index01_missing() {
+        let text = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 00 00:00:30\nTRACK 02 AUDIO\nINDEX 00 01:00:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(90_000)]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].start_ms, 400);
+        assert_eq!(segments[0].end_ms, 60_000);
+        assert_eq!(segments[1].start_ms, 60_000);
+        assert_eq!(segments[1].end_ms, 90_000);
+    }
+
+    #[test]
+    fn expands_tracks_per_file_with_own_duration() {
+        let text = "FILE \"disc1.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\nFILE \"disc2.flac\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 02:00:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(120_000), Some(180_000)]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(segments.len(), 4);
+        let file_indexes: Vec<usize> = segments.iter().map(|segment| segment.file_index).collect();
+        assert_eq!(file_indexes, vec![0, 0, 1, 1]);
+        let tracks: Vec<u32> = segments.iter().map(|segment| segment.track_number).collect();
+        assert_eq!(tracks, vec![1, 2, 3, 4]);
+        let ranges: Vec<(u64, u64)> = segments
+            .iter()
+            .map(|segment| (segment.start_ms, segment.end_ms))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (0, 60_000),
+                (60_000, 120_000),
+                (0, 120_000),
+                (120_000, 180_000)
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_zero_length_segment_when_next_track_starts_earlier() {
+        let text = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:01:00\nTRACK 02 AUDIO\nINDEX 01 00:00:00\nTRACK 03 AUDIO\nINDEX 01 00:02:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(300_000)]);
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].start_ms, 1_000);
+        assert_eq!(segments[0].end_ms, 1_000);
+        assert_eq!(segments[1].start_ms, 0);
+        assert_eq!(segments[1].end_ms, 2_000);
+        assert_eq!(segments[2].start_ms, 2_000);
+        assert_eq!(segments[2].end_ms, 300_000);
+        assert_eq!(warnings, vec!["track 1: next track starts before current"]);
+    }
+
+    #[test]
+    fn segment_duration_uses_saturating_subtraction() {
+        let backwards = CueSegment {
+            file_index: 0,
+            track_number: 1,
+            title: None,
+            performer: None,
+            start_ms: 2_000,
+            end_ms: 500,
+        };
+        assert_eq!(backwards.duration_ms(), 0);
+
+        let forward = CueSegment {
+            file_index: 0,
+            track_number: 1,
+            title: None,
+            performer: None,
+            start_ms: 500,
+            end_ms: 2_000,
+        };
+        assert_eq!(forward.duration_ms(), 1_500);
+    }
+
+    #[test]
+    fn builds_segment_identity_and_path() {
+        assert_eq!(segment_track_uid("Music\\Album\\", 1), "cue:music/album#01");
+        assert_eq!(
+            segment_track_uid("C:\\Music\\Album", 12),
+            "cue:c:/music/album#12"
+        );
+        assert_eq!(
+            segment_track_uid("Music/Album/", 123),
+            "cue:music/album#123"
+        );
+        assert_eq!(
+            segment_path("Music\\Album\\Track.flac", 1),
+            "Music\\Album\\Track.flac::track=01"
+        );
+        assert_eq!(
+            segment_path("D:\\Audio\\Track.FLAC", 100),
+            "D:\\Audio\\Track.FLAC::track=100"
+        );
+    }
+
+    #[test]
+    fn file_duration_shorter_than_start_is_zero_length() {
+        let text = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:01:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(500)]);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_ms, 1_000);
+        assert_eq!(segments[0].end_ms, 1_000);
+        assert_eq!(segments[0].duration_ms(), 0);
+        assert_eq!(warnings, vec!["track 1: unknown end position"]);
     }
 }
