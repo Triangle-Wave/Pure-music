@@ -42,6 +42,7 @@ use format_detection::{
 
 mod format_readers;
 mod cue;
+use cue::{expand_segments, is_cue_path, parse_cue_file, segment_path_with_range};
 use format_readers::{
     read_by_asf, read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia,
 };
@@ -1036,21 +1037,39 @@ impl AudioFolder {
     /// 扫描路径为 path 的文件夹
     fn read_from_folder(path: impl AsRef<Path>) -> Result<AudioFolder, io::Error> {
         let path = path.as_ref();
-        let mut paths = Vec::new();
+        let mut audio_paths: Vec<PathBuf> = Vec::new();
+        let mut cue_paths: Vec<PathBuf> = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if entry.file_type()?.is_file() && is_supported_audio_path(&entry.path()) {
-                paths.push(entry.path());
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if is_cue_path(&entry_path) {
+                cue_paths.push(entry_path);
+            } else if is_supported_audio_path(&entry_path) {
+                audio_paths.push(entry_path);
             }
         }
-        let read_results = read_audio_paths_parallel(&paths, |_| {});
-        if let Some(failed_index) = read_results.iter().position(Option::is_none) {
+
+        let (cue_audios, referenced) = read_cue_folder(&cue_paths, &audio_paths);
+        let unreferenced_paths: Vec<PathBuf> = audio_paths
+            .into_iter()
+            .filter(|audio_path| !referenced.contains(&path_key(audio_path)))
+            .collect();
+        let read_results = read_audio_paths_parallel(&unreferenced_paths, |_| {});
+        if let Some(failed_path) = read_results
+            .iter()
+            .position(Option::is_none)
+            .and_then(|index| unreferenced_paths.get(index))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("failed to read audio: {}", paths[failed_index].display()),
+                format!("failed to read audio: {}", failed_path.display()),
             ));
         }
-        let audios: Vec<Audio> = read_results.into_iter().flatten().collect();
+        let mut audios: Vec<Audio> = read_results.into_iter().flatten().collect();
+        audios.extend(cue_audios);
         let latest = audios.iter().map(|audio| audio.created).max().unwrap_or(0);
 
         if !audios.is_empty() {
@@ -1662,12 +1681,185 @@ fn detect_and_encode(img: &DynamicImage, raw_bytes: &[u8]) -> Result<(Vec<u8>, M
     }
 }
 
+/// 归一化路径用于比较：反斜杠转斜杠、去掉尾部斜杠、转小写。
+fn path_key(path: &Path) -> String {
+    let unified = path.to_string_lossy().replace('\\', "/");
+    unified.trim_end_matches('/').to_lowercase()
+}
+
+fn system_time_secs(time: io::Result<std::time::SystemTime>) -> u64 {
+    time.unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+}
+
+/// CUE 展开所需的源文件属性，标签不可读时保留文件元数据。
+struct CueSourceInfo {
+    path: PathBuf,
+    bitrate: Option<u32>,
+    sample_rate: Option<u32>,
+    modified: u64,
+    created: u64,
+    size: u64,
+}
+
+/// 把 CUE 展开成虚拟曲目。
+///
+/// 返回展开出的曲目与 CUE 引用的源文件归一化路径（这些源文件不再单独入库）。
+/// 单个 CUE 损坏或源文件缺失只跳过对应内容，不中断整批扫描。
+fn read_cue_folder(
+    cue_paths: &[PathBuf],
+    _audio_paths: &[PathBuf],
+) -> (Vec<Audio>, HashSet<String>) {
+    let mut audios: Vec<Audio> = Vec::new();
+    let mut referenced: HashSet<String> = HashSet::new();
+
+    for cue_path in cue_paths {
+        let sheet = match parse_cue_file(cue_path) {
+            Ok(sheet) => sheet,
+            Err(error) => {
+                log::warn!(
+                    target: "tag",
+                    "skip cue {}: {}",
+                    cue_path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        let Some(cue_dir) = cue_path.parent() else {
+            log::warn!(
+                target: "tag",
+                "skip cue without parent folder: {}",
+                cue_path.display()
+            );
+            continue;
+        };
+        let album_fallback = cue_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let album = sheet.title.clone().unwrap_or(album_fallback);
+
+        let mut sources: Vec<Option<CueSourceInfo>> = Vec::with_capacity(sheet.files.len());
+        let mut file_durations_ms: Vec<Option<u64>> = Vec::with_capacity(sheet.files.len());
+        for file in &sheet.files {
+            let source_path = cue_dir.join(file.name.as_str());
+            let metadata = match fs::metadata(&source_path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => {
+                    log::warn!(
+                        target: "tag",
+                        "cue source is not a file: {}",
+                        source_path.display()
+                    );
+                    sources.push(None);
+                    file_durations_ms.push(None);
+                    continue;
+                }
+                Err(error) => {
+                    log::warn!(
+                        target: "tag",
+                        "cue source missing: {} ({}): {}",
+                        source_path.display(),
+                        cue_path.display(),
+                        error
+                    );
+                    sources.push(None);
+                    file_durations_ms.push(None);
+                    continue;
+                }
+            };
+            referenced.insert(path_key(&source_path));
+
+            let (duration_ms, bitrate, sample_rate) = match Audio::read_from_path(&source_path) {
+                Some(audio) => (
+                    if audio.duration == 0 {
+                        None
+                    } else {
+                        Some(audio.duration.saturating_mul(1000))
+                    },
+                    audio.bitrate,
+                    audio.sample_rate,
+                ),
+                None => {
+                    log::warn!(
+                        target: "tag",
+                        "cue source metadata fallback: {}",
+                        source_path.display()
+                    );
+                    (None, None, None)
+                }
+            };
+            file_durations_ms.push(duration_ms);
+            sources.push(Some(CueSourceInfo {
+                path: source_path,
+                bitrate,
+                sample_rate,
+                modified: system_time_secs(metadata.modified()),
+                created: system_time_secs(metadata.created()),
+                size: metadata.len(),
+            }));
+        }
+
+        let (segments, warnings) = expand_segments(&sheet, &file_durations_ms);
+        for warning in warnings {
+            log::warn!(target: "tag", "cue {}: {}", cue_path.display(), warning);
+        }
+
+        for segment in segments {
+            let Some(Some(source)) = sources.get(segment.file_index) else {
+                continue;
+            };
+            let title = segment
+                .title
+                .clone()
+                .or_else(|| sheet.title.clone())
+                .unwrap_or_else(|| format!("Track {:02}", segment.track_number));
+            let artist = segment
+                .performer
+                .clone()
+                .or_else(|| sheet.performer.clone())
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let source_path = source.path.to_string_lossy().to_string();
+            audios.push(Audio {
+                title,
+                artist,
+                album: album.clone(),
+                album_artist: sheet.performer.clone(),
+                track: Some(segment.track_number),
+                disc: None,
+                duration: segment.duration_ms().saturating_add(500) / 1000,
+                bitrate: source.bitrate,
+                sample_rate: source.sample_rate,
+                path: segment_path_with_range(
+                    &source_path,
+                    segment.track_number,
+                    segment.start_ms,
+                    segment.end_ms,
+                ),
+                modified: source.modified,
+                created: source.created,
+                by: Some("cue".to_string()),
+                size: source.size,
+                valid: true,
+                media_id: None,
+            });
+        }
+    }
+
+    (audios, referenced)
+}
+
 /// 递归收集所有子文件夹中的音频文件路径，按父目录分组。
 /// 一次遍历同时完成「统计总数」和「收集路径」，避免二次目录遍历。
 fn collect_audio_files_by_folder(
     folder: impl AsRef<Path>,
     count: &mut u64,
     by_folder: &mut HashMap<String, Vec<PathBuf>>,
+    cue_by_folder: &mut HashMap<String, Vec<PathBuf>>,
     seen: &mut HashSet<String>,
 ) -> io::Result<()> {
     let folder_str = folder.as_ref().to_string_lossy().to_string();
@@ -1678,13 +1870,28 @@ fn collect_audio_files_by_folder(
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_audio_files_by_folder(entry.path(), count, by_folder, seen)?;
-        } else if file_type.is_file() && is_supported_audio_path(&entry.path()) {
-            *count += 1;
-            by_folder
-                .entry(folder_str.clone())
-                .or_default()
-                .push(entry.path());
+            collect_audio_files_by_folder(
+                entry.path(),
+                count,
+                by_folder,
+                cue_by_folder,
+                seen,
+            )?;
+        } else if file_type.is_file() {
+            let path = entry.path();
+            if is_cue_path(&path) {
+                *count += 1;
+                cue_by_folder
+                    .entry(folder_str.clone())
+                    .or_default()
+                    .push(path);
+            } else if is_supported_audio_path(&path) {
+                *count += 1;
+                by_folder
+                    .entry(folder_str.clone())
+                    .or_default()
+                    .push(path);
+            }
         }
     }
     Ok(())
@@ -1704,11 +1911,21 @@ pub fn build_index_from_folders_recursively(
     let mut seen: HashSet<String> = HashSet::new();
     let mut total: u64 = 0;
     let mut by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut cue_by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for item in &folders {
-        collect_audio_files_by_folder(Path::new(item), &mut total, &mut by_folder, &mut seen)?;
+        collect_audio_files_by_folder(
+            Path::new(item),
+            &mut total,
+            &mut by_folder,
+            &mut cue_by_folder,
+            &mut seen,
+        )?;
     }
 
-    for (dir_path, file_paths) in &by_folder {
+    // 先展开全部 CUE：得到虚拟曲目和它们引用的源文件，源文件在后续音频扫描中跳过。
+    let mut cue_audios_by_folder: HashMap<String, Vec<Audio>> = HashMap::new();
+    let mut referenced: HashSet<String> = HashSet::new();
+    for (dir_path, cue_paths) in &cue_by_folder {
         let _ = sink.add(IndexActionState {
             progress: if total == 0 {
                 0.0
@@ -1720,35 +1937,76 @@ pub fn build_index_from_folders_recursively(
             unreadable_total,
         });
 
-        let scanned_before = scanned;
-        let read_results = read_audio_paths_parallel(file_paths, |completed| {
-            let completed = scanned_before + completed as u64;
-            if should_emit_index_progress(completed as usize, total as usize) {
-                let _ = sink.add(IndexActionState {
-                    progress: if total == 0 {
-                        1.0
-                    } else {
-                        completed as f64 / total as f64
-                    },
-                    message: String::new(),
-                    phase: IndexPhase::Scanning,
-                    unreadable_total,
-                });
-            }
-        });
-        let failed = read_results.iter().filter(|audio| audio.is_none()).count();
-        if failed > 0 {
-            unreadable_total += failed as u64;
-            log::warn!(
-                target: "tag",
-                "skipped {} unreadable files while indexing {}",
-                failed,
-                dir_path
-            );
+        let (audios, cue_referenced) = read_cue_folder(cue_paths, &[]);
+        referenced.extend(cue_referenced);
+        scanned += cue_paths.len() as u64;
+        if !audios.is_empty() {
+            cue_audios_by_folder.insert(dir_path.clone(), audios);
         }
-        let audios: Vec<Audio> = read_results.into_iter().flatten().collect();
-        scanned += file_paths.len() as u64;
-        let latest = audios.iter().map(|audio| audio.created).max().unwrap_or(0);
+    }
+
+    let mut dir_paths: Vec<String> = by_folder
+        .keys()
+        .chain(cue_by_folder.keys())
+        .cloned()
+        .collect();
+    dir_paths.sort();
+    dir_paths.dedup();
+
+    for dir_path in &dir_paths {
+        let mut audios: Vec<Audio> = cue_audios_by_folder.remove(dir_path).unwrap_or_default();
+        let audio_count = by_folder.get(dir_path).map_or(0, |paths| paths.len());
+        let file_paths: Vec<PathBuf> = match by_folder.get(dir_path) {
+            Some(paths) => paths
+                .iter()
+                .filter(|path| !referenced.contains(&path_key(path.as_path())))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let skipped = audio_count.saturating_sub(file_paths.len());
+
+        if !file_paths.is_empty() {
+            let _ = sink.add(IndexActionState {
+                progress: if total == 0 {
+                    0.0
+                } else {
+                    scanned as f64 / total as f64
+                },
+                message: String::from("正在扫描 ") + dir_path,
+                phase: IndexPhase::Scanning,
+                unreadable_total,
+            });
+
+            let scanned_before = scanned + skipped as u64;
+            let read_results = read_audio_paths_parallel(&file_paths, |completed| {
+                let completed = scanned_before + completed as u64;
+                if should_emit_index_progress(completed as usize, total as usize) {
+                    let _ = sink.add(IndexActionState {
+                        progress: if total == 0 {
+                            1.0
+                        } else {
+                            completed as f64 / total as f64
+                        },
+                        message: String::new(),
+                        phase: IndexPhase::Scanning,
+                        unreadable_total,
+                    });
+                }
+            });
+            let failed = read_results.iter().filter(|audio| audio.is_none()).count();
+            if failed > 0 {
+                unreadable_total += failed as u64;
+                log::warn!(
+                    target: "tag",
+                    "skipped {} unreadable files while indexing {}",
+                    failed,
+                    dir_path
+                );
+            }
+            audios.extend(read_results.into_iter().flatten());
+        }
+        scanned += audio_count as u64;
 
         if !audios.is_empty() {
             let modified = fs::metadata(dir_path)?
@@ -1756,6 +2014,7 @@ pub fn build_index_from_folders_recursively(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs();
+            let latest = audios.iter().map(|audio| audio.created).max().unwrap_or(0);
             audio_folders.push(AudioFolder {
                 path: dir_path.clone(),
                 modified,
@@ -2077,16 +2336,21 @@ fn probe_indexed_path<T>(result: io::Result<T>) -> io::Result<Option<T>> {
 
 #[cfg(test)]
 mod tag_reader_tests {
-    use std::iter;
+    use std::{
+        iter,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use id3::TagLike;
     use lofty::file::FileType;
     use lofty::prelude::ItemKey;
 
+    use super::cue::is_cue_path;
     use super::{
         detect_and_encode, drop_invalid_duplicates_by_media_id, indexed_audio_update_from_parts,
-        is_lyric_item_key, join_deduped, parse_midi_metadata, probe_indexed_path,
-        read_audio_extra_metadata, read_by_asf, should_emit_index_progress,
+        is_lyric_item_key, join_deduped, parse_midi_metadata, path_key, probe_indexed_path,
+        read_audio_extra_metadata, read_by_asf, read_cue_folder, should_emit_index_progress,
         should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
         IndexedAudioUpdate, SUPPORTED_FORMATS,
     };
@@ -2475,6 +2739,118 @@ mod tag_reader_tests {
         assert_eq!(drop_invalid_duplicates_by_media_id(&mut folders), 1);
         assert_eq!(folders[0]["audios"].as_array().unwrap().len(), 1);
         assert_eq!(folders[0]["audios"][0]["path"], "C:/Music/new.mp3");
+    }
+
+    struct TempCueDir(PathBuf);
+
+    impl Drop for TempCueDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_cue_dir() -> TempCueDir {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        TempCueDir(std::env::temp_dir().join(format!(
+            "pure_music_cue_scan_{}_{}",
+            std::process::id(),
+            nanos
+        )))
+    }
+
+    fn write_test_file(path: &Path, bytes: &[u8]) {
+        if let Err(error) = std::fs::write(path, bytes) {
+            panic!("write {} failed: {error}", path.display());
+        }
+    }
+
+    /// 44 字节 RIFF/WAVE 头，data 块为空。
+    fn minimal_wav_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(44);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&36_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&44_100_u32.to_le_bytes());
+        bytes.extend_from_slice(&88_200_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn normalizes_path_keys_used_for_reference_dedup() {
+        assert_eq!(path_key(Path::new("D:\\Music\\Album\\")), "d:/music/album");
+        assert_eq!(path_key(Path::new("D:/Music/Album")), "d:/music/album");
+        assert_eq!(path_key(Path::new("Music\\Album")), "music/album");
+        assert_eq!(path_key(Path::new("/music/album///")), "/music/album");
+    }
+
+    #[test]
+    fn detects_cue_files_case_insensitively() {
+        assert!(is_cue_path(Path::new("album.cue")));
+        assert!(is_cue_path(Path::new("ALBUM.CUE")));
+        assert!(is_cue_path(Path::new("D:\\Music\\Album.CuE")));
+        assert!(!is_cue_path(Path::new("cue")));
+        assert!(!is_cue_path(Path::new("album.flac")));
+        assert!(!is_cue_path(Path::new("album.cue.bak")));
+    }
+
+    #[test]
+    fn expands_cue_folder_into_virtual_tracks() {
+        let temp = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        let wav_path = temp.0.join("disc.wav");
+        let cue_path = temp.0.join("album.cue");
+        write_test_file(&wav_path, &minimal_wav_bytes());
+        write_test_file(
+            &cue_path,
+            b"PERFORMER \"Album Artist\"\nTITLE \"Test Album\"\nFILE \"disc.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:01:00\n",
+        );
+
+        let (audios, referenced) = read_cue_folder(std::slice::from_ref(&cue_path), &[]);
+
+        assert_eq!(audios.len(), 2);
+        assert_eq!(referenced.len(), 1);
+        assert!(referenced.contains(&path_key(&wav_path)));
+
+        let first = match audios.first() {
+            Some(audio) => audio,
+            None => panic!("first virtual track missing"),
+        };
+        assert_eq!(first.title, "First");
+        assert_eq!(first.artist, "Album Artist");
+        assert_eq!(first.album, "Test Album");
+        assert_eq!(first.album_artist.as_deref(), Some("Album Artist"));
+        assert_eq!(first.track, Some(1));
+        assert_eq!(first.duration, 1);
+        assert_eq!(first.size, 44);
+        assert_eq!(first.by.as_deref(), Some("cue"));
+        assert!(first.valid);
+        assert!(first.media_id.is_none());
+        assert!(first.path.contains("::track=01"));
+        assert!(first.path.contains("::start=0"));
+        assert!(first.path.contains("::end=1000"));
+
+        let second = match audios.get(1) {
+            Some(audio) => audio,
+            None => panic!("second virtual track missing"),
+        };
+        assert_eq!(second.title, "Second");
+        assert_eq!(second.track, Some(2));
+        assert!(second.path.contains("::track=02"));
+        assert!(second.path.contains("::start=1000"));
+        assert!(second.path.contains("::end="));
     }
 }
 

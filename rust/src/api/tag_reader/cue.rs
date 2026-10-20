@@ -142,6 +142,12 @@ impl From<std::io::Error> for CueError {
     }
 }
 
+/// 扩展名是否为 cue，大小写不敏感。
+pub(crate) fn is_cue_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
+}
+
 pub(crate) fn parse_cue_file(path: &Path) -> Result<CueSheet, CueError> {
     let bytes = std::fs::read(path)?;
     parse_cue_bytes(&bytes)
