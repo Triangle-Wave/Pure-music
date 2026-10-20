@@ -64,14 +64,6 @@ jobs:
       - name: Pub get
         run: flutter pub get
 
-      # 本地没有 Flutter/Rust 时无法生成 FRB 绑定；构建前在 CI 里生成，
-      # 保证 Rust 结构体与 Dart 绑定一致。
-      - name: Install flutter_rust_bridge_codegen
-        run: cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
-
-      - name: Generate FRB bindings
-        run: flutter_rust_bridge_codegen generate
-
       - name: Build release
         run: flutter build windows --release
 
