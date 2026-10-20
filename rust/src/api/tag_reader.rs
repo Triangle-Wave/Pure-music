@@ -42,7 +42,9 @@ use format_detection::{
 
 mod format_readers;
 mod cue;
-use cue::{expand_segments, is_cue_path, parse_cue_file, segment_path_with_range};
+use cue::{
+    expand_segments, is_cue_path, parse_cue_file, parse_segment_path, segment_path_with_range,
+};
 use format_readers::{
     read_by_asf, read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia,
 };
@@ -2334,6 +2336,29 @@ fn probe_indexed_path<T>(result: io::Result<T>) -> io::Result<Option<T>> {
     }
 }
 
+/// 目录内是否直接包含 CUE 文件；读取失败按不包含处理。
+fn folder_contains_cue(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_file())
+            && is_cue_path(&entry.path())
+    })
+}
+
+/// 条目中是否存在 CUE 虚拟轨；其 path 为可解析的合成路径。
+fn has_virtual_tracks(audios: &[serde_json::Value]) -> bool {
+    audios.iter().any(|audio| {
+        audio
+            .get("path")
+            .and_then(|value| value.as_str())
+            .is_some_and(|path| parse_segment_path(path).is_some())
+    })
+}
+
 #[cfg(test)]
 mod tag_reader_tests {
     use std::{
@@ -2348,11 +2373,12 @@ mod tag_reader_tests {
 
     use super::cue::is_cue_path;
     use super::{
-        detect_and_encode, drop_invalid_duplicates_by_media_id, indexed_audio_update_from_parts,
-        is_lyric_item_key, join_deduped, parse_midi_metadata, path_key, probe_indexed_path,
-        read_audio_extra_metadata, read_by_asf, read_cue_folder, should_emit_index_progress,
-        should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
-        IndexedAudioUpdate, SUPPORTED_FORMATS,
+        detect_and_encode, drop_invalid_duplicates_by_media_id, folder_contains_cue,
+        has_virtual_tracks, indexed_audio_update_from_parts, is_lyric_item_key, join_deduped,
+        parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata, read_by_asf,
+        read_cue_folder, should_emit_index_progress, should_scan_indexed_audio_files,
+        should_show_recording_date, tag_reader_worker_count_for, IndexedAudioUpdate,
+        SUPPORTED_FORMATS,
     };
 
     fn asf_object(guid: [u8; 16], data: Vec<u8>) -> Vec<u8> {
@@ -2852,6 +2878,44 @@ mod tag_reader_tests {
         assert!(second.path.contains("::start=1000"));
         assert!(second.path.contains("::end="));
     }
+
+    #[test]
+    fn detects_virtual_tracks_from_synthetic_paths() {
+        assert!(!has_virtual_tracks(&[serde_json::json!({
+            "path": "C:/Music/t.mp3"
+        })]));
+        assert!(has_virtual_tracks(&[serde_json::json!({
+            "path": "D:\\Music\\album.flac::track=01::start=0::end=200000"
+        })]));
+        assert!(!has_virtual_tracks(&[
+            serde_json::json!({ "path": "D:\\Music\\album.flac::track=01::start=0" }),
+            serde_json::json!({ "path": 42 }),
+            serde_json::json!({ "title": "missing path" }),
+        ]));
+        assert!(!has_virtual_tracks(&[]));
+    }
+
+    #[test]
+    fn detects_cue_files_only_in_the_scanned_folder() {
+        let temp = temp_cue_dir();
+        assert!(!folder_contains_cue(&temp.0));
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        write_test_file(&temp.0.join("disc.flac"), b"audio");
+        assert!(!folder_contains_cue(&temp.0));
+
+        // 子目录里的 CUE 不属于当前目录的扫描范围。
+        let sub_dir = temp.0.join("sub");
+        if let Err(error) = std::fs::create_dir_all(&sub_dir) {
+            panic!("create temp sub dir failed: {error}");
+        }
+        write_test_file(&sub_dir.join("album.cue"), b"");
+        assert!(!folder_contains_cue(&temp.0));
+
+        write_test_file(&temp.0.join("album.CUE"), b"");
+        assert!(folder_contains_cue(&temp.0));
+    }
 }
 
 fn index_folder_snapshots_unchanged(folders: &[library_db::IndexFolderSnapshot]) -> bool {
@@ -2999,6 +3063,62 @@ pub fn update_index(
         if new_folder_modified != old_folder_modified {
             folder_item["modified"] = serde_json::json!(new_folder_modified);
             index_changed = true;
+        }
+
+        // CUE 虚拟轨的 path 是合成路径（容器路径::track=..::start=..::end=..），
+        // 逐条 fs::metadata 探活必然失败；目录含 CUE 或已有虚拟轨时整体重建。
+        let needs_rebuild = folder_contains_cue(Path::new(&folder_path))
+            || folder_item["audios"]
+                .as_array()
+                .is_some_and(|audios| has_virtual_tracks(audios));
+        if needs_rebuild {
+            match AudioFolder::read_from_folder(&folder_path) {
+                Ok(rebuilt) => {
+                    let rebuilt_audios: Vec<serde_json::Value> = rebuilt
+                        .audios
+                        .iter()
+                        .map(|audio| audio.to_json_value())
+                        .collect();
+                    let rebuilt_count = rebuilt_audios.len() as u64;
+                    folder_item["audios"] = serde_json::Value::Array(rebuilt_audios);
+                    folder_item["modified"] = serde_json::json!(rebuilt.modified);
+                    folder_item["latest"] = serde_json::json!(rebuilt.latest);
+                    checked += rebuilt_count;
+                    index_changed = true;
+                    let _ = sink.add(IndexActionState {
+                        progress: if total == 0 {
+                            1.0
+                        } else {
+                            checked as f64 / total as f64
+                        },
+                        message: String::new(),
+                        phase: IndexPhase::Scanning,
+                        unreadable_total: 0,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // 目录为空或已没有音乐：保留条目但全部标为无效。
+                    let mut invalidated_here = 0_u64;
+                    if let Some(audios) = folder_item
+                        .get_mut("audios")
+                        .and_then(|value| value.as_array_mut())
+                    {
+                        for audio in audios.iter_mut() {
+                            if audio_json_is_valid(audio) {
+                                set_audio_json_valid(audio, false);
+                                invalidated_here += 1;
+                            }
+                        }
+                    }
+                    invalidated += invalidated_here;
+                    checked += folder_audio_count;
+                    if invalidated_here > 0 {
+                        index_changed = true;
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+            continue;
         }
 
         let audios = match folder_item["audios"].as_array_mut() {
