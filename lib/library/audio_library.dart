@@ -14,6 +14,7 @@ import 'package:pure_music/core/workload_policy.dart';
 import 'package:pure_music/core/page_sort.dart';
 import 'package:pure_music/native/rust/api/library_db.dart' as library_db;
 import 'package:pure_music/library/audio_sort.dart';
+import 'package:pure_music/library/cue_segment_path.dart';
 import 'package:pure_music/library/library_page_order_cache.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/search_action_state.dart';
@@ -2525,6 +2526,8 @@ class Audio {
   int _libraryIndex = -1;
   int _audiosPageIndex = -1;
   String? _pathLookupKeyCache;
+  String? _cueSegmentCachePath;
+  CueSegmentPath? _cueSegmentCache;
   String title;
 
   /// 从音乐标签中读取的艺术家字符串，可能包含多个艺术家，以“、”，“/”等分隔。
@@ -2678,6 +2681,24 @@ class Audio {
   String get _pathLookupKey =>
       _pathLookupKeyCache ??= _audioPathLookupKey(path);
 
+  /// CUE 虚拟轨的段信息；普通曲目返回 null。
+  CueSegmentPath? get cueSegment {
+    if (_cueSegmentCachePath == path) return _cueSegmentCache;
+    final parsed = parseCueSegmentPath(path);
+    _cueSegmentCachePath = path;
+    _cueSegmentCache = parsed;
+    return parsed;
+  }
+
+  bool get isCueTrack => cueSegment != null;
+
+  /// 实际用于读取文件、封面、歌词的路径。
+  String get filePath => cueSegment?.sourcePath ?? path;
+
+  int get segmentStartMs => cueSegment?.startMs ?? 0;
+
+  int get segmentEndMs => cueSegment?.endMs ?? 0;
+
   void _primeSearchCache(_AudioLoadPool pool) {
     _searchNorm = pool.text(normalizedSearchQuery(title).toLowerCase());
     _searchPinyin = pool.text(title.getPinyinInitials().toLowerCase());
@@ -2705,6 +2726,8 @@ class Audio {
       _folderCoverResolved = false;
       _folderCoverResolution = null;
       _pathLookupKeyCache = other._pathLookupKeyCache;
+      _cueSegmentCachePath = null;
+      _cueSegmentCache = null;
     }
     final titleChanged = title != other.title;
     title = other.title;
@@ -2805,7 +2828,7 @@ class Audio {
     required int width,
     required int height,
   }) {
-    final directory = File(path).parent.path;
+    final directory = File(filePath).parent.path;
     if (!_folderCoverResolved || _folderCoverDirectory != directory) {
       return null;
     }
@@ -2819,7 +2842,7 @@ class Audio {
   }
 
   Future<String?> resolveFolderCoverPath() async {
-    final directory = File(path).parent.path;
+    final directory = File(filePath).parent.path;
     if (_folderCoverResolved && _folderCoverDirectory == directory) {
       return _folderCoverPath;
     }
@@ -2880,7 +2903,7 @@ class Audio {
     final generation = _coverCacheGeneration;
     try {
       final data = await CoverImageCache.instance.get(
-        path: path,
+        path: filePath,
         modified: modified,
         width: 48,
         height: 48,
@@ -2915,7 +2938,7 @@ class Audio {
     final generation = _coverCacheGeneration;
     try {
       final bytes = await CoverImageCache.instance.loadBytes(
-        path: path,
+        path: filePath,
         modified: modified,
         width: 48,
         height: 48,
@@ -2979,7 +3002,7 @@ class Audio {
     _smallCoverBytes = null;
     AudioLibrary.instance._smallCoverOrder.remove(path);
     AudioLibrary.instance._coverCachePaths.remove(path);
-    CoverImageCache.instance.evictPath(path);
+    CoverImageCache.instance.evictPath(filePath);
 
     if (coverImage != null) unawaited(coverImage.evict());
     if (mediumCoverImage != null) unawaited(mediumCoverImage.evict());
@@ -3004,7 +3027,7 @@ class Audio {
     final generation = _coverCacheGeneration;
     try {
       final data = await CoverImageCache.instance.get(
-        path: path,
+        path: filePath,
         modified: modified,
         width: 200,
         height: 200,
@@ -3030,7 +3053,7 @@ class Audio {
     final generation = _coverCacheGeneration;
     try {
       final data = await CoverImageCache.instance.get(
-        path: path,
+        path: filePath,
         modified: modified,
         width: 420,
         height: 420,

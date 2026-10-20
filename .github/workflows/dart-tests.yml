@@ -1,0 +1,39 @@
+name: Dart tests
+
+on:
+  push:
+    paths:
+      - 'lib/**'
+      - 'test/**'
+      - '.github/workflows/dart-tests.yml'
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'test/**'
+      - '.github/workflows/dart-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Run cue path tests
+        run: flutter test test/library/cue_segment_path_test.dart
