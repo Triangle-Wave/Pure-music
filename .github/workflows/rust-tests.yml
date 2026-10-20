@@ -1,0 +1,45 @@
+name: Rust tests
+
+on:
+  push:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-tests.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rust/rust-toolchain.toml 指定 stable。该文件位于子目录，rustup 从仓库根目录
+      # 执行命令时不会读取它，因此在此显式选择 stable，并安装 rustfmt 供格式检查使用。
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'rust -> target'
+
+      # 生成文件与手工排版可能不符合 rustfmt 默认风格，格式检查只提示，不阻塞单测。
+      - name: Check formatting
+        continue-on-error: true
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: Run unit tests
+        run: cargo test --manifest-path rust/Cargo.toml --lib

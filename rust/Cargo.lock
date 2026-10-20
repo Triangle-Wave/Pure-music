@@ -1817,6 +1817,7 @@ dependencies = [
  "anyhow",
  "base64",
  "dsf-meta",
+ "encoding_rs",
  "flutter_rust_bridge",
  "hex",
  "id3",

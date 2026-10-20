@@ -41,6 +41,7 @@ use format_detection::{
 };
 
 mod format_readers;
+mod cue;
 use format_readers::{
     read_by_asf, read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia,
 };
