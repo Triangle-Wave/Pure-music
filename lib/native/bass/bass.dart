@@ -58,6 +58,9 @@ const int BASS_UNICODE = 2147483648;
 
 const int BASS_POS_BYTE = 0;
 
+/// 设置播放终点，参数为源流内的绝对位置。
+const int BASS_POS_END = 0x10;
+
 const int BASS_ACTIVE_STOPPED = 0;
 
 const int BASS_ACTIVE_PLAYING = 1;

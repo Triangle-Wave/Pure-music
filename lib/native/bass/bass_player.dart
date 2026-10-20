@@ -114,6 +114,10 @@ class BassPlayer {
   String? _fPath;
   int? _fstream;
   int? _mixerStream;
+  // CUE 虚拟轨的段范围（毫秒）。end 为 0 表示到文件尾，普通曲目两者均为 0。
+  int _segmentStartMs = 0;
+  int _segmentEndMs = 0;
+  double _segmentDurationSeconds = 0;
   bool _mixerUsesQueue = false;
   int? _queuedStream;
   bool _queuedStreamAttached = false;
@@ -392,6 +396,36 @@ class BassPlayer {
         'wasapi=$_wasapiOutputInfo';
   }
 
+  /// 规范化段范围：起点不早于 0，终点必须晚于起点，否则按到文件尾处理。
+  static ({int startMs, int endMs}) normalizePlaybackSegment(
+    int startMs,
+    int endMs,
+  ) {
+    final start = math.max(0, startMs);
+    return (startMs: start, endMs: endMs > start ? endMs : 0);
+  }
+
+  /// 段时长（秒）。终点为 0 表示到文件尾，此时返回 0。
+  static double segmentDurationSeconds({
+    required int startMs,
+    required int endMs,
+  }) {
+    final start = math.max(0, startMs);
+    return endMs > start ? (endMs - start) / 1000.0 : 0.0;
+  }
+
+  /// 段内相对位置转换为源流内的绝对位置，并夹在段范围内。
+  static double segmentAbsoluteSeconds({
+    required double position,
+    required int startMs,
+    required int endMs,
+  }) {
+    final startSeconds = math.max(0, startMs) / 1000.0;
+    final target = position + startSeconds;
+    if (endMs <= startMs) return target;
+    return target.clamp(startSeconds, endMs / 1000.0);
+  }
+
   /// audio's length in seconds
   double get length {
     _promoteDequeuedSource();
@@ -405,6 +439,10 @@ class BassPlayer {
     if (_fstream == null) {
       _cachedLengthSeconds = null;
       return 1.0;
+    }
+    if (_segmentDurationSeconds > 0) {
+      _cachedLengthSeconds = _segmentDurationSeconds;
+      return _segmentDurationSeconds;
     }
     final len = _bass.BASS_ChannelBytes2Seconds(
       _fstream!,
@@ -427,6 +465,11 @@ class BassPlayer {
         ? _bass.BASS_ChannelGetPosition(source, bass.BASS_POS_BYTE)
         : _bassMix!.channelGetPosition(source, bass.BASS_POS_BYTE);
     if (posBytes == -1) {
+      final segmentPlayback =
+          _segmentStartMs > 0 || _segmentDurationSeconds > 0;
+      final segmentFallback = _segmentDurationSeconds > 0
+          ? _segmentDurationSeconds
+          : (_cachedLengthSeconds ?? 0.0);
       final errCode = _bass.BASS_ErrorGetCode();
       if (errCode == bass.BASS_ERROR_HANDLE) {
         if (_mixerStream != null) {
@@ -435,6 +478,8 @@ class BassPlayer {
           freeFStream();
         }
       }
+      // 段尾源被移除后位置会读不到，返回段尾，避免进度条跳回开头。
+      if (segmentPlayback) return segmentFallback;
       return 0.0;
     }
 
@@ -450,10 +495,11 @@ class BassPlayer {
       }
     }
 
-    return _bass.BASS_ChannelBytes2Seconds(
-      _fstream!,
-      finalBytes,
-    ).clamp(0.0, length);
+    var seconds = _bass.BASS_ChannelBytes2Seconds(_fstream!, finalBytes);
+    if (_segmentStartMs > 0) {
+      seconds -= _segmentStartMs / 1000.0;
+    }
+    return seconds.clamp(0.0, length);
   }
 
   PlayerState get playerState {
@@ -1557,7 +1603,12 @@ class BassPlayer {
 
   void _restoreSharedSource(String audioPath, double position) {
     _fPath = audioPath;
-    _createSharedStream(audioPath, position);
+    _createSharedStream(
+      audioPath,
+      position,
+      startMs: _segmentStartMs,
+      endMs: _segmentEndMs,
+    );
   }
 
   /// load bass.dll from the exe's path\\dll\\BASS
@@ -1953,11 +2004,38 @@ class BassPlayer {
     return handle;
   }
 
-  int _createSharedPlaybackSource(String audioPath) {
+  int _createSharedPlaybackSource(
+    String audioPath, {
+    int startMs = 0,
+    int endMs = 0,
+  }) {
     if (_bassMix != null) {
       final source = _createSharedSource(audioPath);
       if (source == 0) return 0;
-      if (_createMixerForSource(source)) {
+      // 段起点必须在加入混音器之前定位，混音器按 source 当前位置取数据。
+      if (startMs > 0) {
+        final startBytes = _bass.BASS_ChannelSeconds2Bytes(
+          source,
+          startMs / 1000.0,
+        );
+        if (_bass.BASS_ChannelSetPosition(
+              source,
+              startBytes,
+              bass.BASS_POS_BYTE,
+            ) ==
+            0) {
+          log.bass.warn(
+            'legacy',
+            '[bass] segment source seek failed: start=${startMs}ms '
+                'error=${_bass.BASS_ErrorGetCode()}',
+          );
+        }
+      }
+      final segmentSeconds = segmentDurationSeconds(
+        startMs: startMs,
+        endMs: endMs,
+      );
+      if (_createMixerForSource(source, segmentSeconds)) {
         _muteSharedOutputForFadeIn();
         return source;
       }
@@ -1969,10 +2047,52 @@ class BassPlayer {
     }
     final direct = _createDirectSharedStream(audioPath);
     if (direct != 0) {
+      _applySegmentRange(direct, startMs: startMs, endMs: endMs);
       _setDspVolumePriority(direct);
       _bass.BASS_ChannelSetAttribute(direct, bass.BASS_ATTRIB_VOL, 0.0);
     }
     return direct;
+  }
+
+  /// 直连/独占流没有混音器，段起点用 BASS_POS_BYTE 定位，段尾用 BASS_POS_END 截断。
+  void _applySegmentRange(
+    int handle, {
+    required int startMs,
+    required int endMs,
+  }) {
+    if (startMs > 0) {
+      final startBytes = _bass.BASS_ChannelSeconds2Bytes(
+        handle,
+        startMs / 1000.0,
+      );
+      if (_bass.BASS_ChannelSetPosition(
+            handle,
+            startBytes,
+            bass.BASS_POS_BYTE,
+          ) ==
+          0) {
+        log.bass.warn(
+          'legacy',
+          '[bass] segment start seek failed: start=${startMs}ms '
+              'error=${_bass.BASS_ErrorGetCode()}',
+        );
+      }
+    }
+    if (endMs > startMs) {
+      final endBytes = _bass.BASS_ChannelSeconds2Bytes(handle, endMs / 1000.0);
+      if (_bass.BASS_ChannelSetPosition(
+            handle,
+            endBytes,
+            bass.BASS_POS_END,
+          ) ==
+          0) {
+        log.bass.warn(
+          'legacy',
+          '[bass] segment end set failed: end=${endMs}ms '
+              'error=${_bass.BASS_ErrorGetCode()}',
+        );
+      }
+    }
   }
 
   void _muteSharedOutputForFadeIn() {
@@ -1982,7 +2102,7 @@ class BassPlayer {
     }
   }
 
-  bool _createMixerForSource(int source) {
+  bool _createMixerForSource(int source, [double segmentSeconds = 0]) {
     final mix = _bassMix;
     final channel = _bassChannel;
     final sync = _bassSync;
@@ -2038,12 +2158,18 @@ class BassPlayer {
           return false;
         }
       }
-      if (!mix.streamAddChannel(
+      // 段尾靠混音器播放长度截断；长度按混音器输出格式换算，0 表示不限。
+      final lengthBytes = segmentSeconds > 0
+          ? _bass.BASS_ChannelSeconds2Bytes(output, segmentSeconds)
+          : 0;
+      if (!mix.streamAddChannelEx(
         output,
         source,
         bassMixerChanDownmix |
             bassMixerChanNoRampIn |
             (seamless ? bassStreamAutofree : 0),
+        0,
+        lengthBytes,
       )) {
         _bass.BASS_StreamFree(output);
         return false;
@@ -2765,6 +2891,11 @@ class BassPlayer {
         if (decodeHandle == 0) {
           throw Exception('Failed to create decode stream');
         }
+        _applySegmentRange(
+          decodeHandle,
+          startMs: _segmentStartMs,
+          endMs: _segmentEndMs,
+        );
 
         // 2) 预初始化 WASAPI，旧流继续通过 BASS 播放
         _positionUpdaterVersion++;
@@ -2838,7 +2969,13 @@ class BassPlayer {
         wasapiExclusive = false;
         _bassInit(resetHandles: false);
         if (_fPath != null) {
-          _createSharedStream(_fPath!, lastPos, startPlayback: wasPlaying);
+          _createSharedStream(
+            _fPath!,
+            lastPos,
+            startPlayback: wasPlaying,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          );
         }
       } else {
         wasapiExclusive = exclusive;
@@ -2898,8 +3035,20 @@ class BassPlayer {
     _cachedLengthSeconds = null;
 
     wasapiExclusive
-        ? _createWasapiStream(path, seekTo, startPlayback: startPlayback)
-        : _createSharedStream(path, seekTo, startPlayback: startPlayback);
+        ? _createWasapiStream(
+            path,
+            seekTo,
+            startPlayback: startPlayback,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          )
+        : _createSharedStream(
+            path,
+            seekTo,
+            startPlayback: startPlayback,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          );
     _logAudioState('_rebuildStream(done)');
   }
 
@@ -2926,11 +3075,14 @@ class BassPlayer {
     String path,
     double seekTo, {
     bool startPlayback = true,
+    int startMs = 0,
+    int endMs = 0,
   }) {
     final handle = _createDecodeStream(path);
     if (handle == 0) {
       throw Exception('Failed to create WASAPI exclusive stream');
     }
+    _applySegmentRange(handle, startMs: startMs, endMs: endMs);
 
     _fstream = handle;
     _streamWasapiExclusive = true;
@@ -2953,8 +3105,14 @@ class BassPlayer {
     String path,
     double seekTo, {
     bool startPlayback = true,
+    int startMs = 0,
+    int endMs = 0,
   }) {
-    final handle = _createSharedPlaybackSource(path);
+    final handle = _createSharedPlaybackSource(
+      path,
+      startMs: startMs,
+      endMs: endMs,
+    );
     if (handle == 0) {
       throw Exception('Failed to create shared source');
     }
@@ -3080,7 +3238,14 @@ class BassPlayer {
 
   /// if setSource has been called once,
   /// it will pause current channel and free current stream.
-  void setSource(String path) {
+  /// [startMs]/[endMs] 是 CUE 虚拟轨的段范围，普通曲目保持默认 0。
+  void setSource(String path, {int startMs = 0, int endMs = 0}) {
+    final segment = normalizePlaybackSegment(startMs, endMs);
+    final effectiveStart = segment.startMs;
+    final effectiveEnd = segment.endMs;
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _replayGainDb = null;
     _activeGaplessTransitionId = null;
@@ -3116,13 +3281,33 @@ class BassPlayer {
       _cachedLengthSeconds = null;
       _streamWasapiExclusive = false;
     }
-    final handle = wasapiExclusive
-        ? _createDecodeStream(path)
-        : _createSharedPlaybackSource(path);
+    final int handle;
+    if (wasapiExclusive) {
+      handle = _createDecodeStream(path);
+      if (handle != 0) {
+        _applySegmentRange(
+          handle,
+          startMs: effectiveStart,
+          endMs: effectiveEnd,
+        );
+      }
+    } else {
+      handle = _createSharedPlaybackSource(
+        path,
+        startMs: effectiveStart,
+        endMs: effectiveEnd,
+      );
+    }
 
     if (handle != 0) {
       _fstream = handle;
       _fPath = path;
+      _segmentStartMs = effectiveStart;
+      _segmentEndMs = effectiveEnd;
+      _segmentDurationSeconds = segmentDurationSeconds(
+        startMs: effectiveStart,
+        endMs: effectiveEnd,
+      );
       // 标记当前流是否为独占模式流
       _streamWasapiExclusive = wasapiExclusive;
       _refreshStreamSampleRate();
@@ -3145,7 +3330,7 @@ class BassPlayer {
       switch (_bass.BASS_ErrorGetCode()) {
         case bass.BASS_ERROR_INIT:
           _bassInit();
-          setSource(path);
+          setSource(path, startMs: effectiveStart, endMs: effectiveEnd);
           break;
         case bass.BASS_ERROR_NOTAVAIL:
           throw const FormatException(
@@ -3577,7 +3762,12 @@ class BassPlayer {
     _logAudioState('seek(begin,$position)');
 
     final source = _fstream!;
-    final pos = _bass.BASS_ChannelSeconds2Bytes(source, position);
+    final absolute = segmentAbsoluteSeconds(
+      position: position,
+      startMs: _segmentStartMs,
+      endMs: _segmentEndMs,
+    );
+    final pos = _bass.BASS_ChannelSeconds2Bytes(source, absolute);
     final positioned = _mixerStream == null
         ? _bass.BASS_ChannelSetPosition(source, pos, bass.BASS_POS_BYTE) != 0
         : _bassMix!.channelSetPosition(
@@ -3613,6 +3803,9 @@ class BassPlayer {
   ///
   /// do nothing if [setSource] hasn't been called
   void freeFStream() {
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
@@ -3732,6 +3925,9 @@ class BassPlayer {
     _fstream = null;
     _fPath = null;
     _cachedLengthSeconds = null;
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentDurationSeconds = 0;
     _lingeringPath = null;
     _smartOutgoingPath = null;
     _queuedPath = null;
