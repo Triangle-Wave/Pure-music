@@ -31,19 +31,21 @@ use windows::{
 };
 
 use crate::frb_generated::StreamSink;
+use crate::api::sacd::{is_sacd_iso, read_sacd_toc, SacdAreaKind};
 
 use super::library_db;
 
 mod format_detection;
 use format_detection::{
-    is_asf_path, is_dff_path, is_dsf_path, is_generic_id3_path, is_midi_path,
+    is_asf_path, is_dff_path, is_dsf_path, is_generic_id3_path, is_iso_path, is_midi_path,
     is_supported_audio_path, is_symphonia_path, SUPPORTED_FORMATS,
 };
 
 mod format_readers;
 mod cue;
 use cue::{
-    expand_segments, is_cue_path, parse_cue_file, parse_segment_path, segment_path_with_range,
+    expand_segments, is_cue_path, parse_cue_file, parse_segment_path, sacd_segment_path,
+    segment_path_with_range,
 };
 use format_readers::{
     read_by_asf, read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia,
@@ -1041,6 +1043,7 @@ impl AudioFolder {
         let path = path.as_ref();
         let mut audio_paths: Vec<PathBuf> = Vec::new();
         let mut cue_paths: Vec<PathBuf> = Vec::new();
+        let mut iso_paths: Vec<PathBuf> = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -1049,12 +1052,15 @@ impl AudioFolder {
             let entry_path = entry.path();
             if is_cue_path(&entry_path) {
                 cue_paths.push(entry_path);
+            } else if is_iso_path(&entry_path) {
+                iso_paths.push(entry_path);
             } else if is_supported_audio_path(&entry_path) {
                 audio_paths.push(entry_path);
             }
         }
 
         let (cue_audios, referenced) = read_cue_folder(&cue_paths, &audio_paths);
+        let sacd_audios = read_sacd_folder(&iso_paths);
         let unreferenced_paths: Vec<PathBuf> = audio_paths
             .into_iter()
             .filter(|audio_path| !referenced.contains(&path_key(audio_path)))
@@ -1072,6 +1078,7 @@ impl AudioFolder {
         }
         let mut audios: Vec<Audio> = read_results.into_iter().flatten().collect();
         audios.extend(cue_audios);
+        audios.extend(sacd_audios);
         let latest = audios.iter().map(|audio| audio.created).max().unwrap_or(0);
 
         if !audios.is_empty() {
@@ -1855,6 +1862,101 @@ fn read_cue_folder(
     (audios, referenced)
 }
 
+/// 把 SACD ISO 展开成虚拟曲目。
+///
+/// 优先使用双声道区，没有双声道区时退回第一个音频区。普通 ISO 静默跳过；
+/// SACD 目录解析失败只告警并跳过该镜像，不中断整批扫描。
+fn read_sacd_folder(iso_paths: &[PathBuf]) -> Vec<Audio> {
+    let mut audios: Vec<Audio> = Vec::new();
+
+    for iso_path in iso_paths {
+        if !is_sacd_iso(iso_path) {
+            continue;
+        }
+        let toc = match read_sacd_toc(iso_path) {
+            Ok(toc) => toc,
+            Err(error) => {
+                log::warn!(
+                    target: "tag",
+                    "skip sacd {}: {}",
+                    iso_path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        let area = match toc
+            .areas
+            .iter()
+            .find(|area| area.kind == SacdAreaKind::TwoChannel)
+        {
+            Some(area) => area,
+            None => match toc.areas.first() {
+                Some(area) => area,
+                None => continue,
+            },
+        };
+        if area.tracks.is_empty() {
+            continue;
+        }
+        let area_label = match area.kind {
+            SacdAreaKind::TwoChannel => "2ch",
+            SacdAreaKind::MultiChannel => "mch",
+        };
+        let metadata = match fs::metadata(iso_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                log::warn!(
+                    target: "tag",
+                    "skip sacd {}: {}",
+                    iso_path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        let modified = system_time_secs(metadata.modified());
+        let created = system_time_secs(metadata.created());
+        let size = metadata.len();
+        let album = iso_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let iso_path_str = iso_path.to_string_lossy().to_string();
+
+        for track in &area.tracks {
+            let end_ms = track.start_ms.saturating_add(track.duration_ms);
+            audios.push(Audio {
+                title: format!("Track {:02}", track.number),
+                artist: "UNKNOWN".to_string(),
+                album: album.clone(),
+                album_artist: None,
+                track: Some(u32::from(track.number)),
+                disc: None,
+                duration: track.duration_ms.saturating_add(500) / 1000,
+                bitrate: None,
+                sample_rate: None,
+                path: sacd_segment_path(
+                    &iso_path_str,
+                    area_label,
+                    u32::from(track.number),
+                    track.start_ms,
+                    end_ms,
+                ),
+                modified,
+                created,
+                by: Some("sacd".to_string()),
+                size,
+                valid: true,
+                media_id: None,
+            });
+        }
+    }
+
+    audios
+}
+
 /// 递归收集所有子文件夹中的音频文件路径，按父目录分组。
 /// 一次遍历同时完成「统计总数」和「收集路径」，避免二次目录遍历。
 fn collect_audio_files_by_folder(
@@ -1862,6 +1964,7 @@ fn collect_audio_files_by_folder(
     count: &mut u64,
     by_folder: &mut HashMap<String, Vec<PathBuf>>,
     cue_by_folder: &mut HashMap<String, Vec<PathBuf>>,
+    sacd_by_folder: &mut HashMap<String, Vec<PathBuf>>,
     seen: &mut HashSet<String>,
 ) -> io::Result<()> {
     let folder_str = folder.as_ref().to_string_lossy().to_string();
@@ -1877,6 +1980,7 @@ fn collect_audio_files_by_folder(
                 count,
                 by_folder,
                 cue_by_folder,
+                sacd_by_folder,
                 seen,
             )?;
         } else if file_type.is_file() {
@@ -1884,6 +1988,12 @@ fn collect_audio_files_by_folder(
             if is_cue_path(&path) {
                 *count += 1;
                 cue_by_folder
+                    .entry(folder_str.clone())
+                    .or_default()
+                    .push(path);
+            } else if is_iso_path(&path) {
+                *count += 1;
+                sacd_by_folder
                     .entry(folder_str.clone())
                     .or_default()
                     .push(path);
@@ -1914,18 +2024,20 @@ pub fn build_index_from_folders_recursively(
     let mut total: u64 = 0;
     let mut by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut cue_by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut sacd_by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for item in &folders {
         collect_audio_files_by_folder(
             Path::new(item),
             &mut total,
             &mut by_folder,
             &mut cue_by_folder,
+            &mut sacd_by_folder,
             &mut seen,
         )?;
     }
 
     // 先展开全部 CUE：得到虚拟曲目和它们引用的源文件，源文件在后续音频扫描中跳过。
-    let mut cue_audios_by_folder: HashMap<String, Vec<Audio>> = HashMap::new();
+    let mut virtual_audios_by_folder: HashMap<String, Vec<Audio>> = HashMap::new();
     let mut referenced: HashSet<String> = HashSet::new();
     for (dir_path, cue_paths) in &cue_by_folder {
         let _ = sink.add(IndexActionState {
@@ -1943,20 +2055,46 @@ pub fn build_index_from_folders_recursively(
         referenced.extend(cue_referenced);
         scanned += cue_paths.len() as u64;
         if !audios.is_empty() {
-            cue_audios_by_folder.insert(dir_path.clone(), audios);
+            virtual_audios_by_folder.insert(dir_path.clone(), audios);
+        }
+    }
+
+    // 再展开 SACD ISO：按区展开成虚拟曲目，普通 ISO 静默跳过。
+    for (dir_path, iso_paths) in &sacd_by_folder {
+        let _ = sink.add(IndexActionState {
+            progress: if total == 0 {
+                0.0
+            } else {
+                scanned as f64 / total as f64
+            },
+            message: String::from("正在扫描 ") + dir_path,
+            phase: IndexPhase::Scanning,
+            unreadable_total,
+        });
+
+        let audios = read_sacd_folder(iso_paths);
+        scanned += iso_paths.len() as u64;
+        if !audios.is_empty() {
+            virtual_audios_by_folder
+                .entry(dir_path.clone())
+                .or_default()
+                .extend(audios);
         }
     }
 
     let mut dir_paths: Vec<String> = by_folder
         .keys()
         .chain(cue_by_folder.keys())
+        .chain(sacd_by_folder.keys())
         .cloned()
         .collect();
     dir_paths.sort();
     dir_paths.dedup();
 
     for dir_path in &dir_paths {
-        let mut audios: Vec<Audio> = cue_audios_by_folder.remove(dir_path).unwrap_or_default();
+        let mut audios: Vec<Audio> = virtual_audios_by_folder
+            .remove(dir_path)
+            .unwrap_or_default();
         let audio_count = by_folder.get(dir_path).map_or(0, |paths| paths.len());
         let file_paths: Vec<PathBuf> = match by_folder.get(dir_path) {
             Some(paths) => paths
@@ -2336,8 +2474,8 @@ fn probe_indexed_path<T>(result: io::Result<T>) -> io::Result<Option<T>> {
     }
 }
 
-/// 目录内是否直接包含 CUE 文件；读取失败按不包含处理。
-fn folder_contains_cue(path: &Path) -> bool {
+/// 目录内是否直接包含 CUE 或 ISO 虚拟容器；读取失败按不包含处理。
+fn folder_contains_virtual_container(path: &Path) -> bool {
     let Ok(entries) = fs::read_dir(path) else {
         return false;
     };
@@ -2345,11 +2483,14 @@ fn folder_contains_cue(path: &Path) -> bool {
         entry
             .file_type()
             .is_ok_and(|file_type| file_type.is_file())
-            && is_cue_path(&entry.path())
+            && {
+                let entry_path = entry.path();
+                is_cue_path(&entry_path) || is_iso_path(&entry_path)
+            }
     })
 }
 
-/// 条目中是否存在 CUE 虚拟轨；其 path 为可解析的合成路径。
+/// 条目中是否存在虚拟轨；其 path 为可解析的合成路径（CUE 或 SACD）。
 fn has_virtual_tracks(audios: &[serde_json::Value]) -> bool {
     audios.iter().any(|audio| {
         audio
@@ -2373,12 +2514,12 @@ mod tag_reader_tests {
 
     use super::cue::is_cue_path;
     use super::{
-        detect_and_encode, drop_invalid_duplicates_by_media_id, folder_contains_cue,
-        has_virtual_tracks, indexed_audio_update_from_parts, is_lyric_item_key, join_deduped,
-        parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata, read_by_asf,
-        read_cue_folder, should_emit_index_progress, should_scan_indexed_audio_files,
-        should_show_recording_date, tag_reader_worker_count_for, IndexedAudioUpdate,
-        SUPPORTED_FORMATS,
+        detect_and_encode, drop_invalid_duplicates_by_media_id, folder_contains_virtual_container,
+        has_virtual_tracks, indexed_audio_update_from_parts, is_iso_path, is_lyric_item_key,
+        join_deduped, parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata,
+        read_by_asf, read_cue_folder, read_sacd_folder, should_emit_index_progress,
+        should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
+        IndexedAudioUpdate, SUPPORTED_FORMATS,
     };
 
     fn asf_object(guid: [u8; 16], data: Vec<u8>) -> Vec<u8> {
@@ -2812,6 +2953,107 @@ mod tag_reader_tests {
         bytes
     }
 
+    const SACD_TEST_SECTOR_SIZE: usize = 2048;
+    const SACD_TEST_IMAGE_SECTORS: usize = 640;
+    const SACD_TEST_MASTER_TOC_LSN: usize = 510;
+    const SACD_TEST_AREA_TOC_LSN: usize = 544;
+    const SACD_TEST_AREA_TOC_SECTORS: u16 = 5;
+
+    /// 测试用最小 SACD 镜像构造器，按 2048 字节扇区写入。
+    struct SacdImageBuilder {
+        data: Vec<u8>,
+    }
+
+    impl SacdImageBuilder {
+        fn new() -> Self {
+            Self {
+                data: vec![0u8; SACD_TEST_IMAGE_SECTORS * SACD_TEST_SECTOR_SIZE],
+            }
+        }
+
+        fn sector_mut(&mut self, lsn: usize) -> &mut [u8] {
+            let start = lsn * SACD_TEST_SECTOR_SIZE;
+            let end = start + SACD_TEST_SECTOR_SIZE;
+            match self.data.get_mut(start..end) {
+                Some(sector) => sector,
+                None => panic!("测试镜像扇区越界"),
+            }
+        }
+
+        fn into_data(self) -> Vec<u8> {
+            self.data
+        }
+    }
+
+    fn put_be_u16(sector: &mut [u8], offset: usize, value: u16) {
+        if let Some(target) = sector.get_mut(offset..offset + 2) {
+            target.copy_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    fn put_be_u32(sector: &mut [u8], offset: usize, value: u32) {
+        if let Some(target) = sector.get_mut(offset..offset + 4) {
+            target.copy_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    fn put_timecode(sector: &mut [u8], offset: usize, minutes: u8, seconds: u8, frames: u8) {
+        if let Some(target) = sector.get_mut(offset..offset + 4) {
+            target[0] = minutes;
+            target[1] = seconds;
+            target[2] = frames;
+            target[3] = 0;
+        }
+    }
+
+    /// 构造 1 个 2CH 区、2 条轨道的裸 DSD 最小镜像。
+    fn minimal_sacd_iso_bytes() -> Vec<u8> {
+        let mut image = SacdImageBuilder::new();
+        {
+            let sector = image.sector_mut(SACD_TEST_MASTER_TOC_LSN);
+            sector[0..8].copy_from_slice(b"SACDMTOC");
+            sector[8] = 1;
+            sector[9] = 0x14;
+            put_be_u16(sector, 16, 1);
+            put_be_u16(sector, 18, 1);
+            put_be_u32(sector, 64, SACD_TEST_AREA_TOC_LSN as u32);
+            sector[80] = 0x80;
+            put_be_u16(sector, 84, SACD_TEST_AREA_TOC_SECTORS);
+        }
+        {
+            let sector = image.sector_mut(SACD_TEST_AREA_TOC_LSN);
+            sector[0..8].copy_from_slice(b"TWOCHTOC");
+            sector[8] = 1;
+            sector[9] = 0x14;
+            put_be_u16(sector, 10, SACD_TEST_AREA_TOC_SECTORS);
+            sector[21] = 2;
+            sector[32] = 2;
+            sector[64] = 5;
+            sector[65] = 45;
+            sector[66] = 50;
+            sector[69] = 2;
+            put_be_u32(sector, 72, 1000);
+            put_be_u32(sector, 76, 4500);
+        }
+        {
+            let sector = image.sector_mut(SACD_TEST_AREA_TOC_LSN + 1);
+            sector[0..8].copy_from_slice(b"SACDTRL1");
+            put_be_u32(sector, 8, 1000);
+            put_be_u32(sector, 12, 3000);
+            put_be_u32(sector, 8 + 255 * 4, 2000);
+            put_be_u32(sector, 12 + 255 * 4, 1500);
+        }
+        {
+            let sector = image.sector_mut(SACD_TEST_AREA_TOC_LSN + 2);
+            sector[0..8].copy_from_slice(b"SACDTRL2");
+            put_timecode(sector, 8, 0, 0, 0);
+            put_timecode(sector, 12, 3, 0, 0);
+            put_timecode(sector, 8 + 255 * 4, 1, 30, 25);
+            put_timecode(sector, 12 + 255 * 4, 2, 15, 0);
+        }
+        image.into_data()
+    }
+
     #[test]
     fn normalizes_path_keys_used_for_reference_dedup() {
         assert_eq!(path_key(Path::new("D:\\Music\\Album\\")), "d:/music/album");
@@ -2887,6 +3129,9 @@ mod tag_reader_tests {
         assert!(has_virtual_tracks(&[serde_json::json!({
             "path": "D:\\Music\\album.flac::track=01::start=0::end=200000"
         })]));
+        assert!(has_virtual_tracks(&[serde_json::json!({
+            "path": "D:\\Music\\album.iso::track=01::start=0::end=90000::sacd=2ch"
+        })]));
         assert!(!has_virtual_tracks(&[
             serde_json::json!({ "path": "D:\\Music\\album.flac::track=01::start=0" }),
             serde_json::json!({ "path": 42 }),
@@ -2896,25 +3141,104 @@ mod tag_reader_tests {
     }
 
     #[test]
-    fn detects_cue_files_only_in_the_scanned_folder() {
+    fn detects_virtual_containers_only_in_the_scanned_folder() {
         let temp = temp_cue_dir();
-        assert!(!folder_contains_cue(&temp.0));
+        assert!(!folder_contains_virtual_container(&temp.0));
         if let Err(error) = std::fs::create_dir_all(&temp.0) {
             panic!("create temp dir failed: {error}");
         }
         write_test_file(&temp.0.join("disc.flac"), b"audio");
-        assert!(!folder_contains_cue(&temp.0));
+        assert!(!folder_contains_virtual_container(&temp.0));
 
-        // 子目录里的 CUE 不属于当前目录的扫描范围。
+        // 子目录里的容器不属于当前目录的扫描范围。
         let sub_dir = temp.0.join("sub");
         if let Err(error) = std::fs::create_dir_all(&sub_dir) {
             panic!("create temp sub dir failed: {error}");
         }
         write_test_file(&sub_dir.join("album.cue"), b"");
-        assert!(!folder_contains_cue(&temp.0));
+        assert!(!folder_contains_virtual_container(&temp.0));
 
         write_test_file(&temp.0.join("album.CUE"), b"");
-        assert!(folder_contains_cue(&temp.0));
+        assert!(folder_contains_virtual_container(&temp.0));
+
+        let iso_dir = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&iso_dir.0) {
+            panic!("create temp iso dir failed: {error}");
+        }
+        write_test_file(&iso_dir.0.join("disc.iso"), b"");
+        assert!(folder_contains_virtual_container(&iso_dir.0));
+    }
+
+    #[test]
+    fn detects_iso_files_case_insensitively() {
+        assert!(is_iso_path(Path::new("disc.iso")));
+        assert!(is_iso_path(Path::new("DISC.ISO")));
+        assert!(is_iso_path(Path::new("D:\\Music\\Album.Iso")));
+        assert!(!is_iso_path(Path::new("iso")));
+        assert!(!is_iso_path(Path::new("disc.iso.bak")));
+        assert!(!is_iso_path(Path::new("disc.flac")));
+    }
+
+    #[test]
+    fn empty_sacd_folder_yields_no_tracks() {
+        assert!(read_sacd_folder(&[]).is_empty());
+    }
+
+    #[test]
+    fn expands_sacd_iso_into_virtual_tracks() {
+        let temp = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        let iso_path = temp.0.join("album.iso");
+        write_test_file(&iso_path, &minimal_sacd_iso_bytes());
+
+        let audios = read_sacd_folder(std::slice::from_ref(&iso_path));
+
+        assert_eq!(audios.len(), 2);
+        let first = match audios.first() {
+            Some(audio) => audio,
+            None => panic!("first sacd track missing"),
+        };
+        assert_eq!(first.title, "Track 01");
+        assert_eq!(first.artist, "UNKNOWN");
+        assert_eq!(first.album, "album");
+        assert!(first.album_artist.is_none());
+        assert_eq!(first.track, Some(1));
+        assert!(first.disc.is_none());
+        assert_eq!(first.duration, 90);
+        assert_eq!(first.by.as_deref(), Some("sacd"));
+        assert!(first.bitrate.is_none());
+        assert!(first.sample_rate.is_none());
+        assert!(first.valid);
+        assert!(first.media_id.is_none());
+        assert!(first.path.contains("::track=01"));
+        assert!(first.path.contains("::start=0"));
+        assert!(first.path.contains("::end=90333"));
+        assert!(first.path.ends_with("::sacd=2ch"));
+
+        let second = match audios.get(1) {
+            Some(audio) => audio,
+            None => panic!("second sacd track missing"),
+        };
+        assert_eq!(second.title, "Track 02");
+        assert_eq!(second.track, Some(2));
+        assert_eq!(second.duration, 135);
+        assert!(second.path.contains("::start=180000"));
+        assert!(second.path.contains("::end=315000"));
+        assert!(second.path.ends_with("::sacd=2ch"));
+    }
+
+    #[test]
+    fn skips_non_sacd_iso_files() {
+        let temp = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        let iso_path = temp.0.join("plain.iso");
+        write_test_file(&iso_path, &vec![0u8; SACD_TEST_SECTOR_SIZE * 8]);
+
+        assert!(read_sacd_folder(std::slice::from_ref(&iso_path)).is_empty());
     }
 }
 
@@ -3065,9 +3389,9 @@ pub fn update_index(
             index_changed = true;
         }
 
-        // CUE 虚拟轨的 path 是合成路径（容器路径::track=..::start=..::end=..），
-        // 逐条 fs::metadata 探活必然失败；目录含 CUE 或已有虚拟轨时整体重建。
-        let needs_rebuild = folder_contains_cue(Path::new(&folder_path))
+        // 虚拟轨的 path 是合成路径（容器路径::track=..::start=..::end=..[::sacd=..]），
+        // 逐条 fs::metadata 探活必然失败；目录含 CUE/ISO 或已有虚拟轨时整体重建。
+        let needs_rebuild = folder_contains_virtual_container(Path::new(&folder_path))
             || folder_item["audios"]
                 .as_array()
                 .is_some_and(|audios| has_virtual_tracks(audios));

@@ -58,8 +58,17 @@ rust_tag_reader.AudioExtraMetadata _emptyAudioExtraMetadata() =>
       replaygainAlbumPeak: null,
     );
 
-Future<rust_tag_reader.AudioExtraMetadata> _getAudioExtra(Audio audio) =>
-    _audioExtraCache.get(audio).catchError((_) => _emptyAudioExtraMetadata());
+Future<rust_tag_reader.AudioExtraMetadata> _getAudioExtra(Audio audio) {
+  // SACD 虚拟轨不从 ISO 读取标签，避免解析容器文件。
+  if (audio.isSacdTrack) {
+    return Future<rust_tag_reader.AudioExtraMetadata>.value(
+      _emptyAudioExtraMetadata(),
+    );
+  }
+  return _audioExtraCache
+      .get(audio)
+      .catchError((_) => _emptyAudioExtraMetadata());
+}
 
 class AudioDetailPageSurface extends StatelessWidget {
   const AudioDetailPageSurface({super.key, required this.child});
@@ -268,6 +277,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
 
   Future<void> _enterEditMode() async {
     final requestToken = ++_editRequestToken;
+    // SACD 虚拟轨的编辑值只写入本地覆盖层，不读取或写入 ISO。
     await applyAudioDetailMetadataIfMounted(
       future: _getAudioExtra(audio),
       isMounted: () => mounted && requestToken == _editRequestToken,
@@ -306,8 +316,8 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _saveEdit() async {
-    if (audio.isCueTrack) {
-      await _saveCueOverride();
+    if (audio.isVirtualTrack) {
+      await _saveVirtualOverride();
       return;
     }
     setState(() => _isSaving = true);
@@ -384,11 +394,12 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     }
   }
 
-  Future<void> _saveCueOverride() async {
+  /// 把编辑结果写入本地覆盖层；SACD 与 CUE 轨都不会写源容器文件。
+  Future<void> _saveVirtualOverride() async {
     final segment = audio.cueSegment;
     if (segment == null) return;
     if (_pendingCoverBytes != null) {
-      showTextOnSnackBar('CUE 轨暂不支持修改封面');
+      showTextOnSnackBar('虚拟轨暂不支持修改封面');
       return;
     }
     if (_isSaving) return;
@@ -432,7 +443,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     } catch (error, trace) {
       log.library.error(
         'legacy',
-        '保存 CUE 轨标签失败',
+        '保存虚拟轨标签失败',
         error: error,
         stackTrace: trace,
       );
@@ -1095,13 +1106,16 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     return [
       _DetailField(
         label: '格式',
-        value: p.extension(audio.filePath).replaceFirst('.', '').toUpperCase(),
+        value: audio.isSacdTrack
+            ? 'SACD ISO'
+            : p.extension(audio.filePath).replaceFirst('.', '').toUpperCase(),
       ),
-      if (audio.isCueTrack)
+      if (audio.isVirtualTrack)
         _DetailField(
-          label: 'CUE 轨',
-          value:
-              '${audio.track}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）',
+          label: audio.isSacdTrack ? 'SACD 轨' : '虚拟轨',
+          value: audio.isSacdTrack
+              ? '${audio.cueSegment?.sacdArea ?? '-'}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）'
+              : '${audio.track}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）',
         ),
       _DetailField(label: '文件大小', child: _buildFileSize(data)),
       _DetailField(label: '路径', value: audio.filePath, allowWrap: true),
@@ -1530,8 +1544,8 @@ class _LyricsEditDialogState extends State<_LyricsEditDialog> {
 
   Future<void> _save() async {
     if (_isSaving) return;
-    if (widget.audio.isCueTrack) {
-      showTextOnSnackBar('CUE 轨暂不支持写入内嵌歌词');
+    if (widget.audio.isVirtualTrack) {
+      showTextOnSnackBar('虚拟轨暂不支持写入内嵌歌词');
       return;
     }
     setState(() => _isSaving = true);
@@ -1782,8 +1796,8 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
         return;
       }
       if (writeDirectly) {
-        if (widget.audio.isCueTrack) {
-          showTextOnSnackBar('CUE 轨暂不支持写入内嵌歌词');
+        if (widget.audio.isVirtualTrack) {
+          showTextOnSnackBar('虚拟轨暂不支持写入内嵌歌词');
           return;
         }
         final timing = await audioTagWriteScheduler.submit(

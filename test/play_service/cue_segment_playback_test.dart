@@ -140,5 +140,29 @@ void main() {
       expect(audio.segmentStartMs, 0);
       expect(audio.segmentEndMs, 0);
     });
+
+    test('SACD 合成路径暴露 ISO 与段范围', () {
+      final audio = Audio(
+        'Track 01',
+        'UNKNOWN',
+        'album',
+        null,
+        1,
+        90,
+        null,
+        null,
+        r'D:\Music\SACD\album.iso::track=01::start=0::end=90333::sacd=2ch',
+        1,
+        1,
+        'sacd',
+      );
+
+      expect(audio.isVirtualTrack, isTrue);
+      expect(audio.isCueTrack, isFalse);
+      expect(audio.isSacdTrack, isTrue);
+      expect(audio.filePath, r'D:\Music\SACD\album.iso');
+      expect(audio.segmentStartMs, 0);
+      expect(audio.segmentEndMs, 90333);
+    });
   });
 }

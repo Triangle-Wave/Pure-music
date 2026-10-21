@@ -38,6 +38,9 @@ final class _NowPlayingNotifier extends ValueNotifier<Audio?> {
   void refresh() => notifyListeners();
 }
 
+/// SACD ISO 播放暂未实现时对用户的提示文案。
+const _sacdUnsupportedMessage = 'SACD ISO 播放暂未实现';
+
 final class _PendingGaplessTransition {
   const _PendingGaplessTransition({
     required this.id,
@@ -552,8 +555,8 @@ class PlaybackService extends ChangeNotifier {
 
   void _maybeSkipLeadingSilence(Audio audio, {required String reason}) {
     if (!_pref.skipLeadingSilence || reason == 'restore') return;
-    // 合成路径不能用于整轨静音分析，CUE 轨从段起点开始播放。
-    if (audio.isCueTrack) return;
+    // 合成路径不能用于整轨静音分析，虚拟轨从段起点开始播放。
+    if (audio.isVirtualTrack) return;
     final token = ++_skipLeadingSilenceToken;
     unawaited(_skipLeadingSilenceIfNeeded(audio, token));
   }
@@ -959,8 +962,8 @@ class PlaybackService extends ChangeNotifier {
       return null;
     }
     final incoming = items[incomingIndex];
-    // CUE 虚拟轨的段边界不能被整轨预加载和智能过渡覆盖。
-    if (outgoing.isCueTrack || incoming.isCueTrack) return null;
+    // 虚拟轨的段边界不能被整轨预加载和智能过渡覆盖。
+    if (outgoing.isVirtualTrack || incoming.isVirtualTrack) return null;
     return SmartTransitionTarget(
       playlistRevision: _playlistRevision,
       outgoingIndex: outgoingIndex,
@@ -1001,7 +1004,9 @@ class PlaybackService extends ChangeNotifier {
 
   bool _prepareSmartFallback(SmartTransitionTarget target, String reason) {
     if (!_isCurrentSmartTarget(target)) return false;
-    if (target.outgoing.isCueTrack || target.incoming.isCueTrack) return false;
+    if (target.outgoing.isVirtualTrack || target.incoming.isVirtualTrack) {
+      return false;
+    }
     final pending = _PendingGaplessTransition(
       id: _nextGaplessTransitionId++,
       playlistRevision: target.playlistRevision,
@@ -1093,9 +1098,9 @@ class PlaybackService extends ChangeNotifier {
       return;
     }
     if (_invalidateGaplessPreparation()) return;
-    // CUE 虚拟轨按段截断混音器长度，预加载整轨会越过段边界。
+    // 虚拟轨按段截断混音器长度，预加载整轨会越过段边界。
     final currentAudio = nowPlaying;
-    if (currentAudio != null && currentAudio.isCueTrack) return;
+    if (currentAudio != null && currentAudio.isVirtualTrack) return;
     if (_pref.transitionMode == TransitionMode.smart) {
       if (!_closed) _smartTransitions.rebuild();
       return;
@@ -1113,7 +1118,7 @@ class PlaybackService extends ChangeNotifier {
     }
 
     final audio = items[targetIndex];
-    if (audio.isCueTrack) return;
+    if (audio.isVirtualTrack) return;
     final pending = _PendingGaplessTransition(
       id: _nextGaplessTransitionId++,
       playlistRevision: _playlistRevision,
@@ -1283,6 +1288,13 @@ class PlaybackService extends ChangeNotifier {
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
     try {
+      if (audio.isSacdTrack) {
+        log.playback.warn(
+          'legacy',
+          'SACD ISO 播放暂未实现: ${audio.path}',
+        );
+        throw const FormatException(_sacdUnsupportedMessage);
+      }
       // CUE 虚拟轨用真实源文件建流，段边界由播放器按毫秒截断。
       _player.setSource(
         audio.filePath,
@@ -1300,6 +1312,13 @@ class PlaybackService extends ChangeNotifier {
       );
       return true;
     } catch (err, trace) {
+      if (err is FormatException && err.message == _sacdUnsupportedMessage) {
+        // 预期内的未支持功能：只提示用户，不按异常记录堆栈。
+        if (reportFailure) {
+          _reportPlaybackLoadFailure(_sacdUnsupportedMessage);
+        }
+        return false;
+      }
       log.playback.error(
         'legacy',
         '加载并播放歌曲失败 index=$audioIndex title=${audio.title}',
@@ -2018,6 +2037,14 @@ class PlaybackService extends ChangeNotifier {
   ) async {
     try {
       final restored = nowPlaying!;
+      if (restored.isSacdTrack) {
+        // SACD ISO 播放暂未实现，恢复会话时不打开 ISO。
+        log.playback.warn(
+          'legacy',
+          'SACD ISO 播放暂未实现: ${restored.path}',
+        );
+        return;
+      }
       _player.setSource(
         restored.filePath,
         startMs: restored.segmentStartMs,

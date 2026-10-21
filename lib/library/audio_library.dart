@@ -617,7 +617,7 @@ class AudioLibrary {
     }
   }
 
-  /// 把本地覆盖值合并到 CUE 虚拟轨；读取失败只降级为未覆盖。
+  /// 把本地覆盖值合并到虚拟轨（CUE/SACD）；读取失败只降级为未覆盖。
   static Future<void> _applyTrackOverrides() async {
     final Map<String, TrackOverride> overrides;
     try {
@@ -625,7 +625,7 @@ class AudioLibrary {
     } catch (err, trace) {
       log.library.warn(
         'legacy',
-        '读取 CUE 轨覆盖标签失败',
+        '读取虚拟轨覆盖标签失败',
         error: err,
         stackTrace: trace,
       );
@@ -2719,7 +2719,7 @@ class Audio {
   String get _pathLookupKey =>
       _pathLookupKeyCache ??= _audioPathLookupKey(path);
 
-  /// CUE 虚拟轨的段信息；普通曲目返回 null。
+  /// CUE / SACD 虚拟轨的段信息；普通曲目返回 null。
   CueSegmentPath? get cueSegment {
     if (_cueSegmentCachePath == path) return _cueSegmentCache;
     final parsed = parseCueSegmentPath(path);
@@ -2728,7 +2728,15 @@ class Audio {
     return parsed;
   }
 
-  bool get isCueTrack => cueSegment != null;
+  /// 是否为合成路径的虚拟轨（CUE 或 SACD）。
+  bool get isVirtualTrack => cueSegment != null;
+
+  bool get isCueTrack {
+    final segment = cueSegment;
+    return segment != null && segment.sacdArea == null;
+  }
+
+  bool get isSacdTrack => cueSegment?.sacdArea != null;
 
   /// 实际用于读取文件、封面、歌词的路径。
   String get filePath => cueSegment?.sourcePath ?? path;

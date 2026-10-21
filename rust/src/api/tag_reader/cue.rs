@@ -614,16 +614,38 @@ pub(crate) fn segment_path_with_range(
     format!("{source_path}::track={track_number:02}::start={start_ms}::end={end_ms}")
 }
 
+/// 生成 SACD ISO 虚拟轨的合成路径，例如
+/// `<iso 路径>::track=01::start=0::end=90000::sacd=2ch`。
+///
+/// `source_path` 原样保留，不改变大小写、分隔符、空格与中文字符。
+pub(crate) fn sacd_segment_path(
+    source_path: &str,
+    area: &str,
+    track_number: u32,
+    start_ms: u64,
+    end_ms: u64,
+) -> String {
+    format!(
+        "{source_path}::track={track_number:02}::start={start_ms}::end={end_ms}::sacd={area}"
+    )
+}
+
 /// 合成路径的解析结果，`source_path` 借用输入字符串。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedSegmentPath<'a> {
     pub(crate) source_path: &'a str,
     pub(crate) track_number: u32,
     pub(crate) start_ms: u64,
     pub(crate) end_ms: u64,
+    /// SACD 区标记："2ch"/"mch"；CUE 轨为 None。
+    pub(crate) sacd_area: Option<String>,
 }
 
 /// 解析带段起止的合成路径；格式不符、数字非法或终点早于起点时返回 None。
+///
+/// 支持两种后缀：
+/// - CUE：`::track=NN::start=MM::end=EE`
+/// - SACD：`::track=NN::start=MM::end=EE::sacd=<2ch|mch>`
 pub(crate) fn parse_segment_path(path: &str) -> Option<ParsedSegmentPath<'_>> {
     // 源路径自身可能含 `::`，取最后一个标记作为段信息的起点。
     let marker_index = path.rfind("::track=")?;
@@ -636,7 +658,8 @@ pub(crate) fn parse_segment_path(path: &str) -> Option<ParsedSegmentPath<'_>> {
     let track_part = parts.next()?;
     let start_part = parts.next()?;
     let end_part = parts.next()?;
-    // 后缀只允许三段，多余内容视为损坏的合成路径。
+    let sacd_part = parts.next();
+    // 后缀最多四段，多余内容视为损坏的合成路径。
     if parts.next().is_some() {
         return None;
     }
@@ -646,11 +669,21 @@ pub(crate) fn parse_segment_path(path: &str) -> Option<ParsedSegmentPath<'_>> {
     if end_ms < start_ms {
         return None;
     }
+    let sacd_area = match sacd_part {
+        None => None,
+        Some(part) => match part.strip_prefix("sacd=") {
+            Some("2ch") => Some("2ch".to_string()),
+            Some("mch") => Some("mch".to_string()),
+            // 非法的区标记与多余段一律视为损坏路径。
+            Some(_) | None => return None,
+        },
+    };
     Some(ParsedSegmentPath {
         source_path,
         track_number,
         start_ms,
         end_ms,
+        sacd_area,
     })
 }
 
@@ -1096,5 +1129,65 @@ mod tests {
             segment_path_with_range("Music/Album/Track.flac", 7, 1_000, 2_000),
             "Music/Album/Track.flac::track=07::start=1000::end=2000"
         );
+    }
+
+    #[test]
+    fn builds_and_parses_sacd_segment_path() {
+        let source = "D:\\Music\\SACD\\album.iso";
+        let path = sacd_segment_path(source, "2ch", 3, 1_000, 201_000);
+        assert_eq!(
+            path,
+            "D:\\Music\\SACD\\album.iso::track=03::start=1000::end=201000::sacd=2ch"
+        );
+
+        let parsed = parse_segment_path(&path).expect("sacd path should parse");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.track_number, 3);
+        assert_eq!(parsed.start_ms, 1_000);
+        assert_eq!(parsed.end_ms, 201_000);
+        assert_eq!(parsed.sacd_area.as_deref(), Some("2ch"));
+    }
+
+    #[test]
+    fn parses_both_sacd_areas() {
+        for area in ["2ch", "mch"] {
+            let path = sacd_segment_path("Music/Album/disc.iso", area, 12, 0, 90_000);
+            let parsed = parse_segment_path(&path).expect("sacd path should parse");
+            assert_eq!(parsed.track_number, 12);
+            assert_eq!(parsed.sacd_area.as_deref(), Some(area));
+        }
+    }
+
+    #[test]
+    fn keeps_special_characters_in_sacd_source_path() {
+        let source = "D:\\我的 音乐\\专辑 & 精选 [SACD]\\disc.iso";
+        let path = sacd_segment_path(source, "mch", 1, 500, 61_000);
+        assert!(path.starts_with(source));
+        let parsed = parse_segment_path(&path).expect("sacd path should parse");
+        assert_eq!(parsed.source_path, source);
+        assert_eq!(parsed.sacd_area.as_deref(), Some("mch"));
+    }
+
+    #[test]
+    fn rejects_invalid_sacd_area_and_extra_segments() {
+        assert!(parse_segment_path(
+            "D:\\a.iso::track=01::start=0::end=1::sacd=5.1"
+        )
+        .is_none());
+        assert!(parse_segment_path("D:\\a.iso::track=01::start=0::end=1::sacd=")
+            .is_none());
+        assert!(parse_segment_path("D:\\a.iso::track=01::start=0::end=1::other=2ch")
+            .is_none());
+        assert!(parse_segment_path(
+            "D:\\a.iso::track=01::start=0::end=1::sacd=2ch::extra=1"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cue_segment_path_has_no_sacd_area() {
+        let path = segment_path_with_range("D:\\a.flac", 1, 0, 1_000);
+        let parsed = parse_segment_path(&path).expect("cue path should parse");
+        assert!(parsed.sacd_area.is_none());
     }
 }
