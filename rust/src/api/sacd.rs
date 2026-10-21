@@ -1,16 +1,21 @@
-//! SACD ISO 只读 TOC 解析模块。
+//! SACD ISO 只读解析与裸 DSD 轨道提取模块。
 //!
-//! 当前阶段只解析镜像的目录结构（Master TOC、Area TOC、TrackList），
-//! 不处理 DST 解码，也不接入扫描、播放或 FFI。
+//! 解析镜像的目录结构（Master TOC、Area TOC、TrackList），并把裸 DSD
+//! （3-in-14 / 3-in-16）轨道提取为 DSF 文件。不处理 DST 解码，也不接入
+//! 扫描、播放或 FFI。
 
 #![allow(dead_code)]
 
 mod area_toc;
+mod audio;
+mod dsf;
+mod extract;
 mod master_toc;
 mod reader;
 mod tracklist;
 mod types;
 
+pub(crate) use extract::extract_track_to_dsf;
 pub(crate) use reader::{is_sacd_iso, read_sacd_toc};
 pub(crate) use types::{SacdArea, SacdAreaKind, SacdError, SacdFrameFormat, SacdToc, SacdTrack};
 

@@ -31,7 +31,7 @@ const MAX_SECTORS_PER_READ: u64 = 128;
 
 /// 镜像的扇区布局。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SectorLayout {
+pub(super) enum SectorLayout {
     /// 标准 2048 字节扇区。
     Plain2048,
     /// 2064 字节扇区：12 字节头 + 2048 字节负载 + 4 字节尾。
@@ -164,7 +164,7 @@ fn read_area_at(
 }
 
 /// 已打开的 SACD 镜像。
-struct ImageReader {
+pub(super) struct ImageReader {
     file: File,
     layout: SectorLayout,
     file_len: u64,
@@ -172,7 +172,7 @@ struct ImageReader {
 
 impl ImageReader {
     /// 打开文件并识别扇区布局。
-    fn open(path: &Path) -> Result<Self, SacdError> {
+    pub(super) fn open(path: &Path) -> Result<Self, SacdError> {
         let mut file = File::open(path)?;
         let file_len = file.metadata()?.len();
         let layout = detect_layout(&mut file, file_len)?;
@@ -184,7 +184,7 @@ impl ImageReader {
     }
 
     /// 读取从 `lsn` 开始的 `count` 个逻辑扇区，返回连续的 2048 字节负载。
-    fn read_sectors(&mut self, lsn: u32, count: u16) -> Result<Vec<u8>, SacdError> {
+    pub(super) fn read_sectors(&mut self, lsn: u32, count: u16) -> Result<Vec<u8>, SacdError> {
         let count = u64::from(count);
         if count == 0 {
             return Err(SacdError::invalid("读取扇区数不能为 0"));
