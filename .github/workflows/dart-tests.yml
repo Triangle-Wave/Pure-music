@@ -35,5 +35,5 @@ jobs:
       - name: Pub get
         run: flutter pub get
 
-      - name: Run cue path tests
-        run: flutter test test/library/cue_segment_path_test.dart
+      - name: Run library tests
+        run: flutter test test/library/cue_segment_path_test.dart test/library/track_override_test.dart

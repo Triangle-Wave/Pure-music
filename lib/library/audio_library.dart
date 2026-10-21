@@ -15,6 +15,7 @@ import 'package:pure_music/core/page_sort.dart';
 import 'package:pure_music/native/rust/api/library_db.dart' as library_db;
 import 'package:pure_music/library/audio_sort.dart';
 import 'package:pure_music/library/cue_segment_path.dart';
+import 'package:pure_music/library/track_override.dart';
 import 'package:pure_music/library/library_page_order_cache.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/search_action_state.dart';
@@ -598,7 +599,10 @@ class AudioLibrary {
         objectBatchSize: objectBatchSize,
         totalStopwatch: stopwatch,
       );
-      if (loadedFromSqlite) return;
+      if (loadedFromSqlite) {
+        await _applyTrackOverrides();
+        return;
+      }
 
       await _initFromJsonIndex(
         indexPath: indexPath,
@@ -606,10 +610,44 @@ class AudioLibrary {
         objectBatchSize: objectBatchSize,
         totalStopwatch: stopwatch,
       );
+      await _applyTrackOverrides();
     } catch (err, trace) {
       log.library.error('legacy', err.toString(), stackTrace: trace);
       rethrow;
     }
+  }
+
+  /// 把本地覆盖值合并到 CUE 虚拟轨；读取失败只降级为未覆盖。
+  static Future<void> _applyTrackOverrides() async {
+    final Map<String, TrackOverride> overrides;
+    try {
+      overrides = await TrackOverrideStore.instance.loadAll();
+    } catch (err, trace) {
+      log.library.warn(
+        'legacy',
+        '读取 CUE 轨覆盖标签失败',
+        error: err,
+        stackTrace: trace,
+      );
+      return;
+    }
+    if (overrides.isEmpty) return;
+
+    var applied = 0;
+    for (final audio in instance.audioCollection) {
+      final segment = audio.cueSegment;
+      if (segment == null) continue;
+      final override = overrides[segment.trackUid];
+      if (override == null) continue;
+      audio.applyTrackOverride(override);
+      applied++;
+    }
+    if (applied == 0) return;
+
+    instance._buildCollections();
+    libraryVersion.value++;
+    artistPageVersion.value++;
+    albumPageVersion.value++;
   }
 
   static Future<bool> _tryInitFromSqlite({
@@ -2702,6 +2740,19 @@ class Audio {
   void _primeSearchCache(_AudioLoadPool pool) {
     _searchNorm = pool.text(normalizedSearchQuery(title).toLowerCase());
     _searchPinyin = pool.text(title.getPinyinInitials().toLowerCase());
+  }
+
+  /// 把本地覆盖值合并到当前曲目；null 字段保留原值。
+  void applyTrackOverride(TrackOverride override) {
+    title = override.title ?? title;
+    artist = override.artist ?? artist;
+    album = override.album ?? album;
+    albumArtist = override.albumArtist ?? albumArtist;
+    track = override.track ?? track;
+    disc = override.disc ?? disc;
+    splitedArtists = _splitArtistNames(artist);
+    splitedAlbumArtists = _splitArtistNames(albumArtist ?? '');
+    _invalidateSearchCache();
   }
 
   void _invalidateSearchCache() {

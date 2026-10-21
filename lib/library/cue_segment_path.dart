@@ -13,6 +13,10 @@ class CueSegmentPath {
   final int endMs;
 
   int get durationMs => endMs > startMs ? endMs - startMs : 0;
+
+  /// 覆盖标签的稳定主键：源路径小写并统一分隔符，轨号至少两位。
+  String get trackUid =>
+      'cue:${sourcePath.replaceAll('\\', '/').toLowerCase()}#${trackNumber.toString().padLeft(2, '0')}';
 }
 
 /// 解析合成路径；普通文件路径返回 null。

@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS album_colors (
   p INTEGER NOT NULL,
   on_p INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS track_overrides (
+  track_uid TEXT PRIMARY KEY,
+  title TEXT,
+  artist TEXT,
+  album TEXT,
+  album_artist TEXT,
+  track INTEGER,
+  disc INTEGER,
+  updated_at INTEGER NOT NULL
+);
 ''');
 
     _migrate(db);

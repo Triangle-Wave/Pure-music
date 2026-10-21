@@ -16,6 +16,7 @@ import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/library/track_override.dart';
 import 'package:pure_music/lyric/lrc_serializer.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/native/rust/api/utils.dart';
@@ -97,6 +98,7 @@ class _FieldControllers {
   final title = TextEditingController();
   final artist = TextEditingController();
   final album = TextEditingController();
+  final albumArtist = TextEditingController();
   final genre = TextEditingController();
   final year = TextEditingController();
   final track = TextEditingController();
@@ -116,6 +118,7 @@ class _FieldControllers {
     title.text = audio.title;
     artist.text = audio.artist;
     album.text = audio.album;
+    albumArtist.text = audio.albumArtist ?? '';
     genre.text = _findItem(items, 'genre') ?? '';
     year.text = _findItem(items, 'year') ?? '';
     track.text = audio.track > 0 ? audio.track.toString() : '';
@@ -136,6 +139,7 @@ class _FieldControllers {
     title.dispose();
     artist.dispose();
     album.dispose();
+    albumArtist.dispose();
     genre.dispose();
     year.dispose();
     track.dispose();
@@ -157,6 +161,9 @@ class _FieldControllers {
       title: title.text,
       artist: artist.text,
       album: album.text,
+      albumArtist: albumArtist.text.trim().isEmpty
+          ? null
+          : albumArtist.text.trim(),
       genre: genre.text,
       year: year.text,
       track: track.text,
@@ -260,10 +267,6 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _enterEditMode() async {
-    if (audio.isCueTrack) {
-      showTextOnSnackBar('CUE 轨暂不支持编辑标签');
-      return;
-    }
     final requestToken = ++_editRequestToken;
     await applyAudioDetailMetadataIfMounted(
       future: _getAudioExtra(audio),
@@ -304,7 +307,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
 
   Future<void> _saveEdit() async {
     if (audio.isCueTrack) {
-      showTextOnSnackBar('CUE 轨暂不支持编辑标签');
+      await _saveCueOverride();
       return;
     }
     setState(() => _isSaving = true);
@@ -346,6 +349,11 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         },
       );
       _audioExtraCache.evict(audio);
+      final albumArtistText = payload.albumArtist;
+      audio.albumArtist =
+          albumArtistText == null || albumArtistText.trim().isEmpty
+          ? null
+          : albumArtistText.trim();
       AudioLibrary.instance.updateAudioTags(
         audio,
         title: _controllers.title.text,
@@ -368,6 +376,68 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         showTextOnSnackBar(
           coverWritten ? '封面已写入，标签保存失败，请查看日志' : '保存标签失败，请查看日志',
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  Future<void> _saveCueOverride() async {
+    final segment = audio.cueSegment;
+    if (segment == null) return;
+    if (_pendingCoverBytes != null) {
+      showTextOnSnackBar('CUE 轨暂不支持修改封面');
+      return;
+    }
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+    try {
+      final payload = _controllers.buildPayload();
+      final title = (payload.title ?? audio.title).trim();
+      final artist = (payload.artist ?? audio.artist).trim();
+      final album = (payload.album ?? audio.album).trim();
+      final albumArtistText = payload.albumArtist;
+      final albumArtist =
+          albumArtistText == null || albumArtistText.trim().isEmpty
+          ? audio.albumArtist
+          : albumArtistText.trim();
+      final track = int.tryParse((payload.track ?? '').trim()) ?? audio.track;
+      final disc = int.tryParse((payload.disc ?? '').trim()) ?? audio.disc;
+      await TrackOverrideStore.instance.save(
+        TrackOverride(
+          trackUid: segment.trackUid,
+          title: title,
+          artist: artist,
+          album: album,
+          albumArtist: albumArtist,
+          track: track,
+          disc: disc,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      audio.albumArtist = albumArtist;
+      AudioLibrary.instance.updateAudioTags(
+        audio,
+        title: title,
+        artist: artist,
+        album: album,
+        track: track,
+        disc: disc,
+      );
+      if (!mounted) return;
+      _cancelEdit();
+      showTextOnSnackBar('已保存到本地标签', variant: ToastVariant.success);
+    } catch (error, trace) {
+      log.library.error(
+        'legacy',
+        '保存 CUE 轨标签失败',
+        error: error,
+        stackTrace: trace,
+      );
+      if (mounted) {
+        showTextOnSnackBar('保存标签失败，请查看日志', variant: ToastVariant.error);
       }
     } finally {
       if (mounted) {
@@ -720,8 +790,8 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
       runSpacing: 8,
       children: [
         IconButton.filledTonal(
-          tooltip: audio.isCueTrack ? 'CUE 轨暂不支持编辑标签' : '编辑标签',
-          onPressed: audio.isCueTrack ? null : _enterEditMode,
+          tooltip: '编辑标签',
+          onPressed: _enterEditMode,
           style: _headerActionStyle(),
           icon: const Icon(Symbols.edit),
         ),
@@ -874,6 +944,12 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
           label: '专辑',
           controller: _controllers.album,
           decoration: _chipDecoration(scheme),
+        ),
+        const SizedBox(height: 10),
+        _DetailTextField(
+          label: '专辑艺术家',
+          controller: _controllers.albumArtist,
+          decoration: _chipDecoration(scheme, '多个用 / 分隔'),
         ),
         const SizedBox(height: 14),
         _editInfoActions(),
