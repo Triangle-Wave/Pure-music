@@ -111,6 +111,15 @@ jobs:
           git checkout -- analysis_options.yaml pubspec.lock windows/flutter
           git status --short
 
+      - name: Upload generated bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: frb-generated
+          path: |
+            lib/native/rust/
+            rust/src/frb_generated.rs
+          if-no-files-found: error
+
       - name: Build release
         run: flutter build windows --release
 
