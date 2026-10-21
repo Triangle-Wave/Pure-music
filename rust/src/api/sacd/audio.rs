@@ -325,7 +325,8 @@ mod tests {
 
         let dst = AudioFrameInfo::from_bytes(&[4, 5, 6, 0xA6], true).expect("解析 DST 帧信息");
         assert_eq!((dst.minutes, dst.seconds, dst.frames), (4, 5, 6));
-        assert_eq!(dst.sector_count, 0x29);
+        // 0xA6 >> 2 & 0x1F = 9；低两位是声道提示位。
+        assert_eq!(dst.sector_count, 9);
 
         assert!(AudioFrameInfo::from_bytes(&[1, 2], false).is_err());
         assert!(AudioFrameInfo::from_bytes(&[1, 2, 3], true).is_err());
