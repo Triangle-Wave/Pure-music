@@ -9,57 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  codegen:
-    runs-on: windows-2022
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.7'
-          channel: stable
-          cache: true
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Pub get
-        run: flutter pub get
-
-      - name: Install codegen
-        run: |
-          cargo install cargo-expand --locked
-          cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
-
-      - name: Generate bindings
-        run: flutter_rust_bridge_codegen generate
-
-      - name: Report generated files
-        shell: pwsh
-        run: |
-          git status --short
-          Write-Output '--- diff stat ---'
-          git diff --stat
-          Write-Output '--- AudioExtraMetadata ---'
-          Select-String -Path lib/native/rust/api/tag_reader.dart -Pattern 'AudioExtraMetadata' -SimpleMatch | Select-Object -First 5
-          Write-Output '--- IndexActionState ---'
-          Select-String -Path lib/native/rust/api/tag_reader.dart -Pattern 'IndexActionState' -SimpleMatch | Select-Object -First 5
-          Write-Output '--- library_db functions ---'
-          Select-String -Path lib/native/rust/api/library_db.dart -Pattern 'getTopPlayed|incrementPlayCount' | Select-Object -First 5
-
-      - name: Upload generated bindings
-        uses: actions/upload-artifact@v4
-        with:
-          name: frb-generated
-          path: |
-            lib/native/rust/
-            rust/src/frb_generated.rs
-          if-no-files-found: error
-
   build:
     runs-on: windows-2022
     timeout-minutes: 60
@@ -114,6 +63,44 @@ jobs:
 
       - name: Pub get
         run: flutter pub get
+
+      # 本地没有 Flutter/Rust 时无法生成绑定；构建前在 CI 生成，保证 Rust 结构体与 Dart 绑定一致。
+      - name: Install flutter_rust_bridge_codegen
+        run: |
+          cargo install cargo-expand --locked
+          cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
+
+      - name: Generate FRB bindings
+        run: flutter_rust_bridge_codegen generate
+
+      # codegen 2.12.0 不生成子模块的 export 行；这三个入口固定需要。
+      - name: Restore FRB module exports
+        shell: pwsh
+        run: |
+          $targets = @{
+            'lib/native/rust/api/library_db.dart' = @(
+              "export 'library_db/play_counts.dart';"
+            )
+            'lib/native/rust/api/tag_reader.dart' = @(
+              "export 'tag_reader/extra_metadata.dart';",
+              "export 'tag_reader/index_state.dart';"
+            )
+          }
+          foreach ($target in $targets.GetEnumerator()) {
+            $content = Get-Content -LiteralPath $target.Key -Raw
+            foreach ($line in $target.Value) {
+              if ($content -notmatch [regex]::Escape($line)) {
+                Add-Content -LiteralPath $target.Key -Value $line
+              }
+            }
+          }
+
+      # 只保留绑定产物；恢复 codegen 顺带改写的 lock、lint 与插件注册文件。
+      - name: Restore unrelated generated files
+        shell: pwsh
+        run: |
+          git checkout -- analysis_options.yaml pubspec.lock windows/flutter
+          git status --short
 
       - name: Build release
         run: flutter build windows --release
