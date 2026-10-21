@@ -87,12 +87,21 @@ jobs:
             )
           }
           foreach ($target in $targets.GetEnumerator()) {
-            $content = Get-Content -LiteralPath $target.Key -Raw
-            foreach ($line in $target.Value) {
-              if ($content -notmatch [regex]::Escape($line)) {
-                Add-Content -LiteralPath $target.Key -Value $line
-              }
+            $lines = [System.Collections.Generic.List[string]](Get-Content -LiteralPath $target.Key)
+            $missing = @($target.Value | Where-Object { $lines -notcontains $_ })
+            if ($missing.Count -eq 0) { continue }
+
+            $lastImport = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match '^import ') { $lastImport = $i }
             }
+            if ($lastImport -lt 0) {
+              throw "no import block in $($target.Key)"
+            }
+
+            $insert = @('') + $missing
+            $lines.InsertRange($lastImport + 1, [string[]]$insert)
+            Set-Content -LiteralPath $target.Key -Value $lines -Encoding utf8NoBOM
           }
 
       # 只保留绑定产物；恢复 codegen 顺带改写的 lock、lint 与插件注册文件。
