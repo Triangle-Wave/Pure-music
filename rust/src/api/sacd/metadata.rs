@@ -2,8 +2,9 @@
 //!
 //! SACD 镜像常附带描述专辑与曲目的 XML，不同抓轨工具的元素名与命名空间并
 //! 不统一。本模块按元素本地名（去掉命名空间前缀后小写）匹配常见同义词，
-//! 用事件流逐元素解析，只保留专辑与曲目字段。读取或解析失败返回 `None`，
-//! 由调用方回退到默认标题。
+//! 同时识别 `<meta name="KEY" value="VALUE"/>` 形式的键值对（键去首尾空格、
+//! 大小写不敏感），用事件流逐元素解析，只保留专辑与曲目字段。读取或解析
+//! 失败返回 `None`，由调用方回退到默认标题。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,18 @@ const TRACK_CONTAINERS: [&str; 4] = ["track", "song", "chapter", "audio"];
 /// 轨号元素与属性的本地名。
 const TRACK_NUMBER_FIELDS: [&str; 5] = ["number", "no", "index", "sequence", "tracknumber"];
 
+/// 键值对元数据元素的本地名。
+const META_ELEMENTS: [&str; 1] = ["meta"];
+
+/// 轨号来源的优先级：显式轨号高于容器 id，出现顺序只作为最后兜底。
+const TRACK_NUMBER_RANK_EXPLICIT: u8 = 0;
+const TRACK_NUMBER_RANK_ID: u8 = 1;
+
+/// 专辑艺术家候选的优先级：ALBUM ARTIST 高于专辑级 ARTIST，曲目艺术家只作兜底。
+const ALBUM_ARTIST_RANK_ALBUM_ARTIST: u8 = 0;
+const ALBUM_ARTIST_RANK_ALBUM: u8 = 1;
+const ALBUM_ARTIST_RANK_TRACK: u8 = 2;
+
 /// ISO 同目录 XML 中解析出的专辑与曲目信息。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[frb(ignore)]
@@ -32,7 +45,7 @@ pub(crate) struct SacdXmlMetadata {
     pub(crate) album: Option<String>,
     /// 专辑艺术家。
     pub(crate) album_artist: Option<String>,
-    /// 曲目，按 XML 出现顺序排列。
+    /// 曲目，按 XML 出现顺序收集；轨号取 TRACKNUMBER、track id 或出现顺序。
     pub(crate) tracks: Vec<SacdXmlTrack>,
 }
 
@@ -187,11 +200,12 @@ pub(crate) fn parse_xml(xml: &str) -> Option<SacdXmlMetadata> {
             Err(error) => {
                 // 半截 XML 也可能已经给出专辑与曲目，保留已解析部分。
                 let partial = state.metadata.has_content() || state.current_track.is_some();
-                if !partial {
-                    log::debug!(target: "tag", "SACD XML 解析中断: {error}");
-                    return None;
+                if partial {
+                    log::warn!(target: "tag", "SACD XML 解析中断，保留已解析内容: {error}");
+                    break;
                 }
-                break;
+                log::warn!(target: "tag", "SACD XML 解析失败: {error}");
+                return None;
             }
         }
     }
@@ -256,6 +270,7 @@ struct ParseState {
     current_track: Option<SacdXmlTrack>,
     album_artist_rank: u8,
     track_artist_rank: u8,
+    track_number_rank: u8,
     text: String,
 }
 
@@ -267,6 +282,7 @@ impl Default for ParseState {
             current_track: None,
             album_artist_rank: u8::MAX,
             track_artist_rank: u8::MAX,
+            track_number_rank: u8::MAX,
             text: String::new(),
         }
     }
@@ -299,13 +315,26 @@ impl ParseState {
         if opens_track {
             self.current_track = Some(SacdXmlTrack::default());
             self.track_artist_rank = u8::MAX;
+            self.track_number_rank = u8::MAX;
         }
-        self.apply_attributes(start);
+        let in_track = self.current_track.is_some();
+
+        if is_meta_element(&name) {
+            // `<meta name="KEY" value="VALUE"/>` 的 name 属性是字段名，不能当标题。
+            let field = self.start_meta(start, in_track);
+            self.stack.push(Frame {
+                field,
+                opens_track: false,
+            });
+            return;
+        }
+
+        self.apply_attributes(start, opens_track, in_track);
         let field = if is_track_container(&name) {
             // 容器自身直接携带文本时按曲名处理，子元素字段优先。
             Field::TrackTitle
         } else {
-            classify_field(&name, self.current_track.is_some())
+            classify_field(&name, in_track)
         };
         self.stack.push(Frame { field, opens_track });
     }
@@ -371,36 +400,32 @@ impl ParseState {
         }
     }
 
-    fn apply_attributes(&mut self, start: &BytesStart<'_>) {
-        for attribute in start.attributes() {
-            let attribute = match attribute {
-                Ok(attribute) => attribute,
-                Err(_) => continue,
-            };
+    /// 读取元素属性；`opens_track` 表示该元素刚刚开启曲目容器。
+    fn apply_attributes(&mut self, start: &BytesStart<'_>, opens_track: bool, in_track: bool) {
+        for attribute in start.attributes().flatten() {
             let key = local_name(attribute.key.0).to_ascii_lowercase();
-            let value = attribute.value.trim();
-            self.assign_attribute(&key, value);
+            let value = attribute_value(&attribute);
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if opens_track && key == "id" {
+                self.assign_track_number(value, TRACK_NUMBER_RANK_ID);
+                continue;
+            }
+            self.assign_attribute(&key, value, in_track);
         }
     }
 
-    fn assign_attribute(&mut self, key: &str, value: &str) {
+    fn assign_attribute(&mut self, key: &str, value: &str, in_track: bool) {
         if TRACK_NUMBER_FIELDS.contains(&key) {
-            if let Some(track) = self.current_track.as_mut() {
-                if track.number.is_none() {
-                    track.number = parse_track_number(value);
-                }
-            }
+            self.assign_track_number(value, TRACK_NUMBER_RANK_EXPLICIT);
             return;
         }
         if matches!(key, "duration" | "length" | "time") {
-            if let Some(track) = self.current_track.as_mut() {
-                if track.duration_secs.is_none() {
-                    track.duration_secs = parse_duration_secs(value);
-                }
-            }
+            self.assign(Field::TrackDuration, value);
             return;
         }
-        let in_track = self.current_track.is_some();
         match key {
             "title" | "name" | "tracktitle" => {
                 if in_track {
@@ -412,14 +437,53 @@ impl ParseState {
             "artist" | "performer" | "composer" | "trackartist" => {
                 if in_track {
                     self.assign(Field::TrackArtist(track_artist_rank(key)), value);
+                    if matches!(key, "artist" | "performer") {
+                        self.assign(Field::AlbumArtist(ALBUM_ARTIST_RANK_TRACK), value);
+                    }
                 } else {
                     self.assign(Field::AlbumArtist(album_artist_rank(key)), value);
                 }
             }
             "album" | "albumtitle" | "disc" => self.assign(Field::Album, value),
-            "albumartist" => self.assign(Field::AlbumArtist(0), value),
+            "albumartist" => {
+                self.assign(Field::AlbumArtist(ALBUM_ARTIST_RANK_ALBUM_ARTIST), value);
+            }
             _ => {}
         }
+    }
+
+    /// 解析 `<meta name="KEY" value="VALUE"/>`。
+    ///
+    /// 带 `value` 属性时立即写入并返回 `Field::None`；只有键没有值时返回键对应
+    /// 的字段，交给元素文本填充。键已去首尾空格并转小写。
+    fn start_meta(&mut self, start: &BytesStart<'_>, in_track: bool) -> Field {
+        let Some(key) = attribute_text(start, &["name", "key"]) else {
+            return Field::None;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return Field::None;
+        }
+        let field = classify_meta_key(&key, in_track);
+        match attribute_text(start, &["value", "val"]) {
+            Some(value) => {
+                self.assign_meta(&key, field, &value, in_track);
+                Field::None
+            }
+            None => field,
+        }
+    }
+
+    fn assign_meta(&mut self, key: &str, field: Field, value: &str, in_track: bool) {
+        if in_track && (TRACK_NUMBER_FIELDS.contains(&key) || key == "track number") {
+            self.assign_track_number(value, TRACK_NUMBER_RANK_EXPLICIT);
+            return;
+        }
+        if in_track && matches!(key, "artist" | "performer") {
+            // 专辑没有独立的 ALBUM ARTIST 时，用曲目艺术家兜底。
+            self.assign(Field::AlbumArtist(ALBUM_ARTIST_RANK_TRACK), value);
+        }
+        self.assign(field, value);
     }
 
     fn assign(&mut self, field: Field, value: &str) {
@@ -439,13 +503,7 @@ impl ParseState {
                     self.album_artist_rank = rank;
                 }
             }
-            Field::TrackNumber => {
-                if let Some(track) = self.current_track.as_mut() {
-                    if track.number.is_none() {
-                        track.number = parse_track_number(value);
-                    }
-                }
-            }
+            Field::TrackNumber => self.assign_track_number(value, TRACK_NUMBER_RANK_EXPLICIT),
             Field::TrackTitle => {
                 if let Some(track) = self.current_track.as_mut() {
                     if track.title.is_none() {
@@ -472,19 +530,54 @@ impl ParseState {
         }
     }
 
-    /// 结束当前曲目，缺轨号时按出现顺序补号；没有任何字段的容器丢弃。
+    /// 记录轨号：显式轨号优先于容器 id，出现顺序只在结束时补号。
+    fn assign_track_number(&mut self, value: &str, rank: u8) {
+        let Some(number) = parse_track_number(value) else {
+            log::debug!(target: "tag", "跳过无法解析的 SACD 轨号: value={value}");
+            return;
+        };
+        if rank >= self.track_number_rank || self.current_track.is_none() {
+            return;
+        }
+        if let Some(track) = self.current_track.as_mut() {
+            track.number = Some(number);
+            self.track_number_rank = rank;
+        }
+    }
+
+    /// 结束当前曲目，缺轨号时按已收曲目数补号并避开已用轨号。
     fn finish_track(&mut self) {
         let Some(mut track) = self.current_track.take() else {
             return;
         };
         self.track_artist_rank = u8::MAX;
+        self.track_number_rank = u8::MAX;
         if !track.has_content() {
             return;
         }
         if track.number.is_none() {
-            track.number = Some(self.metadata.tracks.len() as u32 + 1);
+            track.number = Some(self.next_order_number());
         }
         self.metadata.tracks.push(track);
+    }
+
+    fn next_order_number(&self) -> u32 {
+        let start = u32::try_from(self.metadata.tracks.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let mut candidate = start;
+        for _ in 0..=self.metadata.tracks.len() {
+            if !self
+                .metadata
+                .tracks
+                .iter()
+                .any(|track| track.number == Some(candidate))
+            {
+                return candidate;
+            }
+            candidate = candidate.saturating_add(1);
+        }
+        candidate
     }
 }
 
@@ -494,6 +587,10 @@ fn local_name(name: &str) -> &str {
 
 fn is_track_container(name: &str) -> bool {
     TRACK_CONTAINERS.contains(&name)
+}
+
+fn is_meta_element(name: &str) -> bool {
+    META_ELEMENTS.contains(&name)
 }
 
 fn classify_field(name: &str, in_track: bool) -> Field {
@@ -512,10 +609,73 @@ fn classify_field(name: &str, in_track: bool) -> Field {
     }
     match name {
         "album" | "albumtitle" | "disc" | "title" => Field::Album,
-        "albumartist" => Field::AlbumArtist(0),
-        "artist" => Field::AlbumArtist(1),
-        "performer" => Field::AlbumArtist(2),
+        "albumartist" => Field::AlbumArtist(ALBUM_ARTIST_RANK_ALBUM_ARTIST),
+        "artist" => Field::AlbumArtist(ALBUM_ARTIST_RANK_ALBUM),
+        "performer" => Field::AlbumArtist(ALBUM_ARTIST_RANK_TRACK),
         _ => Field::None,
+    }
+}
+
+/// 键值对元素中的字段名映射；键已去首尾空格并转小写。
+fn classify_meta_key(key: &str, in_track: bool) -> Field {
+    if in_track && (TRACK_NUMBER_FIELDS.contains(&key) || key == "track number") {
+        return Field::TrackNumber;
+    }
+    match key {
+        "title" | "tracktitle" | "track title" | "songtitle" | "song title" | "name" => {
+            if in_track {
+                Field::TrackTitle
+            } else {
+                Field::Album
+            }
+        }
+        "album" | "albumtitle" | "album title" => Field::Album,
+        "album artist" | "albumartist" | "album_artist" => {
+            Field::AlbumArtist(ALBUM_ARTIST_RANK_ALBUM_ARTIST)
+        }
+        "artist" => {
+            if in_track {
+                Field::TrackArtist(0)
+            } else {
+                Field::AlbumArtist(ALBUM_ARTIST_RANK_ALBUM)
+            }
+        }
+        "performer" => {
+            if in_track {
+                Field::TrackArtist(1)
+            } else {
+                Field::AlbumArtist(ALBUM_ARTIST_RANK_TRACK)
+            }
+        }
+        "composer" if in_track => Field::TrackArtist(2),
+        "duration" | "length" | "time" if in_track => Field::TrackDuration,
+        _ => Field::None,
+    }
+}
+
+/// 读取首个名称匹配的属性值；属性顺序不影响结果。
+fn attribute_text(start: &BytesStart<'_>, names: &[&str]) -> Option<String> {
+    for attribute in start.attributes().flatten() {
+        let key = local_name(attribute.key.0);
+        if names.iter().any(|name| key.eq_ignore_ascii_case(name)) {
+            return Some(attribute_value(&attribute));
+        }
+    }
+    None
+}
+
+/// 读取属性值并还原预定义实体；还原失败时退回原始文本。
+fn attribute_value(attribute: &quick_xml::events::attributes::Attribute<'_>) -> String {
+    match attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
+        Ok(value) => value.into_owned(),
+        Err(error) => {
+            log::warn!(
+                target: "tag",
+                "SACD XML 属性值实体解析失败: key={}: {error:?}",
+                attribute.key.0
+            );
+            attribute.value.to_string()
+        }
     }
 }
 
@@ -532,9 +692,9 @@ fn track_artist_rank(name: &str) -> u8 {
 /// 专辑艺术家的优先级：albumartist 优先于 artist，artist 优先于 performer。
 fn album_artist_rank(name: &str) -> u8 {
     match name {
-        "albumartist" => 0,
-        "artist" => 1,
-        "performer" => 2,
+        "albumartist" => ALBUM_ARTIST_RANK_ALBUM_ARTIST,
+        "artist" => ALBUM_ARTIST_RANK_ALBUM,
+        "performer" => ALBUM_ARTIST_RANK_TRACK,
         _ => u8::MAX,
     }
 }
@@ -735,5 +895,86 @@ mod tests {
         assert_eq!(parse_duration_secs("PT3M45S"), Some(225));
         assert_eq!(parse_duration_secs("1:02:03"), Some(3723));
         assert_eq!(parse_duration_secs("95"), Some(95));
+    }
+
+    #[test]
+    fn maps_real_sacd_meta_tracks_by_track_number() {
+        // 真实 SACD 抓轨 XML 的 track 元素乱序出现，轨号在 TRACKNUMBER 键值对里。
+        let order = [5_u32, 2, 4, 10, 8, 6, 7, 9, 3, 1];
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="utf-8"?><!--SACD metabase file--><root><store id="store-1" type="SACD" version="1.1">"#,
+        );
+        for (position, number) in order.iter().enumerate() {
+            let title = format!("曲目{number:02}");
+            // 相邻曲目采用不同的 meta 顺序，验证解析不依赖元素顺序。
+            let meta = if position % 2 == 0 {
+                format!(
+                    r#"<meta name="ARTIST" value="张国荣"/><meta name="TITLE" value="{title}"/><meta name="ALBUM" value="宠爱"/><meta name="DATE" value="2018-03-06"/><meta name="ALBUM ARTIST" value="张国荣"/><meta name="TRACKNUMBER" value="{number}"/><meta name="TOTALTRACKS" value="10"/><meta name="TOTALDISCS" value="1"/>"#
+                )
+            } else {
+                format!(
+                    r#"<meta name="TRACKNUMBER" value="{number}"/><meta name="TOTALDISCS" value="1"/><meta name="ALBUM ARTIST" value="张国荣"/><meta name="TITLE" value="{title}"/><meta name="DATE" value="2018-03-06"/><meta name="ARTIST" value="张国荣"/><meta name="ALBUM" value="宠爱"/><meta name="TOTALTRACKS" value="10"/>"#
+                )
+            };
+            xml.push_str(&format!(r#"<track id="{number}">{meta}</track>"#));
+        }
+        xml.push_str("</store></root>");
+
+        let metadata = parse_xml(&xml).expect("应解析出 SACD 元数据");
+        assert_eq!(metadata.album.as_deref(), Some("宠爱"));
+        assert_eq!(metadata.album_artist.as_deref(), Some("张国荣"));
+        assert_eq!(metadata.tracks.len(), 10);
+        assert_eq!(metadata.tracks[0].number, Some(5), "曲目按 XML 出现顺序收集");
+        assert_eq!(metadata.tracks[0].title.as_deref(), Some("曲目05"));
+
+        for number in 1..=10_u32 {
+            let index = (number - 1) as usize;
+            let track = track_for(&metadata, number, index).expect("TOC 轨号应命中对应曲目");
+            let expected = format!("曲目{number:02}");
+            assert_eq!(track.number, Some(number));
+            assert_eq!(track.title.as_deref(), Some(expected.as_str()));
+            assert_eq!(track.artist.as_deref(), Some("张国荣"));
+        }
+    }
+
+    #[test]
+    fn parses_meta_key_with_spaces_and_mixed_case() {
+        let xml = r#"<root><store type="SACD" version="1.1"><track id="1">
+          <meta name=" Album Artist " value="专辑艺术家"/>
+          <meta name="Title" value="曲名"/>
+          <meta name="artist" value="曲目艺术家"/>
+          <meta name="TOTALTRACKS" value="1"/>
+        </track></store></root>"#;
+        let metadata = parse_xml(xml).expect("应解析出元数据");
+        assert_eq!(metadata.album_artist.as_deref(), Some("专辑艺术家"));
+        assert_eq!(metadata.tracks.len(), 1);
+        assert_eq!(metadata.tracks[0].number, Some(1));
+        assert_eq!(metadata.tracks[0].title.as_deref(), Some("曲名"));
+        assert_eq!(metadata.tracks[0].artist.as_deref(), Some("曲目艺术家"));
+    }
+
+    #[test]
+    fn falls_back_to_track_artist_for_album_artist() {
+        let xml = r#"<root><track id="1">
+          <meta name="ARTIST" value="歌手"/>
+          <meta name="TITLE" value="曲名"/>
+        </track></root>"#;
+        let metadata = parse_xml(xml).expect("应解析出元数据");
+        assert_eq!(metadata.album_artist.as_deref(), Some("歌手"));
+        assert_eq!(metadata.tracks[0].artist.as_deref(), Some("歌手"));
+    }
+
+    #[test]
+    fn falls_back_from_track_number_to_id_then_order() {
+        let xml = r#"<root>
+          <track id="9"><meta name="TRACKNUMBER" value="1"/><meta name="TITLE" value="显式优先"/></track>
+          <track id="3"><meta name="TITLE" value="id 回退"/></track>
+          <track><meta name="TITLE" value="顺序回退"/></track>
+        </root>"#;
+        let metadata = parse_xml(xml).expect("应解析出元数据");
+        assert_eq!(metadata.tracks.len(), 3);
+        assert_eq!(metadata.tracks[0].number, Some(1), "TRACKNUMBER 优先于 track id");
+        assert_eq!(metadata.tracks[1].number, Some(3), "缺少 TRACKNUMBER 时取 track id");
+        assert_eq!(metadata.tracks[2].number, Some(4), "补号应避开已占用的轨号");
     }
 }
