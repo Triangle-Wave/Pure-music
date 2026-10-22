@@ -68,6 +68,7 @@ class PlaybackService extends ChangeNotifier {
   Timer? _smtcPositionTimer;
   Timer? _smtcKeepAliveTimer;
   final Set<Timer> _positionSyncBurstTimers = {};
+  int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
   int? _listenRecordingToken;
   String? _supportPath;
@@ -2264,16 +2265,41 @@ class PlaybackService extends ChangeNotifier {
     );
     final transitioned = _synchronizeGaplessTransition();
     if (!transitioned) {
-      _player.seek(position);
+      try {
+        _player.seek(position);
+      } catch (err, trace) {
+        log.playback.error(
+          'legacy',
+          'seek 定位失败 pos=$position',
+          error: err,
+          stackTrace: trace,
+        );
+        return;
+      }
     }
     final effectivePosition = transitioned ? _player.position : position;
-    final remaining = _player.length - effectivePosition;
-    if (transitioned || remaining > 1.0) {
-      _rebuildGaplessPreparation();
-    }
-    _updateSmtcPosition();
-    playService.lyricService.findCurrLyricLineAt(effectivePosition);
-    _schedulePositionSyncBurst();
+    // 先让进度与歌词的可见状态对齐，重活放到下一轮事件循环。
+    _notifyPositionSync();
+    final revision = ++_seekDeferRevision;
+    Timer(const Duration(milliseconds: 16), () {
+      if (_closed || revision != _seekDeferRevision) return;
+      try {
+        final remaining = _player.length - effectivePosition;
+        if (transitioned || remaining > 1.0) {
+          _rebuildGaplessPreparation();
+        }
+        _updateSmtcPosition();
+        playService.lyricService.findCurrLyricLineAt(effectivePosition);
+        _schedulePositionSyncBurst();
+      } catch (err, trace) {
+        log.playback.warn(
+          'legacy',
+          'seek 后续同步失败 pos=$effectivePosition',
+          error: err,
+          stackTrace: trace,
+        );
+      }
+    });
   }
 
   Future<void> close() async {

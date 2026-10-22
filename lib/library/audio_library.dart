@@ -41,6 +41,25 @@ Set<String> _folderPathKeySet(Iterable<String> paths) {
   return result;
 }
 
+/// 同目录封面候选文件名，按优先级从高到低排列。
+/// 匹配目录项时统一转小写，覆盖 Windows 路径大小写不一致的情况。
+const List<String> folderCoverFileNames = <String>[
+  'cover.jpg',
+  'cover.jpeg',
+  'cover.png',
+  'cover.webp',
+  'folder.jpg',
+  'folder.jpeg',
+  'folder.png',
+  'folder.webp',
+  'front.jpg',
+  'front.jpeg',
+  'front.png',
+  'front.webp',
+];
+
+typedef _FolderCoverFile = ({String path, int modified});
+
 int? _optionalInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
@@ -433,6 +452,15 @@ class AudioLibrary {
   /// 仅用于 _smallCoverBytes 的 LRU 逐出，不涵盖 ImageProvider 缓存。
   final LinkedHashSet<String> _smallCoverOrder = LinkedHashSet<String>();
   final LinkedHashSet<String> _coverCachePaths = LinkedHashSet<String>();
+
+  /// 目录封面解析结果按目录共享，避免同一目录下每首曲目重复扫描目录项。
+  /// 值为 null 表示该目录已确认没有候选封面文件。
+  static const int _maxFolderCoverLookups = 4096;
+  final LinkedHashMap<String, _FolderCoverFile?> _folderCoverFiles =
+      LinkedHashMap<String, _FolderCoverFile?>();
+  final Map<String, Future<_FolderCoverFile?>> _folderCoverPending =
+      <String, Future<_FolderCoverFile?>>{};
+  int _folderCoverLookupGeneration = 0;
   static const int _maxRetainedCollectionThumbnails = 160;
   final LinkedHashMap<(Object, int), void Function()>
   _collectionThumbnailRetention =
@@ -808,6 +836,9 @@ class AudioLibrary {
     _preparedArtistsPage = null;
     _preparedAlbumsPage = null;
     _pageSnapshotCoordinator.reset();
+    _folderCoverLookupGeneration++;
+    _folderCoverFiles.clear();
+    _folderCoverPending.clear();
     final generation = _collectionGeneration;
     for (final artist in artistCollection.values) {
       artist.works.clear();
@@ -2261,6 +2292,88 @@ class AudioLibrary {
     }
   }
 
+  /// 同步读取已解析的目录封面；尚未解析时返回 null。
+  _FolderCoverFile? cachedFolderCoverFile(String directory) {
+    final key = _audioPathLookupKey(directory);
+    if (!_folderCoverFiles.containsKey(key)) return null;
+    final cached = _folderCoverFiles.remove(key);
+    _folderCoverFiles[key] = cached;
+    return cached;
+  }
+
+  /// 解析目录下的封面图片；同一目录的并发请求合并为一次扫描。
+  Future<_FolderCoverFile?> resolveFolderCoverFile(String directory) async {
+    final key = _audioPathLookupKey(directory);
+    if (_folderCoverFiles.containsKey(key)) {
+      final cached = _folderCoverFiles.remove(key);
+      _folderCoverFiles[key] = cached;
+      return cached;
+    }
+    final pending = _folderCoverPending[key];
+    if (pending != null) return pending;
+
+    final future = _scanFolderCoverFile(directory);
+    final generation = _folderCoverLookupGeneration;
+    _folderCoverPending[key] = future;
+    try {
+      final resolved = await future;
+      if (generation == _folderCoverLookupGeneration) {
+        _storeFolderCoverFile(key, resolved);
+      }
+      return resolved;
+    } finally {
+      if (identical(_folderCoverPending[key], future)) {
+        _folderCoverPending.remove(key);
+      }
+    }
+  }
+
+  void _storeFolderCoverFile(String key, _FolderCoverFile? value) {
+    _folderCoverFiles.remove(key);
+    _folderCoverFiles[key] = value;
+    while (_folderCoverFiles.length > _maxFolderCoverLookups) {
+      _folderCoverFiles.remove(_folderCoverFiles.keys.first);
+    }
+  }
+
+  Future<_FolderCoverFile?> _scanFolderCoverFile(String directory) async {
+    try {
+      final matches = <String, File>{};
+      final entities = Directory(directory).list(followLinks: false);
+      await for (final entity in entities) {
+        if (entity is! File) continue;
+        final name = p.basename(entity.path).toLowerCase();
+        if (folderCoverFileNames.contains(name)) {
+          matches.putIfAbsent(name, () => entity);
+        }
+      }
+      for (final name in folderCoverFileNames) {
+        final file = matches[name];
+        if (file == null) continue;
+        try {
+          final stat = await file.stat();
+          return (
+            path: file.path,
+            modified: stat.modified.millisecondsSinceEpoch ~/ 1000,
+          );
+        } catch (error, trace) {
+          log.app.debug(
+            'legacy',
+            '[cover] failed to stat folder cover ${file.path}: $error',
+            stackTrace: trace,
+          );
+        }
+      }
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to scan folder cover in $directory: $error',
+        stackTrace: trace,
+      );
+    }
+    return null;
+  }
+
   /// 完全释放数据库资源
   void dispose() {
     _collectionGeneration++;
@@ -2271,6 +2384,9 @@ class AudioLibrary {
     trimCollectionThumbnailRetention(0);
     _smallCoverOrder.clear();
     _coverCachePaths.clear();
+    _folderCoverLookupGeneration++;
+    _folderCoverFiles.clear();
+    _folderCoverPending.clear();
     _invalidateAggregatedRootFolders();
     _audioByPath.clear();
     audioCollection.clear();
@@ -2626,10 +2742,6 @@ class Audio {
   /// 上一次封面被访问的时间戳，用于冷数据回收
   int _coverLastAccessMs = 0;
   int _coverCacheGeneration = 0;
-  String? _folderCoverDirectory;
-  String? _folderCoverPath;
-  bool _folderCoverResolved = false;
-  Future<String?>? _folderCoverResolution;
 
   void _touchCoverAccess() {
     _coverLastAccessMs = DateTime.now().millisecondsSinceEpoch;
@@ -2780,10 +2892,6 @@ class Audio {
       evictCoverCacheIfPresent();
     }
     if (path != other.path) {
-      _folderCoverDirectory = null;
-      _folderCoverPath = null;
-      _folderCoverResolved = false;
-      _folderCoverResolution = null;
       _pathLookupKeyCache = other._pathLookupKeyCache;
       _cueSegmentCachePath = null;
       _cueSegmentCache = null;
@@ -2887,54 +2995,86 @@ class Audio {
     required int width,
     required int height,
   }) {
-    final directory = File(filePath).parent.path;
-    if (!_folderCoverResolved || _folderCoverDirectory != directory) {
+    try {
+      final directory = File(filePath).parent.path;
+      final cover = AudioLibrary.instance.cachedFolderCoverFile(directory);
+      if (cover == null) return null;
+      return _folderCoverProvider(
+        coverPath: cover.path,
+        width: width,
+        height: height,
+      );
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] cached folder cover lookup failed: $error',
+        stackTrace: trace,
+      );
       return null;
     }
-    final coverPath = _folderCoverPath;
-    if (coverPath == null) return null;
-    return _folderCoverProvider(
-      coverPath: coverPath,
-      width: width,
-      height: height,
-    );
   }
 
   Future<String?> resolveFolderCoverPath() async {
-    final directory = File(filePath).parent.path;
-    if (_folderCoverResolved && _folderCoverDirectory == directory) {
-      return _folderCoverPath;
+    try {
+      final directory = File(filePath).parent.path;
+      final file = await AudioLibrary.instance.resolveFolderCoverFile(
+        directory,
+      );
+      return file?.path;
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] folder cover path resolution failed: $error',
+        stackTrace: trace,
+      );
+      return null;
     }
-    final pending = _folderCoverResolution;
-    if (pending != null && _folderCoverDirectory == directory) {
-      return pending;
-    }
+  }
 
-    _folderCoverDirectory = directory;
-    _folderCoverPath = null;
-    _folderCoverResolved = false;
-    final future = () async {
-      String? resolvedPath;
-      for (final name in const ['cover.jpg', 'cover.png']) {
-        final candidate = File(p.join(directory, name));
-        if (await candidate.exists()) {
-          resolvedPath = candidate.path;
-          break;
+  /// 封面字节来源：同目录图片优先，音频文件内嵌图/系统缩略图兜底。
+  Future<List<_FolderCoverFile>> _coverSources() async {
+    final sources = <_FolderCoverFile>[];
+    try {
+      final directory = File(filePath).parent.path;
+      final folderCover = await AudioLibrary.instance.resolveFolderCoverFile(
+        directory,
+      );
+      if (folderCover != null) sources.add(folderCover);
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] folder cover source failed: $error',
+        stackTrace: trace,
+      );
+    }
+    sources.add((path: filePath, modified: modified));
+    return sources;
+  }
+
+  Future<T?> _loadFromCoverSources<T>(
+    Future<T?> Function(String path, int modified) load,
+  ) async {
+    try {
+      for (final source in await _coverSources()) {
+        try {
+          final result = await load(source.path, source.modified);
+          if (result != null) return result;
+        } catch (error, trace) {
+          log.app.debug(
+            'legacy',
+            '[cover] cover source failed ${source.path}: $error',
+            stackTrace: trace,
+          );
         }
       }
-      if (_folderCoverDirectory != directory) return null;
-      _folderCoverPath = resolvedPath;
-      _folderCoverResolved = true;
-      return resolvedPath;
-    }();
-    _folderCoverResolution = future;
-    try {
-      return await future;
-    } finally {
-      if (identical(_folderCoverResolution, future)) {
-        _folderCoverResolution = null;
-      }
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] cover source resolution failed: $error',
+        stackTrace: trace,
+      );
     }
+    return null;
   }
 
   Future<ImageProvider?> _getFolderCover({
@@ -2960,23 +3100,21 @@ class Audio {
     final cached = _coverImage?.target;
     if (cached != null) return cached;
     final generation = _coverCacheGeneration;
-    try {
-      final data = await CoverImageCache.instance.get(
-        path: filePath,
-        modified: modified,
+    final data = await _loadFromCoverSources(
+      (sourcePath, sourceModified) => CoverImageCache.instance.get(
+        path: sourcePath,
+        modified: sourceModified,
         width: 48,
         height: 48,
-      );
-      if (generation != _coverCacheGeneration) {
-        if (data != null) unawaited(data.evict());
-        return null;
-      }
-      _coverImage = data != null ? WeakReference(data) : null;
-      if (data != null) AudioLibrary.instance._registerCoverCache(this);
-      return data;
-    } catch (_) {
+      ),
+    );
+    if (generation != _coverCacheGeneration) {
+      if (data != null) unawaited(data.evict());
       return null;
     }
+    _coverImage = data != null ? WeakReference(data) : null;
+    if (data != null) AudioLibrary.instance._registerCoverCache(this);
+    return data;
   }
 
   /// 同步取已缓存的小封面字节（48×48 PNG）
@@ -2995,25 +3133,23 @@ class Audio {
     final cached = smallCoverBytes;
     if (cached != null) return cached;
     final generation = _coverCacheGeneration;
-    try {
-      final bytes = await CoverImageCache.instance.loadBytes(
-        path: filePath,
-        modified: modified,
+    final bytes = await _loadFromCoverSources(
+      (sourcePath, sourceModified) => CoverImageCache.instance.loadBytes(
+        path: sourcePath,
+        modified: sourceModified,
         width: 48,
         height: 48,
-      );
-      if (generation != _coverCacheGeneration) {
-        return null;
-      }
-      if (bytes != null) {
-        _smallCoverBytes = bytes;
-        _touchCoverAccess();
-        AudioLibrary.instance._registerSmallCoverBytes(this);
-      }
-      return bytes;
-    } catch (_) {
+      ),
+    );
+    if (generation != _coverCacheGeneration) {
       return null;
     }
+    if (bytes != null) {
+      _smallCoverBytes = bytes;
+      _touchCoverAccess();
+      AudioLibrary.instance._registerSmallCoverBytes(this);
+    }
+    return bytes;
   }
 
   /// 同步获取已缓存的封面（不触发异步加载）
@@ -3084,23 +3220,21 @@ class Audio {
     final cached = _mediumCoverImage?.target;
     if (cached != null) return cached;
     final generation = _coverCacheGeneration;
-    try {
-      final data = await CoverImageCache.instance.get(
-        path: filePath,
-        modified: modified,
+    final data = await _loadFromCoverSources(
+      (sourcePath, sourceModified) => CoverImageCache.instance.get(
+        path: sourcePath,
+        modified: sourceModified,
         width: 200,
         height: 200,
-      );
-      if (generation != _coverCacheGeneration) {
-        if (data != null) unawaited(data.evict());
-        return null;
-      }
-      _mediumCoverImage = data != null ? WeakReference(data) : null;
-      if (data != null) AudioLibrary.instance._registerCoverCache(this);
-      return data;
-    } catch (_) {
+      ),
+    );
+    if (generation != _coverCacheGeneration) {
+      if (data != null) unawaited(data.evict());
       return null;
     }
+    _mediumCoverImage = data != null ? WeakReference(data) : null;
+    if (data != null) AudioLibrary.instance._registerCoverCache(this);
+    return data;
   }
 
   /// now playing
@@ -3110,23 +3244,21 @@ class Audio {
     final cached = _largeCoverImage?.target;
     if (cached != null) return cached;
     final generation = _coverCacheGeneration;
-    try {
-      final data = await CoverImageCache.instance.get(
-        path: filePath,
-        modified: modified,
+    final data = await _loadFromCoverSources(
+      (sourcePath, sourceModified) => CoverImageCache.instance.get(
+        path: sourcePath,
+        modified: sourceModified,
         width: 420,
         height: 420,
-      );
-      if (generation != _coverCacheGeneration) {
-        if (data != null) unawaited(data.evict());
-        return null;
-      }
-      _largeCoverImage = data != null ? WeakReference(data) : null;
-      if (data != null) AudioLibrary.instance._registerCoverCache(this);
-      return data;
-    } catch (_) {
+      ),
+    );
+    if (generation != _coverCacheGeneration) {
+      if (data != null) unawaited(data.evict());
       return null;
     }
+    _largeCoverImage = data != null ? WeakReference(data) : null;
+    if (data != null) AudioLibrary.instance._registerCoverCache(this);
+    return data;
   }
 
   @override

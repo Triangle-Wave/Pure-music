@@ -250,12 +250,37 @@ class AlbumColorCache {
   }
 
   File? _findLocalCoverFileSync(Directory parent) {
-    final candidates = [
-      File(path.join(parent.path, 'cover.jpg')),
-      File(path.join(parent.path, 'cover.png')),
-    ];
-    for (final f in candidates) {
-      if (f.existsSync()) return f;
+    for (final name in folderCoverFileNames) {
+      try {
+        final candidate = File(path.join(parent.path, name));
+        if (candidate.existsSync()) return candidate;
+      } catch (error, trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] failed to stat folder cover $name: $error',
+          stackTrace: trace,
+        );
+      }
+    }
+    try {
+      final matches = <String, File>{};
+      for (final entity in parent.listSync(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = path.basename(entity.path).toLowerCase();
+        if (folderCoverFileNames.contains(name)) {
+          matches.putIfAbsent(name, () => entity);
+        }
+      }
+      for (final name in folderCoverFileNames) {
+        final file = matches[name];
+        if (file != null) return file;
+      }
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to scan folder cover in ${parent.path}: $error',
+        stackTrace: trace,
+      );
     }
     return null;
   }
@@ -870,9 +895,9 @@ class CoverImageCache {
     }
   }
 
-  /// 小封面（≤96 物理像素）直接 FFI 读音频文件，不走 SQLite 持久化层：
-  /// 内存缓存已足以覆盖列表滚动距离，省掉每次 stat + 全局锁 + SQLite 查询。
-  /// 大封面仍走持久化缓存，命中时避免重复读音频文件。
+  /// 音频文件：小封面（≤96 物理像素）直接 FFI 读内嵌图，不走 SQLite 持久化层；
+  /// 大封面走持久化缓存，命中时避免重复读音频文件。
+  /// 同目录封面图片：直接读取图片文件并解码缩放，失败时再走同一兜底链路。
   Future<Uint8List?> _loadBytesUncached({
     required String path,
     required int physicalWidth,
@@ -880,6 +905,14 @@ class CoverImageCache {
   }) async {
     developer.Timeline.startSync('cover.decode');
     try {
+      if (_isImageCoverPath(path)) {
+        final bytes = await _loadImageCoverFile(
+          path,
+          physicalWidth,
+          physicalHeight,
+        );
+        if (bytes != null) return bytes;
+      }
       final indexPath = _indexPath;
       final maxPhysical = max(physicalWidth, physicalHeight);
       if (indexPath != null && maxPhysical > 96) {
@@ -908,6 +941,58 @@ class CoverImageCache {
       );
     } finally {
       developer.Timeline.finishSync();
+    }
+  }
+
+  static const Set<String> _imageCoverExtensions = <String>{
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.webp',
+  };
+
+  bool _isImageCoverPath(String value) =>
+      _imageCoverExtensions.contains(path.extension(value).toLowerCase());
+
+  /// 同目录封面图片直接读取并按目标像素解码缩放。
+  /// 走图片文件自身的 Key（路径 + mtime + 尺寸），与音频内嵌图缓存键相互独立。
+  Future<Uint8List?> _loadImageCoverFile(
+    String imagePath,
+    int width,
+    int height,
+  ) async {
+    try {
+      final raw = await File(imagePath).readAsBytes();
+      if (raw.isEmpty) return null;
+      final codec = await ui.instantiateImageCodec(
+        raw,
+        targetWidth: width,
+        targetHeight: height,
+        allowUpscaling: false,
+      );
+      try {
+        final frame = await codec.getNextFrame();
+        try {
+          final data = await frame.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (data == null) return null;
+          return Uint8List.fromList(
+            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          );
+        } finally {
+          frame.image.dispose();
+        }
+      } finally {
+        codec.dispose();
+      }
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to read folder cover image $imagePath: $error',
+        stackTrace: trace,
+      );
+      return null;
     }
   }
 

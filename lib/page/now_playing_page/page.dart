@@ -2150,7 +2150,9 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
           _syncLivePosition(dragPosition.value, force: true);
           playbackService.seek(dragPosition.value);
         },
-        onTapDown: (details) {
+        // 点击抬起才落 seek：拖动由 onHorizontalDragEnd 落 seek，
+        // 用 onTapDown 会在拖动开始时先 seek 一次，造成重复定位。
+        onTapUp: (details) {
           final value = _seekValue(details.localPosition.dx, width, max);
           _syncLivePosition(value, force: true);
           playbackService.seek(value);

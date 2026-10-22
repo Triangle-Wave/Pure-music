@@ -20,6 +20,8 @@ import 'package:path/path.dart' as path;
 const int _bassConfigMidiDeffont = 0x10403;
 
 /// 播放预缓冲。解码可以提前准备，不直接等于听到的延迟。
+/// 拖动定位的卡顿来自 seek 前后的同步重活与额外 DSP 层，
+/// 这里维持 500ms 预缓冲，避免降低缓冲带来的断音回归。
 const int _playbackBufferMs = 500;
 
 /// 设备输出缓冲必须在 Init 前设置。500ms 实际不会生效，还会让人误以为暂停很钝；40ms 用来减少偶发破音。
@@ -1931,24 +1933,48 @@ class BassPlayer {
     malloc.free(pathPointer);
     if (handle == 0) return 0;
 
-    if (_bassFx != null) {
+    // 默认速率与音高下不套 tempo：少一层 DSP，整轨文件定位更快。
+    final hasRate = (_rate - 1.0).abs() > 1e-6;
+    final hasPitch = _pitch.abs() > 1e-6;
+    final needsTempo = _bassFx != null && (hasRate || hasPitch);
+    if (needsTempo) {
       final tempoHandle = _bassFx!.BASS_FX_TempoCreate(
         handle,
         BASS_FX_FREESOURCE | bass.BASS_STREAM_DECODE,
       );
       if (tempoHandle != 0) {
         handle = tempoHandle;
+      } else {
+        log.bass.warn(
+          'legacy',
+          '[bass] tempo stream unavailable, fallback to decode stream: '
+              '${_bass.BASS_ErrorGetCode()}',
+        );
       }
     }
-    if (_rate != 1.0) {
-      _bass.BASS_ChannelSetAttribute(
-        handle,
-        BASS_ATTRIB_TEMPO,
-        (_rate - 1.0) * 100.0,
+    if (hasRate &&
+        _bass.BASS_ChannelSetAttribute(
+              handle,
+              BASS_ATTRIB_TEMPO,
+              (_rate - 1.0) * 100.0,
+            ) ==
+            0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] set tempo on new source failed: ${_bass.BASS_ErrorGetCode()}',
       );
     }
-    if (_pitch != 0.0) {
-      _bass.BASS_ChannelSetAttribute(handle, BASS_ATTRIB_TEMPO_PITCH, _pitch);
+    if (hasPitch &&
+        _bass.BASS_ChannelSetAttribute(
+              handle,
+              BASS_ATTRIB_TEMPO_PITCH,
+              _pitch,
+            ) ==
+            0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] set pitch on new source failed: ${_bass.BASS_ErrorGetCode()}',
+      );
     }
     return handle;
   }
@@ -1957,7 +1983,10 @@ class BassPlayer {
     const playableFlags =
         bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
 
-    if (_bassFx != null) {
+    final needsTempo =
+        _bassFx != null &&
+        ((_rate - 1.0).abs() > 1e-6 || _pitch.abs() > 1e-6);
+    if (needsTempo) {
       final source = _createDecodeStream(audioPath);
       if (source != 0) {
         try {
@@ -3421,6 +3450,78 @@ class BassPlayer {
     if (keepTarget && target != null) _baseOutputVolume = target;
   }
 
+  /// tempo 句柄支持读取 BASS_ATTRIB_TEMPO；普通 decode 流读取失败。
+  bool _sourceSupportsTempo(int handle) {
+    final value = malloc.allocate<ffi.Float>(ffi.sizeOf<ffi.Float>());
+    try {
+      return _bass.BASS_ChannelGetAttribute(
+            handle,
+            BASS_ATTRIB_TEMPO,
+            value,
+          ) !=
+          0;
+    } finally {
+      malloc.free(value);
+    }
+  }
+
+  /// 开启变速/变调时，当前源若没有 tempo 层就按原加载路径重建，
+  /// 并恢复播放位置与播放状态，避免属性设置静默失效。
+  void _ensureTempoCapableSource() {
+    final current = _fstream;
+    final sourcePath = _fPath;
+    if (_bassFx == null || current == null || sourcePath == null) return;
+    if (wasapiExclusive || _streamWasapiExclusive) return;
+    if (_sourceSupportsTempo(current)) return;
+    if (_fadeOutHandle != null || _transitionOldStream != null) {
+      log.bass.warn(
+        'legacy',
+        '[bass] tempo source rebuild skipped during transition',
+      );
+      return;
+    }
+    final resumePosition = _getPosition();
+    final replayGainDb = _replayGainDb;
+    final wasPlaying =
+        _bass.BASS_ChannelIsActive(_sharedOutputHandle!) ==
+        bass.BASS_ACTIVE_PLAYING;
+    try {
+      setSource(sourcePath, startMs: _segmentStartMs, endMs: _segmentEndMs);
+    } catch (error, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] tempo source rebuild failed: $error\n$trace',
+      );
+      return;
+    }
+    if (_fstream == null) return;
+    // setSource 会清空 ReplayGain，重建后恢复当前增益。
+    if (_replayGainDb != replayGainDb) {
+      _replayGainDb = replayGainDb;
+      _applyPlaybackGains();
+    }
+    if (resumePosition > 0.0) {
+      try {
+        seek(resumePosition);
+      } catch (error, trace) {
+        log.bass.warn(
+          'legacy',
+          '[bass] tempo source reposition failed: $error\n$trace',
+        );
+      }
+    }
+    if (wasPlaying) {
+      try {
+        start();
+      } catch (error, trace) {
+        log.bass.error(
+          'legacy',
+          '[bass] tempo source resume failed: $error\n$trace',
+        );
+      }
+    }
+  }
+
   void setRate(double rate) {
     _rate = rate;
     if (_fstream == null) return;
@@ -3438,6 +3539,10 @@ class BassPlayer {
     // 尝试设置 Tempo (百分比变化)
     // 1.0 -> 0%, 1.5 -> 50%, 0.5 -> -50%
     final tempo = (_rate - 1.0) * 100.0;
+    if ((_rate - 1.0).abs() > 1e-6) {
+      _ensureTempoCapableSource();
+      if (_fstream == null) return;
+    }
 
     // 优先尝试使用 BASS_FX 的 Tempo 属性
     if (_bass.BASS_ChannelSetAttribute(_fstream!, BASS_ATTRIB_TEMPO, tempo) ==
@@ -3477,6 +3582,11 @@ class BassPlayer {
       );
       useExclusiveMode(false);
       return;
+    }
+
+    if (_pitch.abs() > 1e-6) {
+      _ensureTempoCapableSource();
+      if (_fstream == null) return;
     }
 
     _bass.BASS_ChannelSetAttribute(_fstream!, BASS_ATTRIB_TEMPO_PITCH, pitch);
@@ -3759,9 +3869,13 @@ class BassPlayer {
   /// do nothing if [setSource] hasn't been called
   void seek(double position) {
     if (_fstream == null) return;
-    _logAudioState('seek(begin,$position)');
+    log.bass.debug('legacy', '[bass] seek(begin,$position)');
 
     final source = _fstream!;
+    final output = _mixerStream;
+    final wasPlaying =
+        output != null &&
+        _bass.BASS_ChannelIsActive(output) == bass.BASS_ACTIVE_PLAYING;
     final absolute = segmentAbsoluteSeconds(
       position: position,
       startMs: _segmentStartMs,
@@ -3776,7 +3890,8 @@ class BassPlayer {
             bass.BASS_POS_BYTE | bassPosMixerReset,
           );
     if (!positioned) {
-      switch (_bass.BASS_ErrorGetCode()) {
+      final errorCode = _bass.BASS_ErrorGetCode();
+      switch (errorCode) {
         case bass.BASS_ERROR_HANDLE:
           throw const FormatException('handle is not a valid channel.');
         case bass.BASS_ERROR_NOTFILE:
@@ -3791,11 +3906,23 @@ class BassPlayer {
           );
         case bass.BASS_ERROR_UNKNOWN:
           throw const FormatException('Some other mystery problem!');
+        default:
+          log.bass.warn(
+            'legacy',
+            '[bass] seek failed at $position: $errorCode',
+          );
       }
     }
     _resetSpectrumSmoothing();
     _emitPositionSnapshot();
-    _logAudioState('seek(end,$position)');
+    // BASS_POS_MIXER_RESET 可能让输出停在 STOPPED；只恢复原本在播的输出，
+    // 不改动段尾截断语义，暂停/停止状态保持原样。
+    if (wasPlaying && output != null) {
+      final boundary = _cachedLengthSeconds ?? _segmentDurationSeconds;
+      final hasRoom = boundary <= 0 || position < boundary - 0.05;
+      if (hasRoom) _resumeOutputIfNeeded();
+    }
+    scheduleMicrotask(() => _logAudioState('seek(end,$position)'));
   }
 
   /// It is not necessary to individually free the samples/streams/musics

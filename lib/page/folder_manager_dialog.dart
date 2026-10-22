@@ -564,7 +564,14 @@ class _ManagedFolderTreeNode {
       directAudioCount +
       children.fold(0, (total, child) => total + child.audioCount);
 
-  int get displayAudioCount => pendingScan ? 0 : audioCount;
+  bool get hasPendingScan =>
+      pendingScan || children.any((child) => child.hasPendingScan);
+
+  String get displayAudioCountText {
+    if (pendingScan) return '扫描中…';
+    if (hasPendingScan) return '$audioCount 首乐曲（含扫描中文件夹）';
+    return '$audioCount 首乐曲';
+  }
 
   int get pendingFolderCount =>
       (pendingScan ? 1 : 0) +
@@ -632,7 +639,7 @@ class _ManagedFolderTile extends StatelessWidget {
     if (tree.children.isEmpty) {
       return ListTile(
         title: title,
-        subtitle: Text('${tree.displayAudioCount} 首乐曲'),
+        subtitle: Text(tree.displayAudioCountText),
         trailing: removeButton,
       );
     }
@@ -643,7 +650,7 @@ class _ManagedFolderTile extends StatelessWidget {
       childrenPadding: const EdgeInsets.only(left: 20),
       title: title,
       subtitle: Text(
-        '${tree.children.length} 个子文件夹 · ${tree.displayAudioCount} 首乐曲',
+        '${tree.children.length} 个子文件夹 · ${tree.displayAudioCountText}',
       ),
       trailing: removeButton,
       children: [
@@ -689,7 +696,7 @@ class _FolderTreeTile extends StatelessWidget {
       return ListTile(
         dense: true,
         title: title,
-        subtitle: Text('${node.displayAudioCount} 首乐曲'),
+        subtitle: Text(node.displayAudioCountText),
         trailing: removeButton,
       );
     }
@@ -701,7 +708,7 @@ class _FolderTreeTile extends StatelessWidget {
       childrenPadding: const EdgeInsets.only(left: 20),
       title: title,
       subtitle: Text(
-        '${node.children.length} 个子文件夹 · ${node.displayAudioCount} 首乐曲',
+        '${node.children.length} 个子文件夹 · ${node.displayAudioCountText}',
       ),
       trailing: removeButton,
       children: [
