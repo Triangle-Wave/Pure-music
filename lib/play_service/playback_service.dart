@@ -17,6 +17,7 @@ import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
 import 'package:pure_music/native/bass/bass_player.dart';
+import 'package:pure_music/native/rust/api/sacd.dart' as rust_sacd;
 import 'package:pure_music/native/rust/api/smtc_flutter.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
@@ -25,6 +26,7 @@ import 'package:pure_music/core/sleep_blocker.dart';
 import 'package:pure_music/core/log/playback_log.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/theme.dart';
+import 'package:path/path.dart' as p;
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/services/concert_session.dart';
 import 'package:pure_music/services/lastfm/lastfm_models.dart';
@@ -37,9 +39,6 @@ final class _NowPlayingNotifier extends ValueNotifier<Audio?> {
 
   void refresh() => notifyListeners();
 }
-
-/// SACD ISO 播放暂未实现时对用户的提示文案。
-const _sacdUnsupportedMessage = 'SACD ISO 播放暂未实现';
 
 final class _PendingGaplessTransition {
   const _PendingGaplessTransition({
@@ -1155,13 +1154,15 @@ class PlaybackService extends ChangeNotifier {
         SleepTimerService.instance.onSongCompleted();
         return;
       }
-      _loadAndPlayInDirection(
-        reason: 'gapless',
-        origin: _captureOrigin(),
-        startIndex: (_playlistIndex ?? -1) + 1,
-        playlist: items,
-        step: 1,
-        wrap: true,
+      unawaited(
+        _loadAndPlayInDirection(
+          reason: 'gapless',
+          origin: _captureOrigin(),
+          startIndex: (_playlistIndex ?? -1) + 1,
+          playlist: items,
+          step: 1,
+          wrap: true,
+        ),
       );
       return;
     }
@@ -1276,30 +1277,31 @@ class PlaybackService extends ChangeNotifier {
     _syncSmtcPositionTimer();
   }
 
-  bool _loadAndPlay(
+  Future<bool> _loadAndPlay(
     int audioIndex,
     List<Audio> playlist, {
     required String reason,
     required SongOrigin? origin,
     bool reportFailure = true,
-  }) {
+  }) async {
     if (audioIndex < 0 || audioIndex >= playlist.length) return false;
     final audio = playlist[audioIndex];
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
     try {
+      var sourcePath = audio.filePath;
+      var startMs = audio.segmentStartMs;
+      var endMs = audio.segmentEndMs;
       if (audio.isSacdTrack) {
-        log.playback.warn(
-          'legacy',
-          'SACD ISO 播放暂未实现: ${audio.path}',
-        );
-        throw const FormatException(_sacdUnsupportedMessage);
+        sourcePath = await _ensureSacdSource(audio);
+        startMs = 0;
+        endMs = 0;
       }
       // CUE 虚拟轨用真实源文件建流，段边界由播放器按毫秒截断。
       _player.setSource(
-        audio.filePath,
-        startMs: audio.segmentStartMs,
-        endMs: audio.segmentEndMs,
+        sourcePath,
+        startMs: startMs,
+        endMs: endMs,
       );
       _eq.reapplyOutputGain();
       _player.start();
@@ -1312,13 +1314,6 @@ class PlaybackService extends ChangeNotifier {
       );
       return true;
     } catch (err, trace) {
-      if (err is FormatException && err.message == _sacdUnsupportedMessage) {
-        // 预期内的未支持功能：只提示用户，不按异常记录堆栈。
-        if (reportFailure) {
-          _reportPlaybackLoadFailure(_sacdUnsupportedMessage);
-        }
-        return false;
-      }
       log.playback.error(
         'legacy',
         '加载并播放歌曲失败 index=$audioIndex title=${audio.title}',
@@ -1326,7 +1321,9 @@ class PlaybackService extends ChangeNotifier {
         stackTrace: trace,
       );
       if (reportFailure) {
-        _reportPlaybackLoadFailure('播放失败，请查看日志');
+        _reportPlaybackLoadFailure(
+          audio.isSacdTrack ? 'SACD 轨道提取或播放失败，请查看日志' : '播放失败，请查看日志',
+        );
       }
       return false;
     } finally {
@@ -1334,14 +1331,30 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  bool _loadAndPlayInDirection({
+  /// 把 SACD 轨道提取为缓存 DSF，返回可交给 BASS 的文件路径。
+  Future<String> _ensureSacdSource(Audio audio) async {
+    final segment = audio.cueSegment;
+    final area = segment?.sacdArea;
+    if (segment == null || area == null) {
+      throw const FormatException('无效的 SACD 虚拟轨路径');
+    }
+    final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
+    return rust_sacd.ensureSacdTrackExtracted(
+      isoPath: segment.sourcePath,
+      area: area,
+      trackNumber: segment.trackNumber,
+      cacheRoot: cacheRoot,
+    );
+  }
+
+  Future<bool> _loadAndPlayInDirection({
     required String reason,
     required SongOrigin? origin,
     required int startIndex,
     required List<Audio> playlist,
     required int step,
     required bool wrap,
-  }) {
+  }) async {
     if (playlist.isEmpty || step == 0) return false;
 
     var index = startIndex;
@@ -1351,7 +1364,7 @@ class PlaybackService extends ChangeNotifier {
         if (!wrap) break;
         index = (index % playlist.length + playlist.length) % playlist.length;
       }
-      if (_loadAndPlay(
+      if (await _loadAndPlay(
         index,
         playlist,
         reason: reason,
@@ -1553,11 +1566,13 @@ class PlaybackService extends ChangeNotifier {
       extra: {'index': audioIndex},
     );
     final origin = _captureOrigin();
-    _loadAndPlay(
-      audioIndex,
-      playlist.value,
-      reason: 'user.play',
-      origin: origin,
+    unawaited(
+      _loadAndPlay(
+        audioIndex,
+        playlist.value,
+        reason: 'user.play',
+        origin: origin,
+      ),
     );
   }
 
@@ -1673,15 +1688,19 @@ class PlaybackService extends ChangeNotifier {
       shuffled.insert(0, willPlay);
       _setPlaylistBackup(playlist);
       final activePlaylist = _setPlaylist(shuffled);
-      _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin);
+      unawaited(
+        _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin),
+      );
     } else {
       _setPlaylistBackup(playlist);
       final activePlaylist = _setPlaylist(playlist);
-      _loadAndPlay(
-        audioIndex,
-        activePlaylist,
-        reason: 'user.play',
-        origin: origin,
+      unawaited(
+        _loadAndPlay(
+          audioIndex,
+          activePlaylist,
+          reason: 'user.play',
+          origin: origin,
+        ),
       );
     }
   }
@@ -1706,7 +1725,9 @@ class PlaybackService extends ChangeNotifier {
     shuffle.value = true;
 
     final origin = _captureOrigin();
-    _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin);
+    unawaited(
+      _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin),
+    );
   }
 
   /// 下一首播放
@@ -1797,11 +1818,13 @@ class PlaybackService extends ChangeNotifier {
           _clearPersistedLastSession();
         } else if (_playlistIndex! < _playlist.value.length) {
           final origin = _captureOrigin();
-          _loadAndPlay(
-            _playlistIndex!,
-            _playlist.value,
-            reason: 'user.play',
-            origin: origin,
+          unawaited(
+            _loadAndPlay(
+              _playlistIndex!,
+              _playlist.value,
+              reason: 'user.play',
+              origin: origin,
+            ),
           );
         }
       } else {
@@ -2037,18 +2060,18 @@ class PlaybackService extends ChangeNotifier {
   ) async {
     try {
       final restored = nowPlaying!;
+      var sourcePath = restored.filePath;
+      var startMs = restored.segmentStartMs;
+      var endMs = restored.segmentEndMs;
       if (restored.isSacdTrack) {
-        // SACD ISO 播放暂未实现，恢复会话时不打开 ISO。
-        log.playback.warn(
-          'legacy',
-          'SACD ISO 播放暂未实现: ${restored.path}',
-        );
-        return;
+        sourcePath = await _ensureSacdSource(restored);
+        startMs = 0;
+        endMs = 0;
       }
       _player.setSource(
-        restored.filePath,
-        startMs: restored.segmentStartMs,
-        endMs: restored.segmentEndMs,
+        sourcePath,
+        startMs: startMs,
+        endMs: endMs,
       );
       _eq.reapplyOutputGain();
       _loadCurrentReplayGain(restored);
@@ -2094,13 +2117,15 @@ class PlaybackService extends ChangeNotifier {
     if (_playlistIndex == null) return;
     _synchronizeGaplessTransition();
 
-    _loadAndPlayInDirection(
-      reason: reason,
-      origin: origin,
-      startIndex: _playlistIndex! + 1,
-      playlist: _playlist.value,
-      step: 1,
-      wrap: true,
+    unawaited(
+      _loadAndPlayInDirection(
+        reason: reason,
+        origin: origin,
+        startIndex: _playlistIndex! + 1,
+        playlist: _playlist.value,
+        step: 1,
+        wrap: true,
+      ),
     );
   }
 
@@ -2111,11 +2136,13 @@ class PlaybackService extends ChangeNotifier {
     if (_playlistIndex == null) return;
     _synchronizeGaplessTransition();
 
-    _loadAndPlay(
-      _playlistIndex!,
-      _playlist.value,
-      reason: reason,
-      origin: origin,
+    unawaited(
+      _loadAndPlay(
+        _playlistIndex!,
+        _playlist.value,
+        reason: reason,
+        origin: origin,
+      ),
     );
   }
 
@@ -2133,13 +2160,15 @@ class PlaybackService extends ChangeNotifier {
         // 末曲播完不推进，保持 completed 状态实现播完即停
         if (_playlistIndex != null &&
             _playlistIndex! + 1 < _playlist.value.length) {
-          _loadAndPlayInDirection(
-            reason: 'completed',
-            origin: origin,
-            startIndex: _playlistIndex! + 1,
-            playlist: _playlist.value,
-            step: 1,
-            wrap: false,
+          unawaited(
+            _loadAndPlayInDirection(
+              reason: 'completed',
+              origin: origin,
+              startIndex: _playlistIndex! + 1,
+              playlist: _playlist.value,
+              step: 1,
+              wrap: false,
+            ),
           );
         }
         break;
@@ -2162,13 +2191,15 @@ class PlaybackService extends ChangeNotifier {
     final origin = _captureOrigin();
     _synchronizeGaplessTransition();
 
-    _loadAndPlayInDirection(
-      reason: 'user.previous',
-      origin: origin,
-      startIndex: _playlistIndex! - 1,
-      playlist: _playlist.value,
-      step: -1,
-      wrap: true,
+    unawaited(
+      _loadAndPlayInDirection(
+        reason: 'user.previous',
+        origin: origin,
+        startIndex: _playlistIndex! - 1,
+        playlist: _playlist.value,
+        step: -1,
+        wrap: true,
+      ),
     );
   }
 
