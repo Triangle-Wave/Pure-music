@@ -120,6 +120,10 @@ jobs:
             rust/src/frb_generated.rs
           if-no-files-found: error
 
+      # Cargokit 的 MSB8066 会吞掉 cargo 错误；先单独构建 cdylib 暴露真实原因。
+      - name: Check Rust build
+        run: cargo build --manifest-path rust/Cargo.toml --release
+
       - name: Build release
         run: flutter build windows --release
 
