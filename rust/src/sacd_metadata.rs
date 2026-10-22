@@ -9,7 +9,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use flutter_rust_bridge::frb;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::reader::Reader;
 
@@ -39,7 +38,6 @@ const ALBUM_ARTIST_RANK_TRACK: u8 = 2;
 
 /// ISO 同目录 XML 中解析出的专辑与曲目信息。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[frb(ignore)]
 pub(crate) struct SacdXmlMetadata {
     /// 专辑名。
     pub(crate) album: Option<String>,
@@ -58,7 +56,6 @@ impl SacdXmlMetadata {
 
 /// XML 中的单条曲目。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[frb(ignore)]
 pub(crate) struct SacdXmlTrack {
     /// XML 给出的轨号；缺失时为按出现顺序补的序号。
     pub(crate) number: Option<u32>,

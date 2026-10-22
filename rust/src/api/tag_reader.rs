@@ -31,9 +31,8 @@ use windows::{
 };
 
 use crate::frb_generated::StreamSink;
-use crate::api::sacd::{
-    is_sacd_iso, is_xml_path, load_sacd_xml_metadata, read_sacd_toc, track_for, SacdAreaKind,
-};
+use crate::api::sacd::{is_sacd_iso, read_sacd_toc, SacdAreaKind};
+use crate::sacd_metadata::{is_xml_path, load_sacd_xml_metadata, track_for};
 
 use super::library_db;
 

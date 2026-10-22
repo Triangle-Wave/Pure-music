@@ -11,7 +11,6 @@ mod audio;
 mod dsf;
 mod extract;
 mod master_toc;
-mod metadata;
 mod reader;
 mod tracklist;
 mod types;
@@ -23,7 +22,6 @@ use std::time::UNIX_EPOCH;
 use md5::{Digest, Md5};
 
 pub(crate) use extract::extract_track_to_dsf;
-pub(crate) use metadata::{is_xml_path, load_sacd_xml_metadata, track_for};
 pub(crate) use reader::{is_sacd_iso, read_sacd_toc};
 pub(crate) use types::{SacdArea, SacdAreaKind, SacdError, SacdFrameFormat, SacdToc, SacdTrack};
 
