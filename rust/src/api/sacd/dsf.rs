@@ -9,6 +9,7 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::types::SacdError;
+use flutter_rust_bridge::frb;
 
 /// DSD chunk 标识。
 const DSD_CHUNK_ID: &[u8; 4] = b"DSD ";
@@ -38,6 +39,7 @@ const FMT_SAMPLE_COUNT_OFFSET: u64 = 64;
 pub(crate) const DSF_BLOCK_SIZE_PER_CHANNEL: usize = 4096;
 
 /// DSF 文件写入器。
+#[frb(ignore)]
 pub(crate) struct DsfWriter {
     /// 带缓冲的文件写入器。
     writer: BufWriter<File>,

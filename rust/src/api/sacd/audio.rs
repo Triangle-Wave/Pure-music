@@ -5,6 +5,7 @@
 //! [`SacdError::Unsupported`]，补充数据包与填充数据包跳过。
 
 use super::types::SacdError;
+use flutter_rust_bridge::frb;
 
 /// 音频扇区固定长度（字节）。
 const AUDIO_SECTOR_SIZE: usize = 2048;
@@ -14,6 +15,7 @@ const DATA_TYPE_AUDIO: u8 = 2;
 
 /// SACD 音频扇区头（每个音频扇区的第 1 个字节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[frb(ignore)]
 pub(crate) struct AudioFrameHeader {
     /// DST 压缩标志。
     pub(crate) dst_encoded: bool,
@@ -36,6 +38,7 @@ impl AudioFrameHeader {
 
 /// 音频数据包信息（2 字节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[frb(ignore)]
 pub(crate) struct AudioPacketInfo {
     /// 该包是否为一个新帧的起点。
     pub(crate) frame_start: bool,
@@ -70,6 +73,7 @@ impl AudioPacketInfo {
 /// 裸 DSD 的帧信息固定 3 字节（分、秒、帧号）；DST 帧额外带 1 字节，
 /// 其中包含剩余扇区数与声道提示位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[frb(ignore)]
 pub(crate) struct AudioFrameInfo {
     /// 时间码分钟。
     pub(crate) minutes: u8,
@@ -130,6 +134,7 @@ impl AudioFrameInfo {
 /// 可交付的连续字节，剩余数据留待下一次调用或 [`flush`](Self::flush)。返回的
 /// 字节保持原始字节交织顺序（MSB-first），由 DSF 写入器完成反位与分块。
 #[derive(Debug, Default)]
+#[frb(ignore)]
 pub(crate) struct AudioSectorParser {
     /// 当前帧是否已经开始。
     frame_started: bool,
