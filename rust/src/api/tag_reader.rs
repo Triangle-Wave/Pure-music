@@ -31,7 +31,9 @@ use windows::{
 };
 
 use crate::frb_generated::StreamSink;
-use crate::api::sacd::{is_sacd_iso, read_sacd_toc, SacdAreaKind};
+use crate::api::sacd::{
+    is_sacd_iso, is_xml_path, load_sacd_xml_metadata, read_sacd_toc, track_for, SacdAreaKind,
+};
 
 use super::library_db;
 
@@ -1084,11 +1086,7 @@ impl AudioFolder {
         if !audios.is_empty() {
             return Ok(AudioFolder {
                 path: path.to_string_lossy().to_string(),
-                modified: fs::metadata(path)?
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs(),
+                modified: folder_change_stamp(path),
                 latest,
                 audios,
             });
@@ -1703,6 +1701,37 @@ fn system_time_secs(time: io::Result<std::time::SystemTime>) -> u64 {
         .as_secs()
 }
 
+/// 目录变更戳：目录 mtime 与同目录 XML 元数据指纹中的最大值。
+///
+/// 只改 XML 内容不会改变目录 mtime，因此把每个 XML 的修改时间与文件长度混入
+/// 同一个数值，索引据此判断目录是否需要重建。目录或条目不可读时退回目录 mtime。
+fn folder_change_stamp(path: &Path) -> u64 {
+    let mut stamp = system_time_secs(fs::metadata(path).and_then(|metadata| metadata.modified()));
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return stamp,
+    };
+    for entry in entries.flatten() {
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            _ => continue,
+        }
+        let entry_path = entry.path();
+        if !is_xml_path(&entry_path) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified = system_time_secs(metadata.modified());
+        let fingerprint = modified
+            .saturating_mul(1_u64 << 20)
+            .saturating_add(metadata.len() & 0xF_FFFF);
+        stamp = stamp.max(fingerprint);
+    }
+    stamp
+}
+
 /// CUE 展开所需的源文件属性，标签不可读时保留文件元数据。
 struct CueSourceInfo {
     path: PathBuf,
@@ -1865,7 +1894,8 @@ fn read_cue_folder(
 /// 把 SACD ISO 展开成虚拟曲目。
 ///
 /// 优先使用双声道区，没有双声道区时退回第一个音频区。普通 ISO 静默跳过；
-/// SACD 目录解析失败只告警并跳过该镜像，不中断整批扫描。
+/// SACD 目录解析失败只告警并跳过该镜像，不中断整批扫描。专辑与曲目字段优先
+/// 取 ISO 同目录 XML，没有可用 XML 时回退到 ISO 文件名与 `Track NN`、`UNKNOWN`。
 fn read_sacd_folder(iso_paths: &[PathBuf]) -> Vec<Audio> {
     let mut audios: Vec<Audio> = Vec::new();
 
@@ -1925,22 +1955,59 @@ fn read_sacd_folder(iso_paths: &[PathBuf]) -> Vec<Audio> {
             .unwrap_or_else(|| "UNKNOWN".to_string());
         let iso_path_str = iso_path.to_string_lossy().to_string();
 
-        for track in &area.tracks {
+        let xml_metadata = load_sacd_xml_metadata(iso_path);
+        if xml_metadata.is_none() {
+            log::warn!(
+                target: "tag",
+                "SACD 没有可用的同目录 XML 元数据，回退默认值: iso={}, folder={}",
+                iso_path.display(),
+                iso_path
+                    .parent()
+                    .map(|parent| parent.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+        let album = xml_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.album.clone())
+            .unwrap_or(album);
+        let album_artist = xml_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.album_artist.clone());
+
+        for (index, track) in area.tracks.iter().enumerate() {
+            let number = u32::from(track.number);
+            let xml_track = xml_metadata
+                .as_ref()
+                .and_then(|metadata| track_for(metadata, number, index));
+            let title = xml_track
+                .and_then(|entry| entry.title.clone())
+                .unwrap_or_else(|| format!("Track {number:02}"));
+            let artist = xml_track
+                .and_then(|entry| entry.artist.clone())
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let duration = if track.duration_ms > 0 {
+                track.duration_ms.saturating_add(500) / 1000
+            } else {
+                xml_track
+                    .and_then(|entry| entry.duration_secs)
+                    .unwrap_or(0)
+            };
             let end_ms = track.start_ms.saturating_add(track.duration_ms);
             audios.push(Audio {
-                title: format!("Track {:02}", track.number),
-                artist: "UNKNOWN".to_string(),
+                title,
+                artist,
                 album: album.clone(),
-                album_artist: None,
-                track: Some(u32::from(track.number)),
+                album_artist: album_artist.clone(),
+                track: Some(number),
                 disc: None,
-                duration: track.duration_ms.saturating_add(500) / 1000,
+                duration,
                 bitrate: None,
                 sample_rate: None,
                 path: sacd_segment_path(
                     &iso_path_str,
                     area_label,
-                    u32::from(track.number),
+                    number,
                     track.start_ms,
                     end_ms,
                 ),
@@ -2149,11 +2216,7 @@ pub fn build_index_from_folders_recursively(
         scanned += audio_count as u64;
 
         if !audios.is_empty() {
-            let modified = fs::metadata(dir_path)?
-                .modified()?
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_secs();
+            let modified = folder_change_stamp(Path::new(dir_path.as_str()));
             let latest = audios.iter().map(|audio| audio.created).max().unwrap_or(0);
             audio_folders.push(AudioFolder {
                 path: dir_path.clone(),
@@ -3243,18 +3306,9 @@ mod tag_reader_tests {
 }
 
 fn index_folder_snapshots_unchanged(folders: &[library_db::IndexFolderSnapshot]) -> bool {
-    folders.iter().all(|folder| {
-        fs::metadata(&folder.path)
-            .and_then(|metadata| metadata.modified())
-            .map(|modified| {
-                modified
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs()
-                    == folder.modified
-            })
-            .unwrap_or(false)
-    })
+    folders
+        .iter()
+        .all(|folder| folder_change_stamp(Path::new(folder.path.as_str())) == folder.modified)
 }
 
 pub fn update_index(
@@ -3338,30 +3392,23 @@ pub fn update_index(
             .as_array()
             .map(|audios| audios.len() as u64)
             .unwrap_or(0);
-        let folder_metadata = match probe_indexed_path(fs::metadata(&folder_path))? {
-            Some(metadata) => metadata,
-            None => {
-                if let Some(audios) = folder_item
-                    .get_mut("audios")
-                    .and_then(|value| value.as_array_mut())
-                {
-                    for audio in audios.iter_mut() {
-                        if audio_json_is_valid(audio) {
-                            set_audio_json_valid(audio, false);
-                            invalidated += 1;
-                            index_changed = true;
-                        }
+        if probe_indexed_path(fs::metadata(&folder_path))?.is_none() {
+            if let Some(audios) = folder_item
+                .get_mut("audios")
+                .and_then(|value| value.as_array_mut())
+            {
+                for audio in audios.iter_mut() {
+                    if audio_json_is_valid(audio) {
+                        set_audio_json_valid(audio, false);
+                        invalidated += 1;
+                        index_changed = true;
                     }
                 }
-                checked += folder_audio_count;
-                continue;
             }
-        };
-        let new_folder_modified = folder_metadata
-            .modified()?
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
+            checked += folder_audio_count;
+            continue;
+        }
+        let new_folder_modified = folder_change_stamp(Path::new(folder_path.as_str()));
         if !should_scan_indexed_audio_files(
             old_folder_modified,
             new_folder_modified,
