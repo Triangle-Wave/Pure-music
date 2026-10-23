@@ -5,6 +5,7 @@ import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/update_checker.dart';
 import 'package:pure_music/core/utils.dart';
@@ -686,7 +687,7 @@ class UpdateInstaller {
     }
 
     try {
-      final response = await Dio().get<String>(
+      final response = await AppHttp.instance.dio.get<String>(
         checksumUrl,
         cancelToken: cancelToken,
         options: Options(
@@ -829,7 +830,7 @@ class UpdateInstaller {
     required CancelToken cancelToken,
     required UpdateProgressCallback onProgress,
   }) async {
-    final response = await Dio().get<ResponseBody>(
+    final response = await AppHttp.instance.dio.get<ResponseBody>(
       url,
       cancelToken: cancelToken,
       options: Options(

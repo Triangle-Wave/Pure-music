@@ -22,6 +22,13 @@ class AdvancedTabContent extends StatelessWidget {
           groupId: 'advanced-system',
         ),
         SizedBox(height: 8.0),
+        _AdvancedGroupEntry(
+          icon: Symbols.language,
+          title: '网络',
+          subtitle: '代理与连接',
+          groupId: 'advanced-network',
+        ),
+        SizedBox(height: 8.0),
         SettingsSectionHeader('媒体与字体'),
         SizedBox(height: 4.0),
         _AdvancedGroupEntry(

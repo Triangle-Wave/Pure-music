@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
+import 'package:pure_music/core/network_proxy.dart';
 
 const _kgSearchUrl = 'https://mobilecdn.kugou.com/api/v3/search/song';
 const _kgSearchFallbackUrl = 'https://songsearch.kugou.com/song_search_v2';
@@ -32,6 +33,18 @@ const _kgApiHeaders = {
   'Accept': 'application/json,text/plain,*/*',
 };
 
+/// 当前 isolate 生效的代理配置；由 [_runCancelableEntry] 在启动时写入。
+///
+/// `HttpOverrides.global` 只作用于设置它的 isolate，所以在线歌词任务必须
+/// 把主 isolate 的配置随消息带进来。
+ProxyConfig _isolateProxyConfig = const ProxyConfig();
+
+typedef _CancelableTask<T> = ({
+  SendPort sendPort,
+  Future<T> Function() operation,
+  ProxyConfig proxy,
+});
+
 Future<T> _runCancelable<T>(
   Future<T> Function() operation, {
   required Duration timeout,
@@ -42,6 +55,7 @@ Future<T> _runCancelable<T>(
   final isolate = await Isolate.spawn(_runCancelableEntry<T>, (
     sendPort: receivePort.sendPort,
     operation: operation,
+    proxy: NetworkProxy.instance.config,
   ));
   try {
     final result = await receivePort.first.timeout(timeout);
@@ -55,9 +69,8 @@ Future<T> _runCancelable<T>(
   }
 }
 
-Future<void> _runCancelableEntry<T>(
-  ({SendPort sendPort, Future<T> Function() operation}) message,
-) async {
+Future<void> _runCancelableEntry<T>(_CancelableTask<T> message) async {
+  _isolateProxyConfig = message.proxy;
   try {
     message.sendPort.send((true, await message.operation()));
   } catch (error, trace) {
@@ -136,6 +149,7 @@ Future<String?> _httpPost(
     final uri = Uri.parse(urlStr);
     client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 4);
+    applyProxyToHttpClient(client, _isolateProxyConfig);
     final request = await client.postUrl(uri);
     for (final entry in headers.entries) {
       request.headers.add(entry.key, entry.value);
@@ -382,6 +396,7 @@ Future<String?> _httpGet(
     }
     client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 4);
+    applyProxyToHttpClient(client, _isolateProxyConfig);
     final request = await client.getUrl(uri);
     request.headers.removeAll(HttpHeaders.acceptEncodingHeader);
     if (headers != null) {

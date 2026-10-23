@@ -36,6 +36,7 @@ import 'package:pure_music/page/settings_page/tabs/settings_section_header.dart'
 import 'package:pure_music/page/settings_page/hotkey_settings.dart'
     show HotkeySettingsPanel, GlobalHotkeySettingsPanel;
 import 'package:pure_music/page/settings_page/lastfm_settings.dart';
+import 'package:pure_music/page/settings_page/network_proxy_settings.dart';
 import 'package:pure_music/page/settings_page/backup_settings.dart';
 import 'package:pure_music/page/settings_page/other_settings.dart'
     show
@@ -3557,6 +3558,11 @@ const _settingsGroups = <String, _SettingsGroupDesc>{
     '系统行为',
     '关闭窗口、防休眠与日志',
     _AdvancedSystemGroup(),
+  ),
+  'advanced-network': _SettingsGroupDesc(
+    '网络',
+    '代理与连接',
+    NetworkProxySettingsPanel(),
   ),
   'advanced-custom': _SettingsGroupDesc(
     '媒体解析',

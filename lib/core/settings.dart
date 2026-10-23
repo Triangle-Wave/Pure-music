@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:pure_music/core/hotkey_binding.dart';
 import 'package:pure_music/core/artist_name_splitter.dart';
 import 'package:pure_music/core/setting_action_state.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/settings/settings_decoder.dart';
 import 'package:pure_music/core/settings/settings_types.dart';
 import 'package:pure_music/core/window_placement.dart';
@@ -315,6 +316,13 @@ class AppSettings {
   bool preventSleepOnNowPlaying = false;
   bool rememberPlaybackPosition = false;
 
+  ProxyMode proxyMode = ProxyMode.system;
+  String proxyHost = '';
+  int proxyPort = defaultProxyPort;
+  String proxyUser = '';
+  String proxyPass = '';
+  String proxyBypass = defaultProxyBypass;
+
   String? midiSoundfontPath;
 
   String? fontFamily;
@@ -409,6 +417,7 @@ class AppSettings {
     _readLegacyArtistSeparator(settingsMap);
     _readLyricPreferenceSettings(settingsMap);
     _readWindowPlaybackSettings(settingsMap);
+    _readNetworkProxySettings(settingsMap);
   }
 
   static void _readLegacyArtistSeparator(Map<String, dynamic> settingsMap) {
@@ -444,6 +453,7 @@ class AppSettings {
     _readDesktopLyricTypographySettings(settingsMap);
     _readDesktopLyricColorSettings(settingsMap);
     _readFontSettings(settingsMap);
+    _readNetworkProxySettings(settingsMap);
   }
 
   static void _readThemeMotionHotkeySettings(Map<String, dynamic> settingsMap) {
@@ -1111,6 +1121,29 @@ class AppSettings {
     }
   }
 
+  static void _readNetworkProxySettings(Map<String, dynamic> settingsMap) {
+    _instance.proxyMode = normalizedSettingEnumValue(
+      settingsMap['ProxyMode'],
+      ProxyMode.values,
+      fallback: ProxyMode.system,
+    )!;
+    _instance.proxyHost =
+        normalizedStringSetting(settingsMap['ProxyHost']) ?? '';
+    _instance.proxyPort = normalizedBoundedIntSetting(
+      settingsMap['ProxyPort'],
+      defaultValue: defaultProxyPort,
+      min: 1,
+      max: 65535,
+    );
+    _instance.proxyUser =
+        normalizedStringSetting(settingsMap['ProxyUser']) ?? '';
+    _instance.proxyPass =
+        normalizedStringSetting(settingsMap['ProxyPass']) ?? '';
+    _instance.proxyBypass =
+        normalizedStringSetting(settingsMap['ProxyBypass']) ??
+        defaultProxyBypass;
+  }
+
   static Future<void> readFromJson() async {
     try {
       final dir = await getSettingsDir();
@@ -1234,6 +1267,15 @@ class AppSettings {
     'MidiSoundfontPath': midiSoundfontPath,
   };
 
+  Map<String, Object?> _networkProxySettingsMap() => {
+    'ProxyMode': proxyMode.name,
+    'ProxyHost': proxyHost,
+    'ProxyPort': proxyPort,
+    'ProxyUser': proxyUser,
+    'ProxyPass': proxyPass,
+    'ProxyBypass': proxyBypass,
+  };
+
   Future<void> _writeSettingsFile(
     Map<String, Object?> settingsMap, {
     required bool isMaximized,
@@ -1304,6 +1346,7 @@ class AppSettings {
         ..._materialAppearanceSettingsMap(),
         'IsWindowMaximized': isMaximized,
         ..._windowFontPlaybackSettingsMap(),
+        ..._networkProxySettingsMap(),
       };
       await _writeSettingsFile(
         settingsMap,

@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:github/github.dart' as gh;
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
@@ -561,7 +562,7 @@ class UpdateChecker {
     String repositorySlug,
   ) async {
     try {
-      final response = await Dio().get<Map<String, dynamic>>(
+      final response = await AppHttp.instance.dio.get<Map<String, dynamic>>(
         url,
         options: Options(
           connectTimeout: const Duration(seconds: 12),
@@ -607,7 +608,7 @@ class UpdateChecker {
     UpdateChannel channel,
   ) async {
     try {
-      final response = await Dio().get<Map<String, dynamic>>(
+      final response = await AppHttp.instance.dio.get<Map<String, dynamic>>(
         url,
         options: Options(
           connectTimeout: const Duration(seconds: 8),

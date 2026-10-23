@@ -12,6 +12,7 @@ import 'package:pure_music/entry.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/immersive.dart';
 import 'package:pure_music/core/memory_monitor.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/now_playing_perf_auto.dart';
 import 'package:pure_music/core/sidebar_perf_auto.dart';
 import 'package:pure_music/native/rust/api/logger.dart';
@@ -235,6 +236,7 @@ Future<void> _runApplication() async {
   _listenRustLogger();
   await HotkeysHelper.unregisterAll();
   final welcome = await _loadSettingsAndCaches();
+  _installNetworkProxy();
   if (!await _initWindowShell()) return;
   MemoryMonitorService.instance.start();
   runApp(Entry(welcome: welcome));
@@ -267,6 +269,42 @@ Future<bool> _loadSettingsAndCaches() async {
   await HotkeysHelper.registerHotKeys();
   await AlbumColorCache.instance.init();
   return !File(path.join(supportPath, 'index.json')).existsSync();
+}
+
+/// 在创建任何网络客户端之前安装代理，失败时回退直连，不阻塞启动。
+void _installNetworkProxy() {
+  try {
+    final stored = ProxyConfig.fromSettings(AppSettings.instance);
+    final effective = stored.effective;
+    NetworkProxy.instance.apply(effective);
+    if (stored.mode == ProxyMode.manual && !stored.hasValidManualTarget) {
+      log.app.warn('legacy', '[network] 代理配置不完整，已回退直连');
+    } else if (effective.mode == ProxyMode.manual) {
+      log.app.info(
+        'legacy',
+        '[network] 手动代理 ${effective.normalizedHost}:${effective.port}',
+      );
+    } else {
+      log.app.info('legacy', '[network] 代理模式 ${effective.mode.name}');
+    }
+  } catch (err, trace) {
+    try {
+      NetworkProxy.instance.apply(const ProxyConfig(mode: ProxyMode.direct));
+    } catch (fallbackError, fallbackTrace) {
+      log.app.error(
+        'legacy',
+        '[network] 回退直连失败',
+        error: fallbackError,
+        stackTrace: fallbackTrace,
+      );
+    }
+    log.app.error(
+      'legacy',
+      '[network] 应用代理配置失败，已回退直连',
+      error: err,
+      stackTrace: trace,
+    );
+  }
 }
 
 Future<bool> _initWindowShell() async {
