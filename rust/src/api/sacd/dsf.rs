@@ -406,30 +406,53 @@ mod tests {
         assert_eq!(bytes.len(), 92 + 2 * padded_per_channel);
 
         let audio = &bytes[92..];
+        let channel_count = 2usize;
+        // DSF 的 data chunk 按块级交错排列：每 4096 字节块按通道顺序轮转，
+        // 第 `block` 块第 `channel` 通道的字节位于
+        // `(block * channel_count + channel) * 4096 + offset`。
+        let block_offset = |channel: usize, block: usize, offset: usize| {
+            (block * channel_count + channel) * DSF_BLOCK_SIZE_PER_CHANNEL + offset
+        };
         for block in 0..blocks {
             for offset in 0..DSF_BLOCK_SIZE_PER_CHANNEL {
                 let source = block * DSF_BLOCK_SIZE_PER_CHANNEL + offset;
                 assert_eq!(
-                    audio[block * DSF_BLOCK_SIZE_PER_CHANNEL + offset],
+                    audio[block_offset(0, block, offset)],
                     (source as u8).reverse_bits(),
                     "通道 0 第 {block} 块偏移 {offset} 的字节顺序错误"
                 );
                 assert_eq!(
-                    audio[padded_per_channel + block * DSF_BLOCK_SIZE_PER_CHANNEL + offset],
+                    audio[block_offset(1, block, offset)],
                     (source as u8).wrapping_add(0x80).reverse_bits(),
                     "通道 1 第 {block} 块偏移 {offset} 的字节顺序错误"
                 );
             }
         }
 
-        // 最后一个不满的块按零补齐。
+        // 最后一个不满的块保留余量数据，末段按零补齐。
         let tail_start = blocks * DSF_BLOCK_SIZE_PER_CHANNEL;
-        assert!(audio[tail_start + extra..padded_per_channel]
-            .iter()
-            .all(|&byte| byte == 0));
-        assert!(audio[padded_per_channel + tail_start + extra..]
-            .iter()
-            .all(|&byte| byte == 0));
+        for channel in 0..channel_count {
+            let base = block_offset(channel, blocks, 0);
+            for offset in 0..extra {
+                let source = tail_start + offset;
+                let expected = if channel == 0 {
+                    (source as u8).reverse_bits()
+                } else {
+                    (source as u8).wrapping_add(0x80).reverse_bits()
+                };
+                assert_eq!(
+                    audio[base + offset],
+                    expected,
+                    "通道 {channel} 尾部偏移 {offset} 的字节顺序错误"
+                );
+            }
+            assert!(
+                audio[base + extra..base + DSF_BLOCK_SIZE_PER_CHANNEL]
+                    .iter()
+                    .all(|&byte| byte == 0),
+                "通道 {channel} 尾部未按零补齐"
+            );
+        }
     }
 
     #[test]
