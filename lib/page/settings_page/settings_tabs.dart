@@ -28,6 +28,7 @@ import 'package:pure_music/page/page_scaffold.dart';
 import 'package:pure_music/page/settings_page/artist_alias_editor.dart';
 import 'package:pure_music/page/settings_page/artist_no_split_editor.dart';
 import 'package:pure_music/page/settings_page/artist_separator_editor.dart';
+import 'package:pure_music/page/settings_page/audio_output_settings.dart';
 import 'package:pure_music/page/settings_page/settings_group_entry.dart';
 import 'package:pure_music/page/settings_page/tabs/advanced_tab.dart';
 import 'package:pure_music/page/settings_page/tabs/about_tab.dart';
@@ -1797,6 +1798,13 @@ class _PlaybackTabContent extends StatelessWidget {
           groupId: 'playback-behavior',
         ),
         SizedBox(height: 8.0),
+        _GroupEntry(
+          icon: Symbols.speaker,
+          title: '音频输出',
+          subtitle: '输出设备、共享/独占、采样率与格式',
+          groupId: 'playback-output',
+        ),
+        SizedBox(height: 8.0),
         SettingsSectionHeader('第三方服务'),
         SizedBox(height: 4.0),
         _GroupEntry(
@@ -3514,6 +3522,11 @@ const _settingsGroups = <String, _SettingsGroupDesc>{
     '播放行为',
     '进度记忆、ReplayGain、片头空白、MIDI 与切歌过渡',
     _PlaybackBehaviorGroup(),
+  ),
+  'playback-output': _SettingsGroupDesc(
+    '音频输出',
+    '输出设备、共享/独占、采样率与格式',
+    AudioOutputSettingsPanel(),
   ),
   'playback-lastfm': _SettingsGroupDesc(
     'Last.fm',

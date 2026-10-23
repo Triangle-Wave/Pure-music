@@ -1,4 +1,4 @@
-import 'package:pure_music/core/log/playback_log.dart';
+import 'package:pure_music/core/log/app_log.dart';
 
 /// SACD 播放源解析策略。
 ///

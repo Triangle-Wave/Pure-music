@@ -1,10 +1,12 @@
 // ignore_for_file: constant_identifier_names
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:fl_charset/fl_charset.dart' show gbk;
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
@@ -26,6 +28,147 @@ const int _playbackBufferMs = 500;
 
 /// 设备输出缓冲必须在 Init 前设置。500ms 实际不会生效，还会让人误以为暂停很钝；40ms 用来减少偶发破音。
 const int _deviceBufferMs = 40;
+
+/// 音频输出格式。共享模式由系统混音器决定实际格式，独占模式按此请求。
+enum BassOutputFormat { float32, pcm24, pcm16 }
+
+extension BassOutputFormatInfo on BassOutputFormat {
+  String get label => switch (this) {
+    BassOutputFormat.float32 => 'float32',
+    BassOutputFormat.pcm24 => '24bit',
+    BassOutputFormat.pcm16 => '16bit',
+  };
+
+  String get preferenceValue => switch (this) {
+    BassOutputFormat.float32 => PlaybackPreference.outputFormatFloat32,
+    BassOutputFormat.pcm24 => PlaybackPreference.outputFormatPcm24,
+    BassOutputFormat.pcm16 => PlaybackPreference.outputFormatPcm16,
+  };
+
+  /// BASS_WASAPI_Init 通过 MAKELONG(flags, format) 的高 16 位限定格式。
+  int get wasapiFormatIndex => switch (this) {
+    BassOutputFormat.float32 => bass_wasapi.BASS_WASAPI_FORMAT_FLOAT,
+    BassOutputFormat.pcm24 => bass_wasapi.BASS_WASAPI_FORMAT_24BIT,
+    BassOutputFormat.pcm16 => bass_wasapi.BASS_WASAPI_FORMAT_16BIT,
+  };
+}
+
+BassOutputFormat bassOutputFormatFromPreference(String value) {
+  if (value == PlaybackPreference.outputFormatPcm24) {
+    return BassOutputFormat.pcm24;
+  }
+  if (value == PlaybackPreference.outputFormatPcm16) {
+    return BassOutputFormat.pcm16;
+  }
+  return BassOutputFormat.float32;
+}
+
+/// 一次输出重建的完整参数。
+class BassOutputConfig {
+  const BassOutputConfig({
+    this.deviceId = PlaybackPreference.defaultOutputDeviceId,
+    this.deviceName = '',
+    this.exclusive = false,
+    this.sampleRate = 0,
+    this.format = BassOutputFormat.float32,
+  });
+
+  /// 当前模式下的设备号：共享 1..n，独占 0..n，-1 表示系统默认。
+  final int deviceId;
+  final String deviceName;
+  final bool exclusive;
+
+  /// 0 表示自动：共享回退 44100，独占交给 WASAPI 跟随设备混音格式。
+  final int sampleRate;
+  final BassOutputFormat format;
+
+  BassOutputConfig copyWith({
+    int? deviceId,
+    String? deviceName,
+    bool? exclusive,
+    int? sampleRate,
+    BassOutputFormat? format,
+  }) {
+    return BassOutputConfig(
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
+      exclusive: exclusive ?? this.exclusive,
+      sampleRate: sampleRate ?? this.sampleRate,
+      format: format ?? this.format,
+    );
+  }
+}
+
+/// 可枚举的输出设备。共享与独占的编号空间独立。
+class BassOutputDevice {
+  const BassOutputDevice({
+    required this.id,
+    required this.name,
+    required this.isDefault,
+    this.available = true,
+  });
+
+  final int id;
+  final String name;
+  final bool isDefault;
+  final bool available;
+
+  String get displayName => isDefault ? '系统默认' : name;
+}
+
+/// 设置页展示的实际输出状态。
+class BassOutputState {
+  const BassOutputState({
+    required this.deviceId,
+    required this.deviceName,
+    required this.exclusive,
+    required this.sampleRate,
+    required this.formatLabel,
+  });
+
+  final int deviceId;
+  final String deviceName;
+  final bool exclusive;
+  final int sampleRate;
+  final String formatLabel;
+}
+
+/// 输出切换结果。失败时由调用方决定是否提示与保存。
+class BassOutputApplyResult {
+  const BassOutputApplyResult({
+    required this.success,
+    required this.message,
+    this.rolledBack = false,
+    this.usedDefaultDevice = false,
+    this.sampleRate = 0,
+    this.formatLabel = '',
+  });
+
+  final bool success;
+  final String message;
+  final bool rolledBack;
+  final bool usedDefaultDevice;
+  final int sampleRate;
+  final String formatLabel;
+
+  BassOutputApplyResult copyWith({
+    bool? success,
+    String? message,
+    bool? rolledBack,
+    bool? usedDefaultDevice,
+    int? sampleRate,
+    String? formatLabel,
+  }) {
+    return BassOutputApplyResult(
+      success: success ?? this.success,
+      message: message ?? this.message,
+      rolledBack: rolledBack ?? this.rolledBack,
+      usedDefaultDevice: usedDefaultDevice ?? this.usedDefaultDevice,
+      sampleRate: sampleRate ?? this.sampleRate,
+      formatLabel: formatLabel ?? this.formatLabel,
+    );
+  }
+}
 
 enum PlayerState {
   /// stop() has been called or the end of an audio has been reached
@@ -138,6 +281,20 @@ class BassPlayer {
   bool _streamWasapiExclusive = false;
   /// WASAPI 独占输出的实际采样率；共享模式固定按 44100 处理。
   int _wasapiOutputFrequency = 44100;
+  /// 共享设备初始化后的实际采样率，来源于 BASS_GetInfo。
+  int _sharedOutputFrequency = 44100;
+  String _wasapiActualFormatLabel = 'float32';
+  bool _preferredExclusive = false;
+  int _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+  int _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+  String _outputDeviceName = '';
+  int _outputSampleRate = 0;
+  BassOutputFormat _outputFormat = BassOutputFormat.float32;
+  bool _outputRebuildInProgress = false;
+  ({String path, double position, bool wasPlaying, int startMs, int endMs})?
+  _pendingOutputRestore;
+  bool _lastInitUsedDefaultDevice = false;
+  bool _lastWasapiInitUsedDefaultDevice = false;
   bool _transitionHandledCompletion = false;
 
   double? _replayGainDb;
@@ -700,6 +857,7 @@ class BassPlayer {
     final info = calloc<bass_wasapi.BASS_WASAPI_INFO>();
     try {
       if (_bassWasapi.BASS_WASAPI_GetInfo(info) == bass.FALSE) {
+        _wasapiActualFormatLabel = 'unknown';
         _wasapiOutputInfo =
             'unknown requested=2x${(requestedBufferSec * 1000).round()}ms async=1';
         return;
@@ -714,6 +872,7 @@ class BassPlayer {
         bass_wasapi.BASS_WASAPI_FORMAT_32BIT => ('32bit', 4),
         _ => ('format${value.format}', 0),
       };
+      _wasapiActualFormatLabel = format.$1;
       final frameBytes = value.chans * format.$2;
       final bufferMs = value.freq > 0 && frameBytes > 0
           ? (value.buflen * 1000 / value.freq / frameBytes).round()
@@ -1526,12 +1685,88 @@ class BassPlayer {
   }
 
   void _bassInit({bool resetHandles = true}) {
-    // 先释放旧设备，确保可以使用 -1 (默认设备) 重新初始化
+    // 独占输出由独立 add-on 持有，重建 BASS 基座前必须先释放。
+    if (wasapiExclusive || _streamWasapiExclusive) {
+      _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
+      _bassWasapi.BASS_WASAPI_Free();
+      _wasapiOutputInfo = 'off';
+    }
+    // 先释放旧设备，确保可以重新初始化
     _bass.BASS_Free();
     if (resetHandles) _resetBassHandles();
     _applyOutputBufferConfig();
 
-    if (_bass.BASS_Init(-1, 44100, 0, ffi.nullptr, ffi.nullptr) == 0) {
+    _lastInitUsedDefaultDevice = false;
+    final requestedDevice = _sharedOutputDeviceId;
+    final device = _validatedSharedDeviceId(requestedDevice);
+    if (device != requestedDevice) {
+      _lastInitUsedDefaultDevice = true;
+      log.bass.warn(
+        'legacy',
+        '[bass] shared output device $requestedDevice is unavailable, '
+            'falling back to system default',
+      );
+    }
+
+    final requestedRate = !_preferredExclusive && _outputSampleRate > 0
+        ? _outputSampleRate
+        : 44100;
+    var initialized = _bass.BASS_Init(
+      device,
+      requestedRate,
+      0,
+      ffi.nullptr,
+      ffi.nullptr,
+    );
+    if (initialized == 0 && requestedRate != 44100) {
+      final code = _bass.BASS_ErrorGetCode();
+      if (code == bass.BASS_ERROR_FORMAT || code == bass.BASS_ERROR_UNKNOWN) {
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output does not accept ${requestedRate}Hz, '
+              'falling back to 44100Hz',
+        );
+        _bass.BASS_Free();
+        initialized = _bass.BASS_Init(
+          device,
+          44100,
+          0,
+          ffi.nullptr,
+          ffi.nullptr,
+        );
+      }
+    }
+    if (initialized == 0 && device != -1) {
+      final code = _bass.BASS_ErrorGetCode();
+      if (code == bass.BASS_ERROR_DEVICE || code == bass.BASS_ERROR_DRIVER) {
+        _lastInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output device $device failed to initialize, '
+              'falling back to system default',
+        );
+        _bass.BASS_Free();
+        initialized = _bass.BASS_Init(
+          -1,
+          requestedRate,
+          0,
+          ffi.nullptr,
+          ffi.nullptr,
+        );
+        if (initialized == 0 && requestedRate != 44100) {
+          _bass.BASS_Free();
+          initialized = _bass.BASS_Init(
+            -1,
+            44100,
+            0,
+            ffi.nullptr,
+            ffi.nullptr,
+          );
+        }
+      }
+    }
+
+    if (initialized == 0) {
       switch (_bass.BASS_ErrorGetCode()) {
         case bass.BASS_ERROR_DEVICE:
           throw const FormatException('device is invalid.');
@@ -1564,6 +1799,8 @@ class BassPlayer {
       }
     }
 
+    _refreshSharedOutputInfo();
+
     // BASS_SetConfig 只影响之后创建的流：设备重建后先对齐 DSD 解码频率。
     _applyDsdFreqConfig();
 
@@ -1581,6 +1818,627 @@ class BassPlayer {
     _reapplyMidiSoundfont();
   }
 
+  void _refreshSharedOutputInfo() {
+    final info = calloc<bass.BASS_INFO>();
+    try {
+      if (_bass.BASS_GetInfo(info) != bass.FALSE) {
+        final frequency = info.ref.freq;
+        if (frequency > 0) _sharedOutputFrequency = frequency;
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to read shared output info',
+        error: err,
+        stackTrace: trace,
+      );
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  /// 共享设备号从 1 开始；-1 表示系统默认。
+  int _validatedSharedDeviceId(int id) {
+    if (id == PlaybackPreference.defaultOutputDeviceId) return id;
+    if (id < 1) return PlaybackPreference.defaultOutputDeviceId;
+    final info = calloc<bass.BASS_DEVICEINFO>();
+    try {
+      if (_bass.BASS_GetDeviceInfo(id, info) == bass.FALSE) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      final flags = info.ref.flags;
+      if ((flags & bass.BASS_DEVICE_INPUT) != 0 ||
+          (flags & bass.BASS_DEVICE_DISABLED) != 0 ||
+          (flags & bass.BASS_DEVICE_UNPLUGGED) != 0) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      return id;
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to inspect shared device $id',
+        error: err,
+        stackTrace: trace,
+      );
+      return PlaybackPreference.defaultOutputDeviceId;
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  /// WASAPI 设备号从 0 开始；-1 表示系统默认。
+  int _validatedWasapiDeviceId(int id) {
+    if (id == PlaybackPreference.defaultOutputDeviceId) return id;
+    if (id < 0) return PlaybackPreference.defaultOutputDeviceId;
+    final info = calloc<bass_wasapi.BASS_WASAPI_DEVICEINFO>();
+    try {
+      if (_bassWasapi.BASS_WASAPI_GetDeviceInfo(id, info) == bass.FALSE) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      final flags = info.ref.flags;
+      if ((flags & bass.BASS_DEVICE_INPUT) != 0 ||
+          (flags & bass.BASS_DEVICE_DISABLED) != 0 ||
+          (flags & bass.BASS_DEVICE_UNPLUGGED) != 0) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      return id;
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to inspect WASAPI device $id',
+        error: err,
+        stackTrace: trace,
+      );
+      return PlaybackPreference.defaultOutputDeviceId;
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  String _readDeviceString(ffi.Pointer<ffi.Char> pointer) {
+    if (pointer == ffi.nullptr) return '';
+    var length = 0;
+    while (length < 1024 && pointer.elementAt(length).value != 0) {
+      length++;
+    }
+    if (length == 0) return '';
+    final bytes = pointer.cast<ffi.Uint8>().asTypedList(length);
+    try {
+      return utf8.decode(bytes);
+    } catch (err) {
+      // BASS 的设备名来自系统 ANSI 代码页，中文 Windows 上为 GBK。
+      log.bass.debug(
+        'legacy',
+        '[bass] device name is not UTF-8: $err',
+      );
+    }
+    try {
+      return gbk.decode(bytes);
+    } catch (err) {
+      // 未知代码页交给 latin1 保证不崩溃。
+      log.bass.debug(
+        'legacy',
+        '[bass] device name is not GBK: $err',
+      );
+    }
+    return latin1.decode(bytes);
+  }
+
+  List<BassOutputDevice> _enumerateSharedOutputDevices() {
+    final devices = <BassOutputDevice>[
+      const BassOutputDevice(
+        id: PlaybackPreference.defaultOutputDeviceId,
+        name: '系统默认',
+        isDefault: true,
+      ),
+    ];
+    try {
+      for (var index = 1; index <= 256; index++) {
+        final info = calloc<bass.BASS_DEVICEINFO>();
+        try {
+          if (_bass.BASS_GetDeviceInfo(index, info) == bass.FALSE) break;
+          final flags = info.ref.flags;
+          if ((flags & bass.BASS_DEVICE_ENABLED) == 0) continue;
+          if ((flags & bass.BASS_DEVICE_INPUT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DEFAULT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DISABLED) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_UNPLUGGED) != 0) continue;
+          final name = _readDeviceString(info.ref.name).trim();
+          devices.add(
+            BassOutputDevice(
+              id: index,
+              name: name.isEmpty ? '输出设备 $index' : name,
+              isDefault: false,
+            ),
+          );
+        } finally {
+          calloc.free(info);
+        }
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to enumerate shared output devices',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+    return devices;
+  }
+
+  List<BassOutputDevice> _enumerateWasapiOutputDevices() {
+    final devices = <BassOutputDevice>[
+      const BassOutputDevice(
+        id: PlaybackPreference.defaultOutputDeviceId,
+        name: '系统默认',
+        isDefault: true,
+      ),
+    ];
+    try {
+      for (var index = 0; index <= 256; index++) {
+        final info = calloc<bass_wasapi.BASS_WASAPI_DEVICEINFO>();
+        try {
+          if (_bassWasapi.BASS_WASAPI_GetDeviceInfo(index, info) ==
+              bass.FALSE) {
+            break;
+          }
+          final flags = info.ref.flags;
+          if ((flags & bass.BASS_DEVICE_ENABLED) == 0) continue;
+          if ((flags & bass.BASS_DEVICE_INPUT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_LOOPBACK) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DEFAULT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DISABLED) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_UNPLUGGED) != 0) continue;
+          final name = _readDeviceString(info.ref.name).trim();
+          devices.add(
+            BassOutputDevice(
+              id: index,
+              name: name.isEmpty ? '独占设备 $index' : name,
+              isDefault: false,
+            ),
+          );
+        } finally {
+          calloc.free(info);
+        }
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to enumerate WASAPI output devices',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+    return devices;
+  }
+
+  int _matchDeviceIdByName(
+    List<BassOutputDevice> devices,
+    String name,
+  ) {
+    final target = name.trim();
+    if (target.isEmpty) return PlaybackPreference.defaultOutputDeviceId;
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      if (device.name == target) return device.id;
+    }
+    final lower = target.toLowerCase();
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      if (device.name.toLowerCase() == lower) return device.id;
+    }
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      final candidate = device.name.toLowerCase();
+      if (candidate.contains(lower) || lower.contains(candidate)) {
+        return device.id;
+      }
+    }
+    return PlaybackPreference.defaultOutputDeviceId;
+  }
+
+  /// 枚举输出设备。共享与独占使用各自的编号空间，默认项 id 均为 -1。
+  Future<List<BassOutputDevice>> enumerateOutputDevices({
+    bool exclusive = false,
+  }) async {
+    return exclusive
+        ? _enumerateWasapiOutputDevices()
+        : _enumerateSharedOutputDevices();
+  }
+
+  BassOutputState get outputState {
+    final exclusive = wasapiExclusive || _streamWasapiExclusive;
+    final usedDefault = exclusive
+        ? _lastWasapiInitUsedDefaultDevice
+        : _lastInitUsedDefaultDevice;
+    final configuredName = _outputDeviceName.trim();
+    return BassOutputState(
+      deviceId: exclusive ? _wasapiOutputDeviceId : _sharedOutputDeviceId,
+      deviceName: usedDefault || configuredName.isEmpty
+          ? '系统默认'
+          : configuredName,
+      exclusive: exclusive,
+      sampleRate: exclusive ? _wasapiOutputFrequency : _sharedOutputFrequency,
+      formatLabel: exclusive
+          ? _wasapiActualFormatLabel
+          : '系统混音（由设备决定）',
+    );
+  }
+
+  BassOutputConfig get outputConfig => _currentOutputConfig();
+
+  /// 更新当前模式的设备号。真正生效需要调用 [rebuildOutput]。
+  void setOutputDevice(int id) {
+    if (_preferredExclusive) {
+      _wasapiOutputDeviceId = id;
+    } else {
+      _sharedOutputDeviceId = id;
+    }
+  }
+
+  void _applyStoredOutputPreference() {
+    try {
+      final pref = AppPreference.instance.playbackPref;
+      _preferredExclusive =
+          pref.outputMode == PlaybackPreference.outputModeExclusive;
+      _outputSampleRate = pref.outputSampleRate;
+      _outputFormat = bassOutputFormatFromPreference(pref.outputFormat);
+      _outputDeviceName = pref.outputDeviceName;
+      if (_preferredExclusive) {
+        _wasapiOutputDeviceId = pref.outputDeviceId;
+      } else {
+        _sharedOutputDeviceId = pref.outputDeviceId;
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to read stored output preference, using defaults',
+        error: err,
+        stackTrace: trace,
+      );
+      _preferredExclusive = false;
+      _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _outputSampleRate = 0;
+      _outputFormat = BassOutputFormat.float32;
+      _outputDeviceName = '';
+    }
+  }
+
+  void _remapCurrentModeDeviceId(bool exclusive) {
+    final devices = exclusive
+        ? _enumerateWasapiOutputDevices()
+        : _enumerateSharedOutputDevices();
+    final matched = _matchDeviceIdByName(devices, _outputDeviceName);
+    if (exclusive) {
+      _wasapiOutputDeviceId = matched;
+    } else {
+      _sharedOutputDeviceId = matched;
+    }
+  }
+
+  BassOutputConfig _currentOutputConfig() {
+    return BassOutputConfig(
+      deviceId: _preferredExclusive
+          ? _wasapiOutputDeviceId
+          : _sharedOutputDeviceId,
+      deviceName: _outputDeviceName,
+      exclusive: _preferredExclusive,
+      sampleRate: _outputSampleRate,
+      format: _outputFormat,
+    );
+  }
+
+  ({int shared, int wasapi, String name, bool exclusive, int rate, BassOutputFormat format})
+  _outputSnapshot() {
+    return (
+      shared: _sharedOutputDeviceId,
+      wasapi: _wasapiOutputDeviceId,
+      name: _outputDeviceName,
+      exclusive: _preferredExclusive,
+      rate: _outputSampleRate,
+      format: _outputFormat,
+    );
+  }
+
+  void _restoreOutputSnapshot(
+    ({int shared, int wasapi, String name, bool exclusive, int rate, BassOutputFormat format}) snapshot,
+  ) {
+    _sharedOutputDeviceId = snapshot.shared;
+    _wasapiOutputDeviceId = snapshot.wasapi;
+    _outputDeviceName = snapshot.name;
+    _preferredExclusive = snapshot.exclusive;
+    _outputSampleRate = snapshot.rate;
+    _outputFormat = snapshot.format;
+  }
+
+  void _adoptOutputConfig(BassOutputConfig config) {
+    _preferredExclusive = config.exclusive;
+    _outputSampleRate = config.sampleRate;
+    _outputFormat = config.format;
+    _outputDeviceName = config.deviceName.trim();
+    if (config.exclusive) {
+      _wasapiOutputDeviceId = config.deviceId;
+      _sharedOutputDeviceId = _matchDeviceIdByName(
+        _enumerateSharedOutputDevices(),
+        _outputDeviceName,
+      );
+    } else {
+      _sharedOutputDeviceId = config.deviceId;
+      _wasapiOutputDeviceId = _matchDeviceIdByName(
+        _enumerateWasapiOutputDevices(),
+        _outputDeviceName,
+      );
+    }
+  }
+
+  /// 应用新的输出设备/模式/采样率/格式。失败时回退到调用前的输出并返回失败。
+  Future<BassOutputApplyResult> applyOutputConfig(BassOutputConfig config) async {
+    if (_outputRebuildInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _outputRebuildInProgress = true;
+    final previous = _outputSnapshot();
+    try {
+      _adoptOutputConfig(config);
+      final result = await _rebuildOutputInternal();
+      if (result.success) return result;
+
+      log.bass.warn(
+        'legacy',
+        '[bass] output switch failed, rolling back: ${result.message}',
+      );
+      _restoreOutputSnapshot(previous);
+      final rollback = await _rebuildOutputInternal();
+      return result.copyWith(
+        rolledBack: rollback.success,
+        message: rollback.success
+            ? '${result.message}；已回退到原输出'
+            : '${result.message}；回退原输出也失败：${rollback.message}',
+      );
+    } catch (err, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] output switch crashed',
+        error: err,
+        stackTrace: trace,
+      );
+      _restoreOutputSnapshot(previous);
+      try {
+        await _rebuildOutputInternal();
+      } catch (rollbackError, rollbackTrace) {
+        log.bass.error(
+          'legacy',
+          '[bass] output rollback crashed',
+          error: rollbackError,
+          stackTrace: rollbackTrace,
+        );
+      }
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+      );
+    } finally {
+      _outputRebuildInProgress = false;
+    }
+  }
+
+  /// 按当前保存的输出参数重建输出。用于设备热插拔后的手动恢复。
+  Future<BassOutputApplyResult> rebuildOutput() async {
+    if (_outputRebuildInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _outputRebuildInProgress = true;
+    try {
+      final result = await _rebuildOutputInternal();
+      return result;
+    } finally {
+      _outputRebuildInProgress = false;
+    }
+  }
+
+  Future<BassOutputApplyResult> _rebuildOutputInternal() async {
+    final restore = _pendingOutputRestore;
+    final previousState = restore != null
+        ? (restore.wasPlaying ? PlayerState.playing : PlayerState.paused)
+        : (_fstream != null ? playerState : PlayerState.unknown);
+    final path = restore?.path ?? _fPath;
+    final hasRestore = restore != null;
+    final hadSource = hasRestore || (_fstream != null && path != null);
+    final savedPosition = restore?.position ?? (hadSource ? position : 0.0);
+    final wasPlaying = previousState == PlayerState.playing;
+    final savedVolume = _baseOutputVolume;
+    final savedReplayGain = _replayGainDb;
+    final savedStartMs = restore?.startMs ?? _segmentStartMs;
+    final savedEndMs = restore?.endMs ?? _segmentEndMs;
+    final wasExclusive = wasapiExclusive || _streamWasapiExclusive;
+    final targetExclusive = _preferredExclusive;
+    _lastWasapiInitUsedDefaultDevice = false;
+    if (hadSource && path != null) {
+      // 失败回退时 _fstream 已经释放，恢复信息必须留到期重建结束。
+      _pendingOutputRestore = (
+        path: path,
+        position: savedPosition,
+        wasPlaying: wasPlaying,
+        startMs: savedStartMs,
+        endMs: savedEndMs,
+      );
+    }
+
+    _logAudioState('rebuildOutput(begin,exclusive=$targetExclusive)');
+
+    try {
+      if (wasExclusive) _stopWasapiOutputIfNeeded();
+      _removeEQ();
+      _removeAudioEffects();
+      _releaseOutputHandles();
+
+      // 共享基座始终先初始化；独占输出随后由 BASS_WASAPI 接管。
+      _bassInit();
+      wasapiExclusive = targetExclusive;
+      _streamWasapiExclusive = false;
+
+      if (targetExclusive && hadSource) {
+        _streamWasapiExclusive = true;
+        final handle = _createDecodeStream(path!);
+        if (handle == 0) {
+          throw Exception('Failed to create exclusive decode stream');
+        }
+        _fstream = handle;
+        _segmentStartMs = savedStartMs;
+        _segmentEndMs = savedEndMs;
+        _applySegmentRange(handle, startMs: savedStartMs, endMs: savedEndMs);
+        _refreshCachedLength();
+        _bassWasapiInit();
+        if (savedPosition > 0) seek(savedPosition);
+        if (wasPlaying &&
+            _bassWasapi.BASS_WASAPI_Start() == bass.FALSE) {
+          throw Exception('Failed to start WASAPI output');
+        }
+      } else if (!targetExclusive && hadSource) {
+        _createSharedStream(
+          path!,
+          savedPosition,
+          startPlayback: wasPlaying,
+          startMs: savedStartMs,
+          endMs: savedEndMs,
+        );
+      }
+
+      _baseOutputVolume = savedVolume;
+      _replayGainDb = savedReplayGain;
+      _applyPlaybackGains();
+      _refreshStreamSampleRate();
+      _spectrumTickPeriod = _computeSpectrumTickPeriod();
+      _lastSpectrumUpdateUs = 0;
+      if (hadSource) {
+        _playerStateStreamController.add(
+          wasPlaying ? PlayerState.playing : PlayerState.paused,
+        );
+        if (wasPlaying) _startPositionUpdater();
+      }
+      _pendingOutputRestore = null;
+
+      final state = outputState;
+      final usedDefault = targetExclusive
+          ? _lastWasapiInitUsedDefaultDevice
+          : _lastInitUsedDefaultDevice;
+      _logAudioState('rebuildOutput(done)');
+      return BassOutputApplyResult(
+        success: true,
+        message: usedDefault ? '输出设备不可用，已回退到系统默认设备' : '音频输出已切换',
+        usedDefaultDevice: usedDefault,
+        sampleRate: state.sampleRate,
+        formatLabel: state.formatLabel,
+      );
+    } catch (err, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] output rebuild failed: ${_outputDeviceName.isEmpty ? '默认设备' : _outputDeviceName}',
+        error: err,
+        stackTrace: trace,
+      );
+      _playerStateStreamController.add(PlayerState.paused);
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+        usedDefaultDevice:
+            _lastInitUsedDefaultDevice || _lastWasapiInitUsedDefaultDevice,
+      );
+    }
+  }
+
+  /// BASS_Free 之前显式断开所有原生句柄，避免混音器/队列/淡出流悬挂。
+  void _releaseOutputHandles() {
+    _cancelOutputGainFade(keepTarget: true);
+    _fadeInTimer?.cancel();
+    _fadeInTimer = null;
+    _cancelEqSmoothing();
+    _fadeOutTimer?.cancel();
+    _fadeOutTimer = null;
+    _transitionTimer?.cancel();
+    _transitionTimer = null;
+    _handledCompletionClearTimer?.cancel();
+    _handledCompletionClearTimer = null;
+    _positionUpdaterVersion++;
+    _positionUpdater?.cancel();
+    _positionUpdater = null;
+
+    final fadeOut = _fadeOutHandle;
+    final fadeOutRemove = _fadeOutRemoveFromMixer;
+    _fadeOutHandle = null;
+    _fadeOutRemoveFromMixer = false;
+    if (fadeOut != null) {
+      if (fadeOutRemove) _bassMix?.channelRemove(fadeOut);
+      _bass.BASS_ChannelStop(fadeOut);
+      _bass.BASS_StreamFree(fadeOut);
+    }
+
+    final oldTransition = _transitionOldStream;
+    _transitionOldStream = null;
+    _cancelTransition();
+    if (oldTransition != null &&
+        oldTransition != _fstream &&
+        oldTransition != fadeOut) {
+      _bass.BASS_StreamFree(oldTransition);
+    }
+
+    final smartPreparation = _smartPreparation;
+    final smartIncomingOwned = _smartIncomingNativeOwned;
+    _smartPreparation = null;
+    _smartIncomingNativeOwned = false;
+    if (smartPreparation != null && !smartIncomingOwned) {
+      _bass.BASS_StreamFree(smartPreparation.incomingHandle);
+    }
+
+    final smartOutgoing = _smartOutgoingStream;
+    _smartOutgoingStream = null;
+    _activeSmartTransitionId = null;
+    if (smartOutgoing != null && smartOutgoing != _fstream) {
+      _bass.BASS_StreamFree(smartOutgoing);
+    }
+    _smartOutgoingPath = null;
+    _lingeringPath = null;
+
+    _dropQueuedGaplessSource();
+
+    final mixer = _mixerStream;
+    final mixerOwnsSource = _mixerUsesQueue;
+    _mixerStream = null;
+    _mixerUsesQueue = false;
+    if (mixer != null) {
+      _bass.BASS_ChannelStop(mixer);
+      _bass.BASS_StreamFree(mixer);
+    }
+
+    final source = _fstream;
+    _fstream = null;
+    if (source != null &&
+        source != fadeOut &&
+        source != oldTransition &&
+        !(mixer != null && mixerOwnsSource)) {
+      _bass.BASS_ChannelStop(source);
+      _bass.BASS_StreamFree(source);
+    }
+
+    _cachedLengthSeconds = null;
+    _streamWasapiExclusive = false;
+    wasapiExclusive = false;
+    _wasapiOutputInfo = 'off';
+    _eqChannel = null;
+    _bfxEqHandle = 0;
+    _eqHandles.clear();
+    _dspFxHandles.clear();
+    _dspChannel = null;
+    _publishAudioFiles();
+  }
+
   void _applyOutputBufferConfig() {
     _bass.BASS_SetConfig(bass.BASS_CONFIG_BUFFER, _playbackBufferMs);
     _bass.BASS_SetConfig(bass.BASS_CONFIG_DEV_BUFFER, _deviceBufferMs);
@@ -1591,7 +2449,7 @@ class BassPlayer {
   void _applyDsdFreqConfig() {
     final target = (wasapiExclusive || _streamWasapiExclusive)
         ? _wasapiOutputFrequency
-        : 44100;
+        : _sharedOutputFrequency;
     if (_bass.BASS_SetConfig(bass.BASS_CONFIG_DSD_FREQ, target) == bass.FALSE) {
       log.bass.warn(
         'legacy',
@@ -1637,6 +2495,7 @@ class BassPlayer {
   /// ensure that there's bass.dll at path of .exe\\dll\\BASS
   /// leave the device's output freq as it is
   BassPlayer() {
+    _applyStoredOutputPreference();
     _positionStreamController = StreamController<double>.broadcast(
       onListen: _syncPositionUpdaterPeriod,
       onCancel: _syncPositionUpdaterPeriod,
@@ -1801,6 +2660,9 @@ class BassPlayer {
     } catch (err) {
       log.bass.error('legacy', '[bass] Init failed: $err');
     }
+    // 偏好独占时先标记模式；真正初始化 WASAPI 推迟到有解码流之后。
+    wasapiExclusive = _preferredExclusive;
+    _streamWasapiExclusive = false;
 
     // ─── 7. 预加载 BASS_FX（在 bass.dll 已就绪时加载，避免后续依赖解析问题） ─
     _loadBassFx();
@@ -2911,9 +3773,15 @@ class BassPlayer {
 
   /// true: 操作成功；false: 操作失败
   bool useExclusiveMode(bool exclusive) {
+    _pendingOutputRestore = null;
     _cancelOutputGainFade(keepTarget: true);
     final prevState = wasapiExclusive;
-    if (exclusive == prevState) return true;
+    if (exclusive == prevState) {
+      _preferredExclusive = exclusive;
+      return true;
+    }
+    _preferredExclusive = exclusive;
+    _remapCurrentModeDeviceId(exclusive);
     try {
       if (exclusive && !hasAudioSource) {
         const message = '独占模式未切换：当前没有可用的音频流';
@@ -3036,6 +3904,7 @@ class BassPlayer {
       }
 
       onExclusiveModeChanged?.call(wasapiExclusive);
+      _preferredExclusive = wasapiExclusive;
       return wasapiExclusive == exclusive;
     } catch (err, trace) {
       log.bass.error('legacy', '切换独占模式失败', error: err, stackTrace: trace);
@@ -3043,6 +3912,7 @@ class BassPlayer {
       _playerStateStreamController.add(playerState);
     }
     wasapiExclusive = _fstream != null && _streamWasapiExclusive;
+    _preferredExclusive = wasapiExclusive;
     onExclusiveModeChanged?.call(wasapiExclusive);
     return false;
   }
@@ -3292,6 +4162,7 @@ class BassPlayer {
   /// it will pause current channel and free current stream.
   /// [startMs]/[endMs] 是 CUE 虚拟轨的段范围，普通曲目保持默认 0。
   void setSource(String path, {int startMs = 0, int endMs = 0}) {
+    _pendingOutputRestore = null;
     final segment = normalizePlaybackSegment(startMs, endMs);
     final effectiveStart = segment.startMs;
     final effectiveEnd = segment.endMs;
@@ -3627,22 +4498,36 @@ class BassPlayer {
     _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
     _bassWasapi.BASS_WASAPI_Free();
 
+    _lastWasapiInitUsedDefaultDevice = false;
+    final requestedDevice = _wasapiOutputDeviceId;
+    final device = _validatedWasapiDeviceId(requestedDevice);
+    if (device != requestedDevice) {
+      _lastWasapiInitUsedDefaultDevice = true;
+      log.bass.warn(
+        'legacy',
+        '[bass] WASAPI device $requestedDevice is unavailable, '
+            'falling back to system default',
+      );
+    }
+
     // 添加 AUTOFORMAT 和 BUFFER 标志
-    const flags =
+    final flags =
         bass_wasapi.BASS_WASAPI_EXCLUSIVE |
         bass_wasapi.BASS_WASAPI_AUTOFORMAT |
         bass_wasapi.BASS_WASAPI_EVENT |
         bass_wasapi.BASS_WASAPI_BUFFER |
-        bass_wasapi.BASS_WASAPI_ASYNC;
+        bass_wasapi.BASS_WASAPI_ASYNC |
+        (_outputFormat.wasapiFormatIndex << 16);
     // 根据音频采样率动态计算缓冲区，高码率文件自动获得更大缓冲
     final bufferSec = _computeWasapiBufferSec();
-    const initFreq = 0; // 让 WASAPI 自动选择合适的采样率
+    // 0 = 跟随设备的混音格式采样率
+    final initFreq = _outputSampleRate > 0 ? _outputSampleRate : 0;
 
     // WASAPI 初始化重试机制：最多重试 3 次以解决 BASS_ERROR_BUSY
     int result = bass.FALSE;
     for (int attempt = 0; attempt < 3; attempt++) {
       result = _bassWasapi.BASS_WASAPI_Init(
-        -1, // 默认设备
+        device,
         initFreq,
         0, // 自动选择声道数
         flags,
@@ -3709,6 +4594,7 @@ class BassPlayer {
       }
     } else {
       _refreshWasapiOutputInfo(bufferSec);
+      _applyDsdFreqConfig();
     }
   }
 
@@ -3953,6 +4839,7 @@ class BassPlayer {
   ///
   /// do nothing if [setSource] hasn't been called
   void freeFStream() {
+    _pendingOutputRestore = null;
     _segmentStartMs = 0;
     _segmentEndMs = 0;
     _segmentDurationSeconds = 0;
@@ -4032,6 +4919,7 @@ class BassPlayer {
   ///
   /// Also free the bass.dll.
   void free() {
+    _pendingOutputRestore = null;
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;

@@ -27,6 +27,11 @@ class PlaybackPreference {
   String dsdPlaybackMode;
   int sacdPcmSampleRate;
   int sacdPcmBitDepth;
+  int outputDeviceId;
+  String outputDeviceName;
+  String outputMode;
+  int outputSampleRate;
+  String outputFormat;
 
   static const String dsdPlaybackModePcm = 'pcm';
   static const String dsdPlaybackModeDsf = 'dsf';
@@ -34,6 +39,13 @@ class PlaybackPreference {
   static const int defaultSacdPcmBitDepth = 24;
   static const List<int> sacdPcmSampleRates = [44100, 48000, 88200, 96000];
   static const List<int> sacdPcmBitDepths = [16, 24];
+  static const int defaultOutputDeviceId = -1;
+  static const String outputModeShared = 'shared';
+  static const String outputModeExclusive = 'exclusive';
+  static const String outputFormatFloat32 = 'float32';
+  static const String outputFormatPcm24 = 'pcm24';
+  static const String outputFormatPcm16 = 'pcm16';
+  static const List<int> outputSampleRates = [0, 44100, 48000, 96000, 192000];
 
   PlaybackPreference(
     this.playMode,
@@ -62,6 +74,11 @@ class PlaybackPreference {
     this.dsdPlaybackMode = dsdPlaybackModePcm,
     this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
     this.sacdPcmBitDepth = defaultSacdPcmBitDepth,
+    this.outputDeviceId = defaultOutputDeviceId,
+    this.outputDeviceName = '',
+    this.outputMode = outputModeShared,
+    this.outputSampleRate = 0,
+    this.outputFormat = outputFormatFloat32,
   });
 
   Map<String, dynamic> toMap() => {
@@ -91,6 +108,11 @@ class PlaybackPreference {
     'dsdPlaybackMode': dsdPlaybackMode,
     'sacdPcmSampleRate': sacdPcmSampleRate,
     'sacdPcmBitDepth': sacdPcmBitDepth,
+    'outputDeviceId': outputDeviceId,
+    'outputDeviceName': outputDeviceName,
+    'outputMode': outputMode,
+    'outputSampleRate': outputSampleRate,
+    'outputFormat': outputFormat,
   };
 
   factory PlaybackPreference.fromMap(Object? value) {
@@ -129,6 +151,11 @@ class PlaybackPreference {
         map['sacdPcmSampleRate'],
       ),
       sacdPcmBitDepth: _sacdPcmBitDepthFromStored(map['sacdPcmBitDepth']),
+      outputDeviceId: _outputDeviceIdFromStored(map['outputDeviceId']),
+      outputDeviceName: _normalizedString(map['outputDeviceName']),
+      outputMode: _outputModeFromStored(map['outputMode']),
+      outputSampleRate: _outputSampleRateFromStored(map['outputSampleRate']),
+      outputFormat: _outputFormatFromStored(map['outputFormat']),
     );
   }
 
@@ -151,6 +178,30 @@ class PlaybackPreference {
     return depth != null && sacdPcmBitDepths.contains(depth)
         ? depth
         : defaultSacdPcmBitDepth;
+  }
+
+  static int _outputDeviceIdFromStored(Object? value) {
+    final id = _normalizedInteger(value);
+    return id != null && id >= defaultOutputDeviceId
+        ? id
+        : defaultOutputDeviceId;
+  }
+
+  static String _outputModeFromStored(Object? value) {
+    final mode = _normalizedString(value).toLowerCase();
+    return mode == outputModeExclusive ? outputModeExclusive : outputModeShared;
+  }
+
+  static int _outputSampleRateFromStored(Object? value) {
+    final rate = _normalizedInteger(value);
+    return rate != null && outputSampleRates.contains(rate) ? rate : 0;
+  }
+
+  static String _outputFormatFromStored(Object? value) {
+    final format = _normalizedString(value).toLowerCase();
+    if (format == outputFormatPcm24) return outputFormatPcm24;
+    if (format == outputFormatPcm16) return outputFormatPcm16;
+    return outputFormatFloat32;
   }
 
   static ({

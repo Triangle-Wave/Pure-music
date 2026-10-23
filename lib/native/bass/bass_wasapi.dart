@@ -49,6 +49,30 @@ const int BASS_ERROR_WASAPI_DENIED = 5003;
 
 typedef BOOL = ffi.Int;
 
+final class BASS_WASAPI_DEVICEINFO extends ffi.Struct {
+  external ffi.Pointer<ffi.Char> name;
+
+  external ffi.Pointer<ffi.Char> id;
+
+  @ffi.UnsignedLong()
+  external int type;
+
+  @ffi.UnsignedLong()
+  external int flags;
+
+  @ffi.Float()
+  external double minperiod;
+
+  @ffi.Float()
+  external double defperiod;
+
+  @ffi.UnsignedLong()
+  external int mixfreq;
+
+  @ffi.UnsignedLong()
+  external int mixchans;
+}
+
 final class BASS_WASAPI_INFO extends ffi.Struct {
   @ffi.Uint32()
   external int initflags;
@@ -175,6 +199,46 @@ class BassWasapi {
           ffi.Pointer<ffi.Void>,
         )
       >();
+
+  int BASS_WASAPI_GetDeviceInfo(
+    int device,
+    ffi.Pointer<BASS_WASAPI_DEVICEINFO> info,
+  ) {
+    return _BASS_WASAPI_GetDeviceInfo(device, info);
+  }
+
+  late final _BASS_WASAPI_GetDeviceInfoPtr =
+      _lookup<
+        ffi.NativeFunction<
+          BOOL Function(DWORD, ffi.Pointer<BASS_WASAPI_DEVICEINFO>)
+        >
+      >('BASS_WASAPI_GetDeviceInfo');
+  late final _BASS_WASAPI_GetDeviceInfo =
+      _BASS_WASAPI_GetDeviceInfoPtr.asFunction<
+        int Function(int, ffi.Pointer<BASS_WASAPI_DEVICEINFO>)
+      >();
+
+  int BASS_WASAPI_SetDevice(int device) {
+    return _BASS_WASAPI_SetDevice(device);
+  }
+
+  late final _BASS_WASAPI_SetDevicePtr =
+      _lookup<ffi.NativeFunction<BOOL Function(DWORD)>>(
+        'BASS_WASAPI_SetDevice',
+      );
+  late final _BASS_WASAPI_SetDevice =
+      _BASS_WASAPI_SetDevicePtr.asFunction<int Function(int)>();
+
+  int BASS_WASAPI_GetDevice() {
+    return _BASS_WASAPI_GetDevice();
+  }
+
+  late final _BASS_WASAPI_GetDevicePtr =
+      _lookup<ffi.NativeFunction<DWORD Function()>>(
+        'BASS_WASAPI_GetDevice',
+      );
+  late final _BASS_WASAPI_GetDevice =
+      _BASS_WASAPI_GetDevicePtr.asFunction<int Function()>();
 
   int BASS_WASAPI_Free() {
     return _BASS_WASAPI_Free();

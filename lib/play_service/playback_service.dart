@@ -380,6 +380,7 @@ class PlaybackService extends ChangeNotifier {
   final _player = BassPlayer();
   final _smtc = SmtcBridge.create();
   final _pref = AppPreference.instance.playbackPref;
+  bool _audioOutputSwitchInProgress = false;
   late final PlaybackSessionStore _sessionStore = PlaybackSessionStore(
     preference: _pref,
     save: AppPreference.instance.savePlaybackOnly,
@@ -669,9 +670,16 @@ class PlaybackService extends ChangeNotifier {
     }
     if (applied) {
       _wasapiExclusive.value = exclusive;
+      _pref.outputMode = exclusive
+          ? PlaybackPreference.outputModeExclusive
+          : PlaybackPreference.outputModeShared;
+      _pref.outputDeviceId = _player.outputConfig.deviceId;
+      final appliedName = _player.outputConfig.deviceName;
+      if (appliedName.isNotEmpty) _pref.outputDeviceName = appliedName;
       if (disabled.isNotEmpty) {
         unawaited(AppPreference.instance.save());
       }
+      unawaited(AppPreference.instance.savePlaybackOnly());
       final modeLabel = exclusive ? '独占' : '共享';
       final message = disabled.isEmpty
           ? '已切换到$modeLabel'
@@ -679,6 +687,181 @@ class PlaybackService extends ChangeNotifier {
       showTextOnSnackBar(message, variant: ToastVariant.success);
     }
     return applied;
+  }
+
+  /// 设置页使用：枚举与当前输出模式对应的设备列表。
+  Future<List<BassOutputDevice>> enumerateOutputDevices({
+    required bool exclusive,
+  }) {
+    return _player.enumerateOutputDevices(exclusive: exclusive);
+  }
+
+  BassOutputState get outputState => _player.outputState;
+
+  int _matchOutputDeviceByName(
+    List<BassOutputDevice> devices,
+    String name,
+  ) {
+    final target = name.trim();
+    if (target.isEmpty) return PlaybackPreference.defaultOutputDeviceId;
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      if (device.name == target) return device.id;
+    }
+    final lower = target.toLowerCase();
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      if (device.name.toLowerCase() == lower) return device.id;
+    }
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      final candidate = device.name.toLowerCase();
+      if (candidate.contains(lower) || lower.contains(candidate)) {
+        return device.id;
+      }
+    }
+    return PlaybackPreference.defaultOutputDeviceId;
+  }
+
+  /// 应用完整的音频输出设置。切换失败时播放器回退原输出，偏好保持不变。
+  Future<BassOutputApplyResult> applyAudioOutputConfig({
+    required int deviceId,
+    required String deviceName,
+    required bool exclusive,
+    required int sampleRate,
+    required BassOutputFormat format,
+  }) async {
+    if (_audioOutputSwitchInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _audioOutputSwitchInProgress = true;
+    _synchronizeGaplessTransition();
+
+    final disabled = <String>[];
+    final previousEqEnabled = _eq.eqEnabled;
+    final previousAudioEffects = _eq.audioEffects;
+    final previousRate = _rate.value;
+    final previousPitch = _pitch.value;
+    final wasExclusive = _player.wasapiExclusive;
+
+    if (exclusive && !wasExclusive) {
+      disabled.addAll(_eq.disableForExclusiveMode());
+      if ((_rate.value - 1.0).abs() > 1e-6) {
+        _rate.value = 1.0;
+        _player.setRate(1.0);
+        disabled.add('变速');
+      }
+      if (_pitch.value.abs() > 1e-6) {
+        _pitch.value = 0.0;
+        _player.setPitch(0.0);
+        disabled.add('变调');
+      }
+    }
+
+    var targetDeviceId = deviceId;
+    final preferenceExclusive =
+        _pref.outputMode == PlaybackPreference.outputModeExclusive;
+    if (exclusive != preferenceExclusive) {
+      // 共享与独占的设备编号空间不同，按设备名映射到目标模式。
+      final devices = await _player.enumerateOutputDevices(
+        exclusive: exclusive,
+      );
+      targetDeviceId = _matchOutputDeviceByName(devices, deviceName);
+    }
+
+    try {
+      final result = await _player.applyOutputConfig(
+        BassOutputConfig(
+          deviceId: targetDeviceId,
+          deviceName: deviceName,
+          exclusive: exclusive,
+          sampleRate: sampleRate,
+          format: format,
+        ),
+      );
+      _wasapiExclusive.value = _player.wasapiExclusive;
+
+      if (!result.success) {
+        _restoreDisabledForExclusive(
+          disabled,
+          eqEnabled: previousEqEnabled,
+          audioEffects: previousAudioEffects,
+          rate: previousRate,
+          pitch: previousPitch,
+        );
+        showTextOnSnackBar(result.message, variant: ToastVariant.error);
+        return result;
+      }
+
+      _pref.outputDeviceId = targetDeviceId;
+      _pref.outputDeviceName = deviceName;
+      _pref.outputMode = exclusive
+          ? PlaybackPreference.outputModeExclusive
+          : PlaybackPreference.outputModeShared;
+      _pref.outputSampleRate = sampleRate;
+      _pref.outputFormat = format.preferenceValue;
+
+      final saved = await AppPreference.instance.savePlaybackOnly();
+      _rebuildGaplessPreparation();
+      if (!saved) {
+        showTextOnSnackBar(
+          '输出已切换，但设置保存失败',
+          variant: ToastVariant.error,
+        );
+      } else if (result.usedDefaultDevice) {
+        showTextOnSnackBar(result.message, variant: ToastVariant.info);
+      } else {
+        showTextOnSnackBar(
+          '已切换到${exclusive ? '独占' : '共享'}输出',
+          variant: ToastVariant.success,
+        );
+      }
+      return result;
+    } catch (err, trace) {
+      _wasapiExclusive.value = _player.wasapiExclusive;
+      _restoreDisabledForExclusive(
+        disabled,
+        eqEnabled: previousEqEnabled,
+        audioEffects: previousAudioEffects,
+        rate: previousRate,
+        pitch: previousPitch,
+      );
+      log.playback.error(
+        'audio-output',
+        '应用音频输出设置失败',
+        error: err,
+        stackTrace: trace,
+      );
+      showTextOnSnackBar('切换音频输出失败，请查看日志', variant: ToastVariant.error);
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+      );
+    } finally {
+      _audioOutputSwitchInProgress = false;
+    }
+  }
+
+  void _restoreDisabledForExclusive(
+    List<String> disabled, {
+    required bool eqEnabled,
+    required AudioDspSettings audioEffects,
+    required double rate,
+    required double pitch,
+  }) {
+    if (disabled.contains('EQ')) _eq.setEqEnabled(eqEnabled);
+    if (disabled.contains('DSP')) _eq.setAudioEffects(audioEffects);
+    if (disabled.contains('变速')) {
+      _rate.value = rate;
+      _player.setRate(rate);
+    }
+    if (disabled.contains('变调')) {
+      _pitch.value = pitch;
+      _player.setPitch(pitch);
+    }
   }
 
   late final _nowPlaying = _NowPlayingNotifier();
