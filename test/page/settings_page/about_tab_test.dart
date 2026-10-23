@@ -18,7 +18,7 @@ void main() {
 
     expect(find.text('更新'), findsOneWidget);
     expect(find.text('当前版本'), findsOneWidget);
-    expect(find.text('更新渠道'), findsOneWidget);
+    expect(find.text('更新源'), findsOneWidget);
     expect(find.text('启动时自动检查更新'), findsOneWidget);
     expect(find.text('相关链接'), findsOneWidget);
     expect(find.text('官方网站'), findsOneWidget);

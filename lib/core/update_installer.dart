@@ -402,7 +402,8 @@ Future<VerifiedUpdateNotice?> readVerifiedUpdateNotice({
   if (info.tagName.isEmpty) return null;
   return VerifiedUpdateNotice(
     info: info,
-    channel: UpdateChannel.parse(record.channelName) ?? UpdateChannel.github,
+    // 历史下载记录可能来自已下线的 Gitee 渠道，统一按 GitHub 处理。
+    channel: UpdateChannel.supported,
     path: payload,
   );
 }

@@ -460,10 +460,10 @@ class _EntryState extends State<Entry>
         UpdateChannel.parse(AppPreference.instance.updateChannel) != null;
     final overlayContext = routerKey.currentState?.overlay?.context;
     if (overlayContext == null || !overlayContext.mounted) return;
-    final channel = await ensureUpdateChannel(overlayContext);
-    if (!mounted || !overlayContext.mounted || channel == null) return;
+    final channel = await ensureUpdateChannel();
+    if (!mounted || !overlayContext.mounted) return;
     if (_shouldSkipAutoUpdateCheck(hadSavedChannel)) return;
-    final update = await _checkNewestUpdate(channel);
+    final update = await _checkNewestUpdate();
     if (!mounted || !overlayContext.mounted || update == null) return;
     await _notifyNewestUpdate(overlayContext, update, channel);
   }
@@ -477,10 +477,10 @@ class _EntryState extends State<Entry>
         now.isBefore(last.toUtc().add(const Duration(hours: 1)));
   }
 
-  Future<UpdateInfo?> _checkNewestUpdate(UpdateChannel channel) async {
+  Future<UpdateInfo?> _checkNewestUpdate() async {
     UpdateInfo? newest;
     try {
-      newest = await UpdateChecker.checkForUpdate(channel: channel);
+      newest = await UpdateChecker.checkForUpdate();
     } catch (err, trace) {
       log.app.warn(
         'legacy',

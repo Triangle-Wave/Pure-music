@@ -1,11 +1,19 @@
 part of 'preference.dart';
 
 class AppPreference {
-  static const defaultUpdateRepoSlug = 'qingyueyin/Pure-music';
+  static const defaultUpdateRepoSlug = 'Triangle-Wave/Pure-music';
   static const defaultUpdateCheckUrls = [
+    'https://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json',
+  ];
+
+  /// 上游仓库发布的更新源，只用于识别老配置。
+  static const legacyUpdateRepoSlug = 'qingyueyin/Pure-music';
+  static const legacyUpdateCheckUrls = [
     'https://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json',
     'https://gitee.com/qingyueyin/Pure-music/raw/main/update/version.json',
   ];
+
+  static const updateSourceMigratedKey = 'updateSourceMigrated';
 
   var audiosPagePref = PagePreference(0, SortOrder.ascending, ContentView.list);
 
@@ -89,6 +97,10 @@ class AppPreference {
   String? lastUpdateCheckTime;
   String? lastSeenUpdateTag;
   List<String> updateCheckUrls = List.of(defaultUpdateCheckUrls);
+
+  /// 更新源迁移是否已写回配置文件；读取到旧配置时按存储值重新判定。
+  bool updateSourceMigrated = true;
+  bool _updateSourceMigrationPending = false;
 
   /// 用户手动添加的文件夹路径列表（不包括自动发现的子文件夹）
   List<String> userFolders = [];
@@ -185,13 +197,75 @@ class AppPreference {
         nowPlayingPagePref.audioReactiveFlow;
   }
 
+  static bool isLegacyUpdateRepoSlug(String slug) =>
+      slug.trim().toLowerCase() == legacyUpdateRepoSlug.toLowerCase();
+
+  static bool isLegacyUpdateCheckUrl(String url) {
+    final key = _updateUrlKey(url).toLowerCase();
+    return legacyUpdateCheckUrls.any(
+      (legacy) => _updateUrlKey(legacy).toLowerCase() == key,
+    );
+  }
+
+  /// 只替换上游默认值，用户自定义的仓库 slug 原样保留。
+  static String migrateUpdateRepoSlug(String stored) {
+    final normalized = stored.trim();
+    if (normalized.isEmpty) return defaultUpdateRepoSlug;
+    return isLegacyUpdateRepoSlug(normalized)
+        ? defaultUpdateRepoSlug
+        : normalized;
+  }
+
+  /// 逐条替换上游默认 URL，用户自定义的地址保留并参与去重。
+  static List<String> migrateUpdateCheckUrls(Iterable<String> stored) {
+    final result = <String>[];
+    final seen = <String>{};
+    for (final url in stored) {
+      final migrated = isLegacyUpdateCheckUrl(url)
+          ? defaultUpdateCheckUrls.first
+          : url;
+      if (seen.add(_updateUrlKey(migrated))) result.add(migrated);
+    }
+    if (result.isEmpty) result.addAll(defaultUpdateCheckUrls);
+    return result;
+  }
+
+  /// Gitee 渠道已下线，历史选择回到 GitHub。
+  static String? migrateUpdateChannel(String? stored) {
+    if (stored == null) return null;
+    return stored.trim().toLowerCase() == 'gitee' ? 'github' : stored;
+  }
+
   void _applyUpdatePrefs(Map<String, dynamic> prefMap) {
     customCpFeedbackKey = _normalizedString(prefMap['customCpFeedbackKey']);
-    updateRepoSlug = _normalizedNonEmptyString(
+    final storedRepoSlug = _normalizedNonEmptyString(
       prefMap['updateRepoSlug'],
       defaultValue: defaultUpdateRepoSlug,
     );
-    updateChannel = _normalizedNullableString(prefMap['updateChannel']);
+    final storedChannel = _normalizedNullableString(prefMap['updateChannel']);
+    final storedUpdateUrls = _normalizedUpdateCheckUrls(
+      prefMap['updateCheckUrls'],
+    );
+    final alreadyMigrated = _normalizedBool(
+      prefMap[updateSourceMigratedKey],
+      defaultValue: false,
+    );
+    if (alreadyMigrated) {
+      updateRepoSlug = storedRepoSlug;
+      updateChannel = storedChannel;
+      updateCheckUrls = storedUpdateUrls.isEmpty
+          ? List.of(defaultUpdateCheckUrls)
+          : storedUpdateUrls;
+      updateSourceMigrated = true;
+    } else {
+      updateRepoSlug = migrateUpdateRepoSlug(storedRepoSlug);
+      updateChannel = migrateUpdateChannel(storedChannel);
+      updateCheckUrls = migrateUpdateCheckUrls(
+        storedUpdateUrls.isEmpty ? defaultUpdateCheckUrls : storedUpdateUrls,
+      );
+      updateSourceMigrated = true;
+      _updateSourceMigrationPending = true;
+    }
     autoCheckUpdate = _normalizedBool(
       prefMap['autoCheckUpdate'],
       defaultValue: true,
@@ -200,12 +274,6 @@ class AppPreference {
       prefMap['lastUpdateCheckTime'],
     );
     lastSeenUpdateTag = _normalizedNullableString(prefMap['lastSeenUpdateTag']);
-    final storedUpdateUrls = _normalizedUpdateCheckUrls(
-      prefMap['updateCheckUrls'],
-    );
-    updateCheckUrls = storedUpdateUrls.isEmpty
-        ? List.of(defaultUpdateCheckUrls)
-        : storedUpdateUrls;
   }
 
   void _applyFolderPrefs(Map<String, dynamic> prefMap) {
@@ -214,6 +282,13 @@ class AppPreference {
       prefMap['excludedFolderPaths'],
     );
     folderAliases = _folderAliasesFromStoredValue(prefMap['folderAliases']);
+  }
+
+  /// 读取到需要迁移的老配置时返回 true 并清标记，调用方应立即保存。
+  bool consumeUpdateSourceMigration() {
+    if (!_updateSourceMigrationPending) return false;
+    _updateSourceMigrationPending = false;
+    return true;
   }
 
   Future<bool> save() async {
@@ -253,6 +328,7 @@ class AppPreference {
         'lastUpdateCheckTime': lastUpdateCheckTime,
         'lastSeenUpdateTag': lastSeenUpdateTag,
         'updateCheckUrls': updateCheckUrls,
+        updateSourceMigratedKey: updateSourceMigrated,
         'userFolders': userFolders,
         'excludedFolderPaths': excludedFolderPaths,
         'folderAliases': folderAliases,
@@ -313,6 +389,9 @@ class AppPreference {
       final prefJson = await File(appPreferencePath).readAsString();
       final Map<String, dynamic> prefMap = json.decode(prefJson);
       instance.applyStoredMap(prefMap);
+      if (instance.consumeUpdateSourceMigration()) {
+        await instance.save();
+      }
       // 用独立保存的 playback_pref.json 覆盖最新播放状态
       // （_persistLastSession 写入的是 playback_pref.json 而非 app_preference.json）
       await instance.loadPlaybackOnly();

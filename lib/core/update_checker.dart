@@ -8,14 +8,12 @@ enum UpdateChannel {
   github,
   gitee;
 
+  /// 唯一对外提供的渠道；用户仓库没有 Gitee 镜像。
+  static const supported = UpdateChannel.github;
+
   String get label => switch (this) {
     UpdateChannel.github => 'GitHub 直连',
     UpdateChannel.gitee => 'Gitee 镜像',
-  };
-
-  UpdateChannel get alternate => switch (this) {
-    UpdateChannel.github => UpdateChannel.gitee,
-    UpdateChannel.gitee => UpdateChannel.github,
   };
 
   static UpdateChannel? parse(Object? value) => switch (value) {
@@ -525,25 +523,18 @@ int? _optionalIntOrFallback(
 
 /// 更新检查服务
 ///
-/// 只访问用户选择的渠道，失败时由更新界面让用户切换。
+/// 统一从 GitHub 仓库读取版本与安装包；Gitee 镜像不再提供。
 class UpdateChecker {
   UpdateChecker._();
 
   static const _githubApiBase = 'https://api.github.com/repos';
-  static const _giteeApiBase = 'https://gitee.com/api/v5/repos';
   static const _githubFallbackUrl =
-      'https://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json';
-  static const _giteeFallbackUrl =
-      'https://gitee.com/qingyueyin/Pure-music/raw/main/update/version.json';
+      'https://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json';
 
-  static Future<UpdateInfo?> checkForUpdate({
-    required UpdateChannel channel,
-  }) async {
+  static Future<UpdateInfo?> checkForUpdate() async {
+    const channel = UpdateChannel.supported;
     final slug = AppPreference.instance.updateRepoSlug;
-    final apiUrl = switch (channel) {
-      UpdateChannel.github => '$_githubApiBase/$slug/releases/latest',
-      UpdateChannel.gitee => '$_giteeApiBase/$slug/releases/latest',
-    };
+    final apiUrl = '$_githubApiBase/$slug/releases/latest';
     final fromApi = await _checkReleaseApi(apiUrl, channel, slug);
     if (fromApi != null &&
         fromApi.hasChecksum(channel: channel, portableBuild: portableBuild)) {
@@ -553,11 +544,11 @@ class UpdateChecker {
     final fallback = await _firstFallbackInfo(channel);
     if (fromApi != null) return fromApi.withFallbackChecksums(fallback);
     if (fallback != null) return fallback;
-    throw UpdateCheckException(channel);
+    throw const UpdateCheckException(UpdateChannel.supported);
   }
 
   static Future<UpdateInfo?> _firstFallbackInfo(UpdateChannel channel) async {
-    for (final url in _fallbackUrls(channel)) {
+    for (final url in _fallbackUrls()) {
       final info = await _checkHttpJson(url, channel);
       if (info != null) return info;
     }
@@ -604,15 +595,11 @@ class UpdateChecker {
     }
   }
 
-  static List<String> _fallbackUrls(UpdateChannel channel) {
-    final preferred = switch (channel) {
-      UpdateChannel.github => _githubFallbackUrl,
-      UpdateChannel.gitee => _giteeFallbackUrl,
-    };
+  static List<String> _fallbackUrls() {
     final stored = AppPreference.instance.updateCheckUrls.where(
-      (url) => isAllowedUpdateMetadataUrl(url, channel),
+      (url) => isAllowedUpdateMetadataUrl(url, UpdateChannel.supported),
     );
-    return <String>{preferred, ...stored}.toList(growable: false);
+    return <String>{_githubFallbackUrl, ...stored}.toList(growable: false);
   }
 
   static Future<UpdateInfo?> _checkHttpJson(
@@ -725,9 +712,7 @@ class _SemVer implements Comparable<_SemVer> {
 }
 
 
-const _githubDownloadHosts = {
-  'github.com',
-  'www.github.com',
+const _githubDownloadCdnHosts = {
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
   'github-releases.githubusercontent.com',
@@ -736,20 +721,45 @@ const _githubDownloadHosts = {
 bool isAllowedUpdateMetadataUrl(String url, UpdateChannel channel) {
   final uri = Uri.tryParse(url.trim());
   if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
+  if (channel != UpdateChannel.supported) return false;
   final host = uri.host.toLowerCase();
-  return switch (channel) {
-    UpdateChannel.github =>
-      host == 'raw.githubusercontent.com' || host == 'github.com',
-    UpdateChannel.gitee => host == 'gitee.com',
+  return switch (host) {
+    'raw.githubusercontent.com' || 'github.com' || 'www.github.com' =>
+      _matchesUpdateRepoPath(uri),
+    'api.github.com' => _matchesUpdateRepoPath(uri, skip: 1),
+    _ => false,
   };
 }
 
 bool isAllowedUpdateDownloadUrl(String url, UpdateChannel channel) {
   final uri = Uri.tryParse(url.trim());
   if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
+  if (channel != UpdateChannel.supported) return false;
   final host = uri.host.toLowerCase();
-  return switch (channel) {
-    UpdateChannel.github => _githubDownloadHosts.contains(host),
-    UpdateChannel.gitee => host == 'gitee.com' || host == 'www.gitee.com',
-  };
+  if (host == 'github.com' || host == 'www.github.com') {
+    return _matchesUpdateRepoPath(uri, releasesOnly: true);
+  }
+  return _githubDownloadCdnHosts.contains(host);
+}
+
+/// 当前配置仓库与默认仓库都放行，用户自定义的其他仓库仍会被拒绝。
+Set<String> _updateRepoSlugs() {
+  final slugs = <String>{AppPreference.defaultUpdateRepoSlug.toLowerCase()};
+  final configured = AppPreference.instance.updateRepoSlug.trim().toLowerCase();
+  if (configured.split('/').length == 2) slugs.add(configured);
+  return slugs;
+}
+
+bool _matchesUpdateRepoPath(
+  Uri uri, {
+  int skip = 0,
+  bool releasesOnly = false,
+}) {
+  final segments = uri.pathSegments
+      .where((segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  if (segments.length < skip + 3) return false;
+  final slug = '${segments[skip]}/${segments[skip + 1]}'.toLowerCase();
+  if (!_updateRepoSlugs().contains(slug)) return false;
+  return !releasesOnly || segments[skip + 2].toLowerCase() == 'releases';
 }

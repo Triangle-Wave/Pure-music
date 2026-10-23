@@ -33,7 +33,7 @@ class AboutTabContent extends StatelessWidget {
         const SizedBox(height: 4.0),
         const _AboutVersionItem(),
         const SizedBox(height: 16.0),
-        const _AboutUpdateChannelItem(),
+        const _AboutUpdateSourceItem(),
         const SizedBox(height: 16.0),
         const _AboutAutoUpdateItem(),
         const SizedBox(height: 24.0),
@@ -48,7 +48,7 @@ class AboutTabContent extends StatelessWidget {
         const SizedBox(height: 16.0),
         const _AboutLinkItem(
           title: '项目主页',
-          url: 'https://github.com/qingyueyin/Pure-music',
+          url: 'https://github.com/Triangle-Wave/Pure-music',
           actionLabel: '打开仓库',
           icon: Symbols.code,
         ),
@@ -331,9 +331,9 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
     setState(() => _isChecking = true);
 
     try {
-      final channel = await ensureUpdateChannel(context);
-      if (!mounted || channel == null) return;
-      final newest = await UpdateChecker.checkForUpdate(channel: channel);
+      final channel = await ensureUpdateChannel();
+      if (!mounted) return;
+      final newest = await UpdateChecker.checkForUpdate();
       if (!mounted) return;
 
       if (newest != null &&
@@ -376,50 +376,15 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
   }
 }
 
-class _AboutUpdateChannelItem extends StatefulWidget {
-  const _AboutUpdateChannelItem();
-
-  @override
-  State<_AboutUpdateChannelItem> createState() =>
-      _AboutUpdateChannelItemState();
-}
-
-class _AboutUpdateChannelItemState extends State<_AboutUpdateChannelItem> {
-  bool _changing = false;
-
-  Future<void> _chooseChannel() async {
-    if (_changing) return;
-    setState(() => _changing = true);
-    try {
-      await chooseAndSaveUpdateChannel(context);
-    } finally {
-      if (mounted) setState(() => _changing = false);
-    }
-  }
+class _AboutUpdateSourceItem extends StatelessWidget {
+  const _AboutUpdateSourceItem();
 
   @override
   Widget build(BuildContext context) {
-    final channel = UpdateChannel.parse(AppPreference.instance.updateChannel);
     return SettingsTile(
-      description: '更新渠道',
-      subtitle: channel?.label ?? '首次检查更新时选择',
-      action: OutlinedButton.icon(
-        onPressed: _changing ? null : _chooseChannel,
-        icon: _changing
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Symbols.swap_horiz, size: 18),
-        label: Text(
-          _changing
-              ? '保存中'
-              : channel == null
-              ? '选择渠道'
-              : '切换渠道',
-        ),
-      ),
+      description: '更新源',
+      subtitle: 'GitHub · ${AppPreference.defaultUpdateRepoSlug}',
+      action: const Icon(Symbols.check_circle, size: 18),
     );
   }
 }

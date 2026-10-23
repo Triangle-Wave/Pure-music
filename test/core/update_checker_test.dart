@@ -11,10 +11,10 @@ void main() {
     expect(UpdateChannel.parse('unknown'), isNull);
   });
 
-  test('loads a saved update channel and leaves older preferences unset', () {
+  test('loads a saved update channel and migrates Gitee to GitHub', () {
     final preference = AppPreference();
     preference.applyStoredMap({'updateChannel': 'gitee'});
-    expect(UpdateChannel.parse(preference.updateChannel), UpdateChannel.gitee);
+    expect(UpdateChannel.parse(preference.updateChannel), UpdateChannel.github);
 
     preference.applyStoredMap(const {});
     expect(preference.updateChannel, isNull);
@@ -247,13 +247,34 @@ void main() {
   });
 
 
-  test('update metadata urls require https and exact hosts', () {
+  test('update metadata urls require https and the app repository', () {
     expect(
       isAllowedUpdateMetadataUrl(
-        'https://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json',
+        'https://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json',
         UpdateChannel.github,
       ),
       isTrue,
+    );
+    expect(
+      isAllowedUpdateMetadataUrl(
+        'https://api.github.com/repos/Triangle-Wave/Pure-music/releases/latest',
+        UpdateChannel.github,
+      ),
+      isTrue,
+    );
+    expect(
+      isAllowedUpdateMetadataUrl(
+        'https://github.com/Triangle-Wave/Pure-music',
+        UpdateChannel.github,
+      ),
+      isFalse,
+    );
+    expect(
+      isAllowedUpdateMetadataUrl(
+        'https://raw.githubusercontent.com/example/Pure-music/main/update/version.json',
+        UpdateChannel.github,
+      ),
+      isFalse,
     );
     expect(
       isAllowedUpdateMetadataUrl(
@@ -264,7 +285,7 @@ void main() {
     );
     expect(
       isAllowedUpdateMetadataUrl(
-        'http://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json',
+        'http://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json',
         UpdateChannel.github,
       ),
       isFalse,
@@ -274,17 +295,31 @@ void main() {
         'https://gitee.com/qingyueyin/Pure-music/raw/main/update/version.json',
         UpdateChannel.gitee,
       ),
-      isTrue,
+      isFalse,
     );
   });
 
   test('update download urls reject lookalike and http hosts', () {
     expect(
       isAllowedUpdateDownloadUrl(
-        'https://github.com/qingyueyin/Pure-music/releases/download/v2.3.0/app.exe',
+        'https://github.com/Triangle-Wave/Pure-music/releases/download/v2.3.0/app.exe',
         UpdateChannel.github,
       ),
       isTrue,
+    );
+    expect(
+      isAllowedUpdateDownloadUrl(
+        'https://objects.githubusercontent.com/github-production-release-asset/file',
+        UpdateChannel.github,
+      ),
+      isTrue,
+    );
+    expect(
+      isAllowedUpdateDownloadUrl(
+        'https://github.com/example/Pure-music/releases/download/v2.3.0/app.exe',
+        UpdateChannel.github,
+      ),
+      isFalse,
     );
     expect(
       isAllowedUpdateDownloadUrl(
@@ -297,13 +332,6 @@ void main() {
       isAllowedUpdateDownloadUrl(
         'https://gitee.com/qingyueyin/Pure-music/releases/download/v2.3.0/app.exe',
         UpdateChannel.gitee,
-      ),
-      isTrue,
-    );
-    expect(
-      isAllowedUpdateDownloadUrl(
-        'https://gitee.com/qingyueyin/Pure-music/releases/download/v2.3.0/app.exe',
-        UpdateChannel.github,
       ),
       isFalse,
     );
