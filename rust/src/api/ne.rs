@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::api::network_proxy;
+
 macro_rules! ne_log {
     ("E", $($arg:tt)*) => {
         log::error!(target: "ne", $($arg)*);
@@ -232,7 +234,7 @@ pub struct LyricUser {
 }
 
 pub struct NetEaseCloud {
-    client: Mutex<Option<reqwest::blocking::Client>>,
+    client: Mutex<Option<(u64, reqwest::blocking::Client)>>,
     cookies: Mutex<HashMap<String, String>>,
     user_id: Mutex<Option<i64>>,
     expire: Mutex<u64>,
@@ -241,11 +243,14 @@ pub struct NetEaseCloud {
 
 impl NetEaseCloud {
     pub fn new() -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .ok();
+        let (builder, generation) = network_proxy::apply_to_builder(Self::client_builder());
+        let client = match builder.build() {
+            Ok(client) => Some((generation, client)),
+            Err(err) => {
+                ne_log!("E", "HTTP client init failed: {}", err);
+                None
+            }
+        };
         NetEaseCloud {
             client: Mutex::new(client),
             cookies: Mutex::new(HashMap::new()),
@@ -255,12 +260,34 @@ impl NetEaseCloud {
         }
     }
 
+    fn client_builder() -> reqwest::blocking::ClientBuilder {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(10))
+    }
+
     fn client(&self) -> Result<reqwest::blocking::Client, String> {
-        self.client
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone()
-            .ok_or_else(|| "HTTP client init failed".to_string())
+        let generation = network_proxy::current_generation();
+        {
+            let cached = self.client.lock().map_err(|e| e.to_string())?;
+            if let Some((cached_generation, client)) = cached.as_ref() {
+                if *cached_generation == generation {
+                    return Ok(client.clone());
+                }
+            }
+        }
+
+        ne_log!("I", "proxy settings changed, rebuilding HTTP client");
+        let (builder, applied_generation) =
+            network_proxy::apply_to_builder(Self::client_builder());
+        let client = builder.build().map_err(|err| {
+            ne_log!("E", "HTTP client rebuild failed: {}", err);
+            format!("HTTP client init failed: {err}")
+        })?;
+
+        let mut cached = self.client.lock().map_err(|e| e.to_string())?;
+        *cached = Some((applied_generation, client.clone()));
+        Ok(client)
     }
 
     /// Headers: User-Agent, Referer, Cookie (only 3)

@@ -411,11 +411,12 @@ pub fn amll_search_lyrics(
 }
 
 fn http_get(url: &str, timeout_secs: u64) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("client: {e}"))?;
+    let (builder, _generation) = crate::api::network_proxy::apply_to_builder(
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(15)),
+    );
+    let client = builder.build().map_err(|e| format!("client: {e}"))?;
     let resp = client.get(url).send().map_err(|e| format!("HTTP: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("status {}", resp.status()));
