@@ -1,8 +1,8 @@
 //! SACD 轨道提取入口。
 //!
-//! 从 ISO 镜像按逻辑扇区读取裸 DSD 轨道，解析音频扇区后写成 DSF 文件。
-//! 只支持裸 DSD（3-in-14 / 3-in-16）；DST 压缩轨道返回
-//! [`SacdError::Unsupported`]。
+//! 从 ISO 镜像按逻辑扇区读取音频轨道，解析音频扇区后写成 DSF 文件。
+//! 裸 DSD（3-in-14 / 3-in-16）直接交付；DST 压缩轨道先解码为交织的 DSD
+//! 字节，再交给同一个 [`DsfWriter`]。
 
 use std::path::Path;
 
@@ -14,11 +14,12 @@ use super::types::{SacdAreaKind, SacdError, SacdFrameFormat, SACD_LSN_SIZE};
 /// 单批读取的逻辑扇区数，与镜像读取器的单次读取上限一致。
 const SECTORS_PER_BATCH: u16 = 128;
 
-/// 把一条裸 DSD 轨道从 SACD ISO 提取为 DSF 文件。
+/// 把一条音频轨道从 SACD ISO 提取为 DSF 文件。
 ///
 /// `track_length_lsn` 是轨道占用的逻辑扇区数。每通道样本数先按
 /// `track_length_lsn * 2048 * 8 / channel_count` 估算写入 fmt chunk，
-/// [`DsfWriter::finalize`] 会按实际音频字节修正。
+/// [`DsfWriter::finalize`] 会按实际音频字节修正。DST 轨道按帧解码后写入，
+/// 输出字节排列与裸 DSD 路径一致。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_track_to_dsf(
     iso_path: &Path,
@@ -30,10 +31,6 @@ pub(crate) fn extract_track_to_dsf(
     frame_format: SacdFrameFormat,
     output_path: &Path,
 ) -> Result<(), SacdError> {
-    if matches!(frame_format, SacdFrameFormat::Dst) {
-        log::warn!("轨道 LSN {track_start_lsn} 使用 DST 压缩，当前不支持提取");
-        return Err(SacdError::Unsupported);
-    }
     if channel_count == 0 {
         return Err(SacdError::invalid("声道数不能为 0"));
     }
@@ -68,7 +65,15 @@ pub(crate) fn extract_track_to_dsf(
     );
 
     let mut image = ImageReader::open(iso_path)?;
-    let mut parser = AudioSectorParser::new();
+    let mut parser = match frame_format {
+        SacdFrameFormat::Dst => {
+            log::info!(
+                "轨道使用 DST 压缩，启用 DST 解码: start_lsn={track_start_lsn}, channels={channel_count}, sample_rate={sample_rate}"
+            );
+            AudioSectorParser::new_dst(channel_count, sample_rate, track_start_lsn)?
+        }
+        SacdFrameFormat::Dsd => AudioSectorParser::new(),
+    };
     let mut writer = DsfWriter::create(
         output_path,
         u32::from(channel_count),
@@ -109,7 +114,7 @@ pub(crate) fn extract_track_to_dsf(
         remaining -= u32::from(batch);
     }
 
-    if let Some(rest) = parser.flush() {
+    if let Some(rest) = parser.flush()? {
         writer.write_samples(&rest)?;
         written_bytes = written_bytes.saturating_add(rest.len() as u64);
     }
@@ -285,8 +290,64 @@ mod tests {
         assert_eq!(read_u64(&bytes, 84), 12 + 2 * 4096);
     }
 
+    /// dst-decoder 仓库的 stereo frame_001 测试向量。
+    const DST_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dst");
+    const DST_DSD_BYTES: u64 = 9_408;
+
+    /// 构造一个只含一个 DST 音频包的扇区。
+    fn write_dst_audio_sector(target: &mut [u8], payload: &[u8], sector_count: u8) {
+        let needed = 7 + payload.len();
+        assert!(needed <= target.len(), "测试 DST 负载超出扇区");
+        target.fill(0);
+        target[0] = 0x01 | (1 << 2) | (1 << 5); // DST，1 帧信息，1 数据包
+        let length = payload.len() as u16;
+        target[1] = (1 << 7) | (2 << 3) | ((length >> 8) as u8 & 0x07);
+        target[2] = (length & 0xFF) as u8;
+        target[6] = (sector_count & 0x1F) << 2;
+        target[7..needed].copy_from_slice(payload);
+    }
+
+    /// 构造最小 DST ISO：Master TOC 签名 + 一个 DST 音频扇区。
+    fn build_dst_image() -> Vec<u8> {
+        let mut image = vec![0u8; IMAGE_SECTORS * PLAIN_SECTOR_SIZE];
+
+        let master_offset = MASTER_TOC_LSN * PLAIN_SECTOR_SIZE;
+        image[master_offset..master_offset + 8].copy_from_slice(b"SACDMTOC");
+
+        let start = AUDIO_START_LSN * PLAIN_SECTOR_SIZE;
+        let end = start + PLAIN_SECTOR_SIZE;
+        write_dst_audio_sector(&mut image[start..end], DST_FIXTURE, 1);
+
+        image
+    }
+
     #[test]
-    fn rejects_dst_track_before_creating_output() {
+    fn extracts_dst_image_to_dsf() {
+        let iso = TempFile::create("iso", &build_dst_image());
+        let output = TempFile::unused("dsf");
+
+        extract_track_to_dsf(
+            &iso.path,
+            SacdAreaKind::TwoChannel,
+            AUDIO_START_LSN as u32,
+            1,
+            2,
+            2_822_400,
+            SacdFrameFormat::Dst,
+            &output.path,
+        )
+        .expect("提取 DST 轨道");
+
+        let bytes = fs::read(&output.path).expect("读取 DSF 文件");
+        assert_eq!(&bytes[0..4], b"DSD ");
+        assert_eq!(read_u32(&bytes, 52), 2);
+        assert_eq!(read_u64(&bytes, 64), DST_DSD_BYTES / 2 * 8);
+        assert_eq!(read_u64(&bytes, 84), 12 + 2 * 4096);
+        assert_eq!(read_u64(&bytes, 12), bytes.len() as u64);
+    }
+
+    #[test]
+    fn rejects_dst_decoder_configuration_failure() {
         let iso = TempFile::create("iso", &build_image(false));
         let output = TempFile::unused("dsf");
 
@@ -294,14 +355,14 @@ mod tests {
             &iso.path,
             SacdAreaKind::TwoChannel,
             AUDIO_START_LSN as u32,
+            1,
             2,
-            2,
-            2_822_400,
+            48_000,
             SacdFrameFormat::Dst,
             &output.path,
         );
 
-        assert!(matches!(result, Err(SacdError::Unsupported)));
+        assert!(matches!(result, Err(SacdError::InvalidData(_))));
         assert!(!output.path.exists());
     }
 

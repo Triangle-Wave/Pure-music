@@ -1,8 +1,8 @@
-//! SACD ISO 只读解析与裸 DSD 轨道提取模块。
+//! SACD ISO 只读解析与轨道提取模块。
 //!
 //! 解析镜像的目录结构（Master TOC、Area TOC、TrackList）与 ISO 同目录 XML
-//! 元数据，并把裸 DSD（3-in-14 / 3-in-16）轨道提取为 DSF 文件。不处理 DST
-//! 解码。
+//! 元数据，并把裸 DSD（3-in-14 / 3-in-16）与 DST 压缩轨道提取为 DSF 文件。
+//! DST 压缩数据经纯 Rust 解码器还原为交织的 DSD 字节后写入同一个 DSF 写入器。
 
 #![allow(dead_code)]
 

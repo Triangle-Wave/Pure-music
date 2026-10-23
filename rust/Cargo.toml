@@ -15,6 +15,7 @@ encoding_rs = "0.8"
 quick-xml = { version = "0.42.0", default-features = false }
 id3 = "1.17.1"
 ndsd-read = "0.1.2"
+dst-decoder = "0.1.2"
 ratag = "0.1.1"
 midly = "0.5.3"
 serde_json = "1.0.117"
