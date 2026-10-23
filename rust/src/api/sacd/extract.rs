@@ -132,6 +132,7 @@ pub(crate) fn extract_track_to_dsf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::sacd::dsf::DSF_BLOCK_SIZE_PER_CHANNEL;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -291,8 +292,11 @@ mod tests {
     }
 
     /// dst-decoder 仓库的 stereo frame_001 测试向量。
+    ///
+    /// `frame_001.dst` 解码后得到 `frame_001.dsd`：每帧每通道 4704 字节，
+    /// 两通道共 9408 字节。
     const DST_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dst");
-    const DST_DSD_BYTES: u64 = 9_408;
+    const DST_DSD_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dsd");
 
     /// 构造一个只含一个 DST 音频包的扇区。
     fn write_dst_audio_sector(target: &mut [u8], payload: &[u8], sector_count: u8) {
@@ -341,9 +345,41 @@ mod tests {
         let bytes = fs::read(&output.path).expect("读取 DSF 文件");
         assert_eq!(&bytes[0..4], b"DSD ");
         assert_eq!(read_u32(&bytes, 52), 2);
-        assert_eq!(read_u64(&bytes, 64), DST_DSD_BYTES / 2 * 8);
-        assert_eq!(read_u64(&bytes, 84), 12 + 2 * 4096);
+
+        // fixture 是完整的一帧 DST：9408 字节交织数据摊到两个通道各 4704 字节。
+        let decoded_bytes = DST_DSD_FIXTURE.len() as u64;
+        let per_channel = decoded_bytes / 2;
+        assert_eq!(per_channel, 4_704, "fixture 每通道应为 4704 字节");
+        assert_eq!(read_u64(&bytes, 64), per_channel * 8);
+
+        // DSF 每通道数据按 4096 字节块补齐，4704 字节占两块，第二块尾部补零。
+        let block = DSF_BLOCK_SIZE_PER_CHANNEL as u64;
+        assert!(per_channel > block, "fixture 应跨多个 DSF 块");
+        let padded_per_channel = per_channel.div_ceil(block) * block;
+        assert_eq!(padded_per_channel, 2 * block);
+        assert_eq!(read_u64(&bytes, 84), 12 + 2 * padded_per_channel);
         assert_eq!(read_u64(&bytes, 12), bytes.len() as u64);
+        assert_eq!(bytes.len() as u64, 92 + 2 * padded_per_channel);
+
+        // 每通道数据占 `padded_per_channel` 字节，前段是解码后交织字节的反位，
+        // 其余为零。
+        let audio = &bytes[92..];
+        let padded_len = padded_per_channel as usize;
+        let per_channel_len = per_channel as usize;
+        assert_eq!(audio.len(), 2 * padded_len);
+        for index in 0..per_channel_len {
+            assert_eq!(audio[index], DST_DSD_FIXTURE[2 * index].reverse_bits());
+            assert_eq!(
+                audio[padded_len + index],
+                DST_DSD_FIXTURE[2 * index + 1].reverse_bits()
+            );
+        }
+        assert!(audio[per_channel_len..padded_len]
+            .iter()
+            .all(|&byte| byte == 0));
+        assert!(audio[padded_len + per_channel_len..]
+            .iter()
+            .all(|&byte| byte == 0));
     }
 
     #[test]
