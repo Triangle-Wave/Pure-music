@@ -21,13 +21,13 @@ const FMT_CHUNK_ID: &[u8; 4] = b"fmt ";
 const DATA_CHUNK_ID: &[u8; 4] = b"data";
 
 /// DSD chunk 固定长度（字节）。
-const DSD_CHUNK_SIZE: u64 = 28;
+pub(crate) const DSD_CHUNK_SIZE: u64 = 28;
 
 /// fmt chunk 固定长度（字节）。
-const FMT_CHUNK_SIZE: u64 = 52;
+pub(crate) const FMT_CHUNK_SIZE: u64 = 52;
 
 /// data chunk 头长度（字节）。
-const DATA_CHUNK_HEADER_SIZE: u64 = 12;
+pub(crate) const DATA_CHUNK_HEADER_SIZE: u64 = 12;
 
 /// DSD chunk 中总文件大小字段的偏移。
 const TOTAL_FILE_SIZE_OFFSET: u64 = 12;
@@ -37,6 +37,9 @@ const FMT_SAMPLE_COUNT_OFFSET: u64 = 64;
 
 /// DSF 每通道块大小（字节），由规范固定为 4096。
 pub(crate) const DSF_BLOCK_SIZE_PER_CHANNEL: usize = 4096;
+
+/// DSF 写入缓冲大小（1 MiB），减少高频小块写入的系统调用次数。
+const WRITE_BUFFER_SIZE: usize = 1 << 20;
 
 /// DSF 文件写入器。
 #[frb(ignore)]
@@ -82,7 +85,7 @@ impl DsfWriter {
                 format!("创建 DSF 文件 {} 失败: {error}", path.display()),
             ))
         })?;
-        let mut writer = BufWriter::new(file);
+        let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
 
         // DSD chunk：标识、块长度、总文件大小（占位）、metadata 指针。
         writer.write_all(DSD_CHUNK_ID)?;
@@ -229,7 +232,13 @@ impl DsfWriter {
                 .get(..DSF_BLOCK_SIZE_PER_CHANNEL)
                 .ok_or_else(|| SacdError::invalid(format!("DSF 通道 {index} 的块长度不足")))?;
             writer.write_all(block)?;
-            buffer.drain(..DSF_BLOCK_SIZE_PER_CHANNEL);
+            let remaining = buffer.len() - DSF_BLOCK_SIZE_PER_CHANNEL;
+            if remaining > 0 {
+                buffer.copy_within(DSF_BLOCK_SIZE_PER_CHANNEL.., 0);
+                buffer.truncate(remaining);
+            } else {
+                buffer.clear();
+            }
             written = written.saturating_add(DSF_BLOCK_SIZE_PER_CHANNEL as u64);
         }
 
@@ -364,6 +373,61 @@ mod tests {
         assert_eq!(data[DSF_BLOCK_SIZE_PER_CHANNEL], 0x01); // ch1：0x80 反位
         assert!(data[1..DSF_BLOCK_SIZE_PER_CHANNEL].iter().all(|&byte| byte == 0));
         assert!(data[DSF_BLOCK_SIZE_PER_CHANNEL + 1..]
+            .iter()
+            .all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn writer_streams_multiple_blocks_in_order() {
+        let output = TempFile::new("multi_block");
+        let mut writer =
+            DsfWriter::create(&output.path, 2, 2_822_400, 0, 0).expect("创建 DSF 文件");
+
+        // 每通道 3 个完整块加 100 字节余量，触发多次块搬移与最后一次补齐。
+        let blocks = 3usize;
+        let extra = 100usize;
+        let per_channel = blocks * DSF_BLOCK_SIZE_PER_CHANNEL + extra;
+        let mut samples = Vec::with_capacity(per_channel * 2);
+        for index in 0..per_channel {
+            samples.push(index as u8);
+            samples.push((index as u8).wrapping_add(0x80));
+        }
+        writer.write_samples(&samples).expect("写入多块样本");
+        writer.finalize().expect("完成 DSF 文件");
+
+        let bytes = fs::read(&output.path).expect("读取 DSF 文件");
+        let padded_per_channel = (blocks + 1) * DSF_BLOCK_SIZE_PER_CHANNEL;
+        assert_eq!(
+            read_u64(&bytes, 84),
+            12 + 2 * padded_per_channel as u64,
+            "data chunk 长度应按补齐后的块计算"
+        );
+        assert_eq!(read_u64(&bytes, 12), bytes.len() as u64);
+        assert_eq!(bytes.len(), 92 + 2 * padded_per_channel);
+
+        let audio = &bytes[92..];
+        for block in 0..blocks {
+            for offset in 0..DSF_BLOCK_SIZE_PER_CHANNEL {
+                let source = block * DSF_BLOCK_SIZE_PER_CHANNEL + offset;
+                assert_eq!(
+                    audio[block * DSF_BLOCK_SIZE_PER_CHANNEL + offset],
+                    (source as u8).reverse_bits(),
+                    "通道 0 第 {block} 块偏移 {offset} 的字节顺序错误"
+                );
+                assert_eq!(
+                    audio[padded_per_channel + block * DSF_BLOCK_SIZE_PER_CHANNEL + offset],
+                    (source as u8).wrapping_add(0x80).reverse_bits(),
+                    "通道 1 第 {block} 块偏移 {offset} 的字节顺序错误"
+                );
+            }
+        }
+
+        // 最后一个不满的块按零补齐。
+        let tail_start = blocks * DSF_BLOCK_SIZE_PER_CHANNEL;
+        assert!(audio[tail_start + extra..padded_per_channel]
+            .iter()
+            .all(|&byte| byte == 0));
+        assert!(audio[padded_per_channel + tail_start + extra..]
             .iter()
             .all(|&byte| byte == 0));
     }

@@ -5,6 +5,7 @@
 //! 字节，再交给同一个 [`DsfWriter`]。
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::audio::AudioSectorParser;
 use super::dsf::DsfWriter;
@@ -13,6 +14,49 @@ use super::types::{SacdAreaKind, SacdError, SacdFrameFormat, SACD_LSN_SIZE};
 
 /// 单批读取的逻辑扇区数，与镜像读取器的单次读取上限一致。
 const SECTORS_PER_BATCH: u16 = 128;
+
+/// 每处理多少批就让出一次 CPU 时间片（约 2MB 音频）。
+const BATCHES_PER_YIELD: u32 = 8;
+
+/// 每处理多少批短暂休眠一次（约 4MB 音频）。
+const BATCHES_PER_SLEEP: u32 = 16;
+
+/// 批量休眠时长。
+const YIELD_SLEEP: Duration = Duration::from_millis(1);
+
+/// 一批数据写完后对线程调度的让出动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchPause {
+    /// 继续读取，不让出。
+    None,
+    /// 让出当前时间片。
+    Yield,
+    /// 短暂休眠。
+    Sleep,
+}
+
+/// 按批次序号决定让出动作；序号从 1 开始，0 视为无效输入。
+fn batch_pause(batch_index: u32) -> BatchPause {
+    if batch_index == 0 {
+        return BatchPause::None;
+    }
+    if batch_index % BATCHES_PER_SLEEP == 0 {
+        BatchPause::Sleep
+    } else if batch_index % BATCHES_PER_YIELD == 0 {
+        BatchPause::Yield
+    } else {
+        BatchPause::None
+    }
+}
+
+/// 按批次序号执行让出动作，降低持续读盘对前台操作的干扰。
+fn apply_batch_pause(batch_index: u32) {
+    match batch_pause(batch_index) {
+        BatchPause::None => {}
+        BatchPause::Yield => std::thread::yield_now(),
+        BatchPause::Sleep => std::thread::sleep(YIELD_SLEEP),
+    }
+}
 
 /// 把一条音频轨道从 SACD ISO 提取为 DSF 文件。
 ///
@@ -85,6 +129,7 @@ pub(crate) fn extract_track_to_dsf(
     let mut lsn = track_start_lsn;
     let mut remaining = track_length_lsn;
     let mut written_bytes: u64 = 0;
+    let mut batch_index: u32 = 0;
 
     while remaining > 0 {
         let batch = remaining.min(u32::from(SECTORS_PER_BATCH)) as u16;
@@ -112,6 +157,9 @@ pub(crate) fn extract_track_to_dsf(
             .checked_add(u32::from(batch))
             .ok_or_else(|| SacdError::invalid("轨道逻辑扇区号溢出"))?;
         remaining -= u32::from(batch);
+
+        batch_index = batch_index.saturating_add(1);
+        apply_batch_pause(batch_index);
     }
 
     if let Some(rest) = parser.flush()? {
@@ -361,25 +409,43 @@ mod tests {
         assert_eq!(read_u64(&bytes, 12), bytes.len() as u64);
         assert_eq!(bytes.len() as u64, 92 + 2 * padded_per_channel);
 
-        // 每通道数据占 `padded_per_channel` 字节，前段是解码后交织字节的反位，
-        // 其余为零。
+        // DSF 音频数据按每通道 4096 字节块交织：第 index 个字节位于
+        // `(index / block) * channels * block + channel * block + index % block`。
+        // 4704 字节占两块，第二块在 608 字节后补零。
         let audio = &bytes[92..];
         let padded_len = padded_per_channel as usize;
         let per_channel_len = per_channel as usize;
-        assert_eq!(audio.len(), 2 * padded_len);
+        let channel_count = 2usize;
+        assert_eq!(audio.len(), channel_count * padded_len);
+        let dsf_offset = |channel: usize, index: usize| {
+            (index / DSF_BLOCK_SIZE_PER_CHANNEL) * channel_count * DSF_BLOCK_SIZE_PER_CHANNEL
+                + channel * DSF_BLOCK_SIZE_PER_CHANNEL
+                + index % DSF_BLOCK_SIZE_PER_CHANNEL
+        };
         for index in 0..per_channel_len {
-            assert_eq!(audio[index], DST_DSD_FIXTURE[2 * index].reverse_bits());
             assert_eq!(
-                audio[padded_len + index],
-                DST_DSD_FIXTURE[2 * index + 1].reverse_bits()
+                audio[dsf_offset(0, index)],
+                DST_DSD_FIXTURE[2 * index].reverse_bits(),
+                "通道 0 第 {index} 字节应为解码交织字节的反位"
+            );
+            assert_eq!(
+                audio[dsf_offset(1, index)],
+                DST_DSD_FIXTURE[2 * index + 1].reverse_bits(),
+                "通道 1 第 {index} 字节应为解码交织字节的反位"
             );
         }
-        assert!(audio[per_channel_len..padded_len]
-            .iter()
-            .all(|&byte| byte == 0));
-        assert!(audio[padded_len + per_channel_len..]
-            .iter()
-            .all(|&byte| byte == 0));
+        for index in per_channel_len..padded_len {
+            assert_eq!(
+                audio[dsf_offset(0, index)],
+                0,
+                "通道 0 第 {index} 字节应为补零"
+            );
+            assert_eq!(
+                audio[dsf_offset(1, index)],
+                0,
+                "通道 1 第 {index} 字节应为补零"
+            );
+        }
     }
 
     #[test]
@@ -420,5 +486,25 @@ mod tests {
 
         assert!(matches!(result, Err(SacdError::NotSacd)));
         assert!(!output.path.exists());
+    }
+
+    #[test]
+    fn batch_pause_yields_every_eight_batches_and_sleeps_every_sixteen() {
+        assert_eq!(batch_pause(0), BatchPause::None);
+        assert_eq!(batch_pause(1), BatchPause::None);
+        assert_eq!(batch_pause(7), BatchPause::None);
+        assert_eq!(batch_pause(8), BatchPause::Yield);
+        assert_eq!(batch_pause(15), BatchPause::None);
+        assert_eq!(batch_pause(16), BatchPause::Sleep);
+        assert_eq!(batch_pause(24), BatchPause::Yield);
+        assert_eq!(batch_pause(32), BatchPause::Sleep);
+    }
+
+    #[test]
+    fn batch_pause_constants_keep_amplitude_small() {
+        const BYTES_PER_BATCH: u32 = SECTORS_PER_BATCH as u32 * SACD_LSN_SIZE as u32;
+        assert_eq!(BATCHES_PER_YIELD * BYTES_PER_BATCH, 2u32 * 1024 * 1024);
+        assert_eq!(BATCHES_PER_SLEEP, BATCHES_PER_YIELD * 2);
+        assert_eq!(YIELD_SLEEP, Duration::from_millis(1));
     }
 }

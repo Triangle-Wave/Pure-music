@@ -16,7 +16,9 @@ mod tracklist;
 mod types;
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::UNIX_EPOCH;
 
 use md5::{Digest, Md5};
@@ -28,12 +30,41 @@ pub(crate) use types::{SacdArea, SacdAreaKind, SacdError, SacdFrameFormat, SacdT
 /// SACD 裸 DSD 轨道的采样率（DSD64，Hz）。
 const SACD_SAMPLE_RATE_HZ: u32 = 2_822_400;
 
+/// DSF 固定头长度：DSD chunk 28 字节 + fmt chunk 52 字节 + data chunk 头 12 字节。
+const DSF_HEADER_LEN: u64 =
+    dsf::DSD_CHUNK_SIZE + dsf::FMT_CHUNK_SIZE + dsf::DATA_CHUNK_HEADER_SIZE;
+
+/// data chunk 在 DSF 文件中的起始偏移。
+const DSF_DATA_CHUNK_OFFSET: u64 = dsf::DSD_CHUNK_SIZE + dsf::FMT_CHUNK_SIZE;
+
+/// 进程内 TOC 缓存的条目上限，只保留最近使用的几份镜像目录。
+const TOC_CACHE_CAPACITY: usize = 4;
+
+/// 串行化进程内的 SACD 轨道提取，避免同轨并发各自全量提取。
+static EXTRACT_LOCK: Mutex<()> = Mutex::new(());
+
+/// 进程内 TOC 缓存，键为 ISO 路径、文件长度与修改时间秒数。
+static TOC_CACHE: Mutex<Vec<TocCacheEntry>> = Mutex::new(Vec::new());
+
+/// 进程内 TOC 缓存条目；最近使用的条目排在末尾。
+struct TocCacheEntry {
+    /// 缓存对应的镜像路径。
+    iso_path: String,
+    /// 缓存键：镜像文件长度。
+    iso_len: u64,
+    /// 缓存键：镜像修改时间秒数。
+    mtime_secs: u64,
+    /// 解析后的目录结构，命中时直接复用。
+    toc: Arc<SacdToc>,
+}
+
 /// 确保指定 SACD 轨道已提取为缓存中的 DSF 文件，并返回其路径。
 ///
 /// `area` 只接受 `2ch` 与 `mch`；`track_number` 是区内的轨号（从 1 开始）。
 /// 缓存键由 ISO 路径、区、轨号、ISO 文件长度与修改时间构成，镜像被替换或
 /// 修改后会重新提取。提取先写临时文件，成功后再改名到目标路径，中断的提取
-/// 不会留下被当作有效缓存的半截文件。
+/// 不会留下被当作有效缓存的半截文件。进程内的提取调用串行执行，目录解析
+/// 结果按镜像路径、长度与修改时间在内存中复用。
 pub fn ensure_sacd_track_extracted(
     iso_path: String,
     area: String,
@@ -42,7 +73,39 @@ pub fn ensure_sacd_track_extracted(
 ) -> Result<String, String> {
     let kind = parse_area(&area)?;
 
-    let toc = read_sacd_toc(Path::new(&iso_path)).map_err(|error| {
+    // 整个提取流程持锁，使同轨与跨轨的并发调用串行执行；后到者直接命中缓存。
+    let _guard = lock_extraction();
+    ensure_sacd_track_extracted_serialized(&iso_path, &area, kind, track_number, &cache_root)
+}
+
+/// 取提交流程的进程级互斥锁；锁中毒时记录警告并恢复内层数据。
+fn lock_extraction() -> MutexGuard<'static, ()> {
+    match EXTRACT_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("SACD 提取锁中毒，恢复后继续串行提取");
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// 在已持有进程级提取锁的前提下，确保轨道已提取为缓存 DSF。
+fn ensure_sacd_track_extracted_serialized(
+    iso_path: &str,
+    area: &str,
+    kind: SacdAreaKind,
+    track_number: u32,
+    cache_root: &str,
+) -> Result<String, String> {
+    let metadata = fs::metadata(iso_path).map_err(|error| {
+        let message = format!("读取 SACD 镜像信息失败: {iso_path}: {error}");
+        log::warn!("{message}");
+        message
+    })?;
+    let iso_len = metadata.len();
+    let modified_secs = modified_secs(&metadata);
+
+    let toc = read_sacd_toc_cached(iso_path, iso_len, modified_secs).map_err(|error| {
         let message = format!("解析 SACD 目录失败: {error}");
         log::warn!("{message}, iso={iso_path}");
         message
@@ -66,26 +129,12 @@ pub fn ensure_sacd_track_extracted(
             message
         })?;
 
-    let metadata = fs::metadata(&iso_path).map_err(|error| {
-        let message = format!("读取 SACD 镜像信息失败: {iso_path}: {error}");
-        log::warn!("{message}");
-        message
-    })?;
-    let modified_secs = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_secs());
-
-    let cache_key = format!(
-        "{iso_path}:{area}:{track_number}:{}:{modified_secs}",
-        metadata.len()
-    );
+    let cache_key = format!("{iso_path}:{area}:{track_number}:{iso_len}:{modified_secs}");
     let mut hasher = Md5::new();
     hasher.update(cache_key.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
 
-    let cache_dir = Path::new(&cache_root).join(&hash);
+    let cache_dir = Path::new(cache_root).join(&hash);
     fs::create_dir_all(&cache_dir).map_err(|error| {
         let message = format!("创建 SACD 缓存目录失败: {}: {error}", cache_dir.display());
         log::warn!("{message}");
@@ -99,11 +148,20 @@ pub fn ensure_sacd_track_extracted(
     })?;
 
     match fs::metadata(&target) {
-        Ok(existing) if existing.len() > 0 => {
-            log::info!("命中 SACD 轨道缓存: {target_path}");
-            return Ok(target_path);
+        Ok(existing) if existing.len() > 0 => match verify_cached_dsf(&target) {
+            Ok(()) => {
+                log::info!("命中 SACD 轨道缓存: {target_path}");
+                return Ok(target_path);
+            }
+            Err(reason) => {
+                log::warn!("SACD 缓存文件不完整，重新提取: {target_path}: {reason}");
+                remove_cache_file(&target);
+            }
+        },
+        Ok(_) => {
+            log::warn!("SACD 缓存文件长度为 0，重新提取: {target_path}");
+            remove_cache_file(&target);
         }
-        Ok(_) => log::warn!("SACD 缓存文件长度为 0，重新提取: {target_path}"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => log::warn!("读取 SACD 缓存文件信息失败，重新提取: {target_path}: {error}"),
     }
@@ -114,7 +172,7 @@ pub fn ensure_sacd_track_extracted(
     );
 
     if let Err(error) = extract_track_to_dsf(
-        Path::new(&iso_path),
+        Path::new(iso_path),
         selected_area.kind,
         track.start_lsn,
         track.length_lsn,
@@ -140,6 +198,170 @@ pub fn ensure_sacd_track_extracted(
         "SACD 轨道缓存完成: iso={iso_path}, area={area}, track={track_number}, 输出={target_path}"
     );
     Ok(target_path)
+}
+
+/// 取文件的修改时间秒数；读取失败时退化为 0，缓存仍可由长度变化失效。
+fn modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
+}
+
+/// 读取 TOC，命中进程内缓存时直接复用；ISO 长度或修改时间变化时重新解析。
+fn read_sacd_toc_cached(
+    iso_path: &str,
+    iso_len: u64,
+    mtime_secs: u64,
+) -> Result<Arc<SacdToc>, SacdError> {
+    if let Some(toc) = lookup_cached_toc(iso_path, iso_len, mtime_secs) {
+        log::debug!("命中 SACD 目录缓存: iso={iso_path}, len={iso_len}, mtime={mtime_secs}");
+        return Ok(toc);
+    }
+
+    let toc = Arc::new(read_sacd_toc(Path::new(iso_path))?);
+    store_cached_toc(iso_path, iso_len, mtime_secs, Arc::clone(&toc));
+    Ok(toc)
+}
+
+/// 在缓存中按完整键查找 TOC，命中后把条目移到最近使用位置。
+fn lookup_cached_toc(iso_path: &str, iso_len: u64, mtime_secs: u64) -> Option<Arc<SacdToc>> {
+    let mut cache = match TOC_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("SACD 目录缓存锁中毒，降级为重新解析 TOC");
+            poisoned.into_inner()
+        }
+    };
+    let position = cache.iter().position(|entry| {
+        entry.iso_path == iso_path && entry.iso_len == iso_len && entry.mtime_secs == mtime_secs
+    })?;
+    let entry = cache.remove(position);
+    let toc = Arc::clone(&entry.toc);
+    cache.push(entry);
+    Some(toc)
+}
+
+/// 写入 TOC 缓存；同一路径的旧条目先移除，超过容量时淘汰最久未使用的条目。
+fn store_cached_toc(iso_path: &str, iso_len: u64, mtime_secs: u64, toc: Arc<SacdToc>) {
+    let mut cache = match TOC_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("SACD 目录缓存锁中毒，跳过本次缓存写入");
+            poisoned.into_inner()
+        }
+    };
+    if let Some(position) = cache.iter().position(|entry| entry.iso_path == iso_path) {
+        cache.remove(position);
+    }
+    while cache.len() >= TOC_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(TocCacheEntry {
+        iso_path: iso_path.to_owned(),
+        iso_len,
+        mtime_secs,
+        toc,
+    });
+}
+
+/// 校验缓存 DSF 的结构完整性。
+///
+/// 依次确认 `DSD `/`fmt `/`data` 三个 chunk 标识存在，并核对 DSD chunk 的
+/// 总文件大小字段与 data chunk 声明长度都和文件实际长度一致；不一致说明
+/// 文件被截断或写坏，调用方应删除后重新提取。
+fn verify_cached_dsf(path: &Path) -> Result<(), String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("打开缓存文件失败: {error}"))?;
+    let actual_len = file
+        .metadata()
+        .map_err(|error| format!("读取缓存文件信息失败: {error}"))?
+        .len();
+    if actual_len < DSF_HEADER_LEN {
+        return Err(format!(
+            "文件长度 {actual_len} 小于 DSF 头长度 {DSF_HEADER_LEN}"
+        ));
+    }
+
+    let header_len = usize::try_from(DSF_HEADER_LEN)
+        .map_err(|_| "DSF 头长度超出平台地址空间".to_string())?;
+    let mut header = vec![0u8; header_len];
+    file.read_exact(&mut header)
+        .map_err(|error| format!("读取 DSF 头失败: {error}"))?;
+
+    let chunk_id = |range: std::ops::Range<usize>, expected: &[u8; 4]| -> Result<(), String> {
+        let bytes = header
+            .get(range.clone())
+            .ok_or_else(|| format!("DSF 头缺少偏移 {}..{} 的字节", range.start, range.end))?;
+        if bytes != expected.as_slice() {
+            return Err(format!(
+                "偏移 {} 处的 chunk 标识不是 {}",
+                range.start,
+                String::from_utf8_lossy(expected.as_slice())
+            ));
+        }
+        Ok(())
+    };
+    chunk_id(0..4, b"DSD ")?;
+    chunk_id(28..32, b"fmt ")?;
+    chunk_id(80..84, b"data")?;
+
+    let dsd_chunk_size =
+        read_u64_le(&header, 4).ok_or_else(|| "DSF 头的 DSD chunk 长度字段不完整".to_string())?;
+    if dsd_chunk_size != dsf::DSD_CHUNK_SIZE {
+        return Err(format!(
+            "DSD chunk 声明长度 {dsd_chunk_size} 与固定长度 {} 不一致",
+            dsf::DSD_CHUNK_SIZE
+        ));
+    }
+
+    let fmt_size_offset = (dsf::DSD_CHUNK_SIZE + 4) as usize;
+    let fmt_chunk_size = read_u64_le(&header, fmt_size_offset)
+        .ok_or_else(|| "DSF 头的 fmt chunk 长度字段不完整".to_string())?;
+    if fmt_chunk_size != dsf::FMT_CHUNK_SIZE {
+        return Err(format!(
+            "fmt chunk 声明长度 {fmt_chunk_size} 与固定长度 {} 不一致",
+            dsf::FMT_CHUNK_SIZE
+        ));
+    }
+
+    let declared_total = read_u64_le(&header, 12)
+        .ok_or_else(|| "DSF 头的总文件大小字段不完整".to_string())?;
+    if declared_total != actual_len {
+        return Err(format!(
+            "DSD chunk 声明文件长度 {declared_total} 与实际长度 {actual_len} 不一致"
+        ));
+    }
+
+    let data_size_offset = (DSF_DATA_CHUNK_OFFSET + 4) as usize;
+    let data_chunk_size = read_u64_le(&header, data_size_offset)
+        .ok_or_else(|| "DSF 头的 data chunk 长度字段不完整".to_string())?;
+    let declared_end = DSF_DATA_CHUNK_OFFSET
+        .checked_add(data_chunk_size)
+        .ok_or_else(|| format!("data chunk 声明长度 {data_chunk_size} 溢出"))?;
+    if declared_end != actual_len {
+        return Err(format!(
+            "data chunk 声明结束位置 {declared_end} 与实际长度 {actual_len} 不一致"
+        ));
+    }
+
+    Ok(())
+}
+
+/// 从字节切片读取小端 u64；长度不足时返回 `None`。
+fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
+    let end = offset.checked_add(8)?;
+    let array: [u8; 8] = bytes.get(offset..end)?.try_into().ok()?;
+    Some(u64::from_le_bytes(array))
+}
+
+/// 删除不可信的缓存文件；删除失败只记警告，由后续提取覆盖。
+fn remove_cache_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("删除无效 SACD 缓存文件失败: {}: {error}", path.display()),
+    }
 }
 
 /// 把区标识转换为区类型；只接受 `2ch` 与 `mch`。
@@ -871,5 +1093,162 @@ mod tests {
 
         assert_eq!(first, second, "缓存命中应返回同一路径");
         assert!(first_path.is_file(), "缓存命中后文件仍应存在");
+    }
+
+    #[test]
+    fn toc_cache_reuses_entry_and_invalidates_on_key_change() {
+        // 与提取测试串行，避免其它测试写入的条目把本测试的缓存挤出容量。
+        let _guard = lock_extraction();
+        let image = TempImage::create(&minimal_image(false));
+        let iso_path = image.path.to_string_lossy().into_owned();
+        let metadata = fs::metadata(&image.path).expect("读取镜像信息");
+        let iso_len = metadata.len();
+        let mtime = modified_secs(&metadata);
+
+        let first = read_sacd_toc_cached(&iso_path, iso_len, mtime).expect("首次解析 TOC");
+        let second = read_sacd_toc_cached(&iso_path, iso_len, mtime).expect("命中目录缓存");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "相同键应复用同一份 TOC"
+        );
+
+        let changed_length =
+            read_sacd_toc_cached(&iso_path, iso_len + 1, mtime).expect("长度变化后重新解析");
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &changed_length),
+            "镜像长度变化应使缓存失效"
+        );
+
+        let changed_mtime =
+            read_sacd_toc_cached(&iso_path, iso_len + 1, mtime + 1).expect("时间变化后重新解析");
+        assert!(
+            !std::sync::Arc::ptr_eq(&changed_length, &changed_mtime),
+            "修改时间变化应使缓存失效"
+        );
+    }
+
+    #[test]
+    fn toc_cache_replaces_earlier_entry_of_same_path() {
+        // 与提取测试串行，避免其它测试写入的条目把本测试的缓存挤出容量。
+        let _guard = lock_extraction();
+        let image = TempImage::create(&minimal_image(false));
+        let iso_path = image.path.to_string_lossy().into_owned();
+        let metadata = fs::metadata(&image.path).expect("读取镜像信息");
+        let iso_len = metadata.len();
+        let mtime = modified_secs(&metadata);
+
+        let stale = read_sacd_toc_cached(&iso_path, iso_len, mtime).expect("首次解析 TOC");
+        let fresh = read_sacd_toc_cached(&iso_path, iso_len, mtime + 5).expect("按新键解析 TOC");
+        assert!(
+            !std::sync::Arc::ptr_eq(&stale, &fresh),
+            "不同键应产生独立条目"
+        );
+
+        let stale_again =
+            read_sacd_toc_cached(&iso_path, iso_len, mtime).expect("按旧键重新解析 TOC");
+        assert!(
+            !std::sync::Arc::ptr_eq(&stale, &stale_again),
+            "同一路径的旧条目应被新条目替换"
+        );
+    }
+
+    #[test]
+    fn ensure_sacd_track_extracted_reextracts_truncated_cache() {
+        let iso = TempImage::create(&extractable_image());
+        let cache = TempDir::unused();
+        let iso_path = iso.path.to_string_lossy().into_owned();
+        let cache_path = cache.path.to_string_lossy().into_owned();
+
+        let first = ensure_sacd_track_extracted(
+            iso_path.clone(),
+            "2ch".to_string(),
+            1,
+            cache_path.clone(),
+        )
+        .expect("首次调用应提取轨道");
+        let first_path = PathBuf::from(&first);
+        let full_bytes = fs::read(&first_path).expect("读取缓存 DSF");
+        fs::write(&first_path, &full_bytes[..full_bytes.len() / 2]).expect("截断缓存文件");
+
+        let second = ensure_sacd_track_extracted(iso_path, "2ch".to_string(), 1, cache_path)
+            .expect("缓存被截断时应重新提取");
+
+        assert_eq!(first, second, "重新提取应写回同一路径");
+        let repaired = fs::read(&first_path).expect("读取修复后的缓存 DSF");
+        assert_eq!(repaired.len(), full_bytes.len(), "重新提取后应恢复完整长度");
+        assert_eq!(
+            verify_cached_dsf(&first_path),
+            Ok(()),
+            "重新提取后缓存应通过完整性校验"
+        );
+    }
+
+    #[test]
+    fn ensure_sacd_track_extracted_reextracts_corrupt_cache() {
+        let iso = TempImage::create(&extractable_image());
+        let cache = TempDir::unused();
+        let iso_path = iso.path.to_string_lossy().into_owned();
+        let cache_path = cache.path.to_string_lossy().into_owned();
+
+        let first = ensure_sacd_track_extracted(
+            iso_path.clone(),
+            "2ch".to_string(),
+            1,
+            cache_path.clone(),
+        )
+        .expect("首次调用应提取轨道");
+        let first_path = PathBuf::from(&first);
+        fs::write(&first_path, b"DSD ").expect("写入损坏的缓存文件");
+
+        let second = ensure_sacd_track_extracted(iso_path, "2ch".to_string(), 1, cache_path)
+            .expect("缓存头损坏时应重新提取");
+
+        assert_eq!(first, second, "重新提取应写回同一路径");
+        let repaired = fs::read(&first_path).expect("读取修复后的缓存 DSF");
+        assert_eq!(&repaired[0..4], b"DSD ");
+        assert_eq!(
+            verify_cached_dsf(&first_path),
+            Ok(()),
+            "重新提取后缓存应通过完整性校验"
+        );
+    }
+
+    #[test]
+    fn ensure_sacd_track_extracted_serializes_concurrent_calls() {
+        let iso = TempImage::create(&extractable_image());
+        let cache = TempDir::unused();
+        let iso_path = iso.path.to_string_lossy().into_owned();
+        let cache_path = cache.path.to_string_lossy().into_owned();
+
+        let results: Vec<Result<String, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let iso_path = iso_path.clone();
+                    let cache_path = cache_path.clone();
+                    scope.spawn(move || {
+                        ensure_sacd_track_extracted(
+                            iso_path,
+                            "2ch".to_string(),
+                            1,
+                            cache_path,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("提取线程不应 panic"))
+                .collect()
+        });
+
+        assert_eq!(results.len(), 2);
+        let first = results[0].as_ref().expect("首个线程应得到缓存路径");
+        let second = results[1].as_ref().expect("第二个线程应得到缓存路径");
+        assert_eq!(first, second, "并发调用应返回同一缓存路径");
+        assert_eq!(
+            verify_cached_dsf(Path::new(first)),
+            Ok(()),
+            "并发提取后缓存应完整"
+        );
     }
 }

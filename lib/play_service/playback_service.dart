@@ -13,6 +13,8 @@ import 'package:pure_music/play_service/equalizer_service.dart';
 import 'package:pure_music/play_service/playback_listen_tracker.dart';
 import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
+import 'package:pure_music/play_service/sacd_gapless_guard.dart';
+import 'package:pure_music/play_service/sacd_source_cache.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
@@ -70,6 +72,7 @@ class PlaybackService extends ChangeNotifier {
   final Set<Timer> _positionSyncBurstTimers = {};
   int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
+  final SacdSourceCache _sacdSourceCache = SacdSourceCache();
   int? _listenRecordingToken;
   String? _supportPath;
   bool _closed = false;
@@ -1098,9 +1101,10 @@ class PlaybackService extends ChangeNotifier {
       return;
     }
     if (_invalidateGaplessPreparation()) return;
-    // 虚拟轨按段截断混音器长度，预加载整轨会越过段边界。
+    // CUE 虚拟轨按段截断混音器长度，预加载整轨会越过段边界；
+    // SACD 播放完整缓存 DSF，按真实路径预建。
     final currentAudio = nowPlaying;
-    if (currentAudio != null && currentAudio.isVirtualTrack) return;
+    if (currentAudio != null && currentAudio.isCueTrack) return;
     if (_pref.transitionMode == TransitionMode.smart) {
       if (!_closed) _smartTransitions.rebuild();
       return;
@@ -1118,7 +1122,7 @@ class PlaybackService extends ChangeNotifier {
     }
 
     final audio = items[targetIndex];
-    if (audio.isVirtualTrack) return;
+    if (audio.isCueTrack) return;
     final pending = _PendingGaplessTransition(
       id: _nextGaplessTransitionId++,
       playlistRevision: _playlistRevision,
@@ -1127,16 +1131,89 @@ class PlaybackService extends ChangeNotifier {
       audio: audio,
     );
     _pendingGaplessTransition = pending;
+    if (audio.isSacdTrack) {
+      unawaited(_prepareSacdGaplessSource(pending));
+      return;
+    }
     if (!_player.prepareGaplessSource(audio.path, transitionId: pending.id)) {
       _pendingGaplessTransition = null;
       return;
     }
+    _applyGaplessReplayGain(pending);
+  }
+
+  /// SACD 轨先取真实缓存 DSF 路径，再预建无缝衔接。
+  ///
+  /// 提取期间用户可能切歌或切换列表，恢复后必须通过二次校验才操作播放器。
+  Future<void> _prepareSacdGaplessSource(
+    _PendingGaplessTransition pending,
+  ) async {
+    final trackUid = pending.audio.cueSegment?.trackUid ?? pending.audio.path;
+    try {
+      // 快速连切时 pending 很快被替换，先让出这段窗口再提取，避免为已失效的目标读盘。
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!_isGaplessPreparationCurrent(pending)) return;
+      final sourcePath = await _ensureSacdSource(pending.audio);
+      if (!_isGaplessPreparationCurrent(pending)) return;
+      if (!_player.prepareGaplessSource(sourcePath, transitionId: pending.id)) {
+        if (identical(_pendingGaplessTransition, pending)) {
+          _pendingGaplessTransition = null;
+        }
+        log.playback.warn(
+          'sacd.gapless',
+          'SACD 预建无缝衔接失败，回退为不预建',
+          fields: {'uid': trackUid},
+        );
+        return;
+      }
+      _applyGaplessReplayGain(pending);
+    } catch (err, trace) {
+      if (identical(_pendingGaplessTransition, pending)) {
+        _pendingGaplessTransition = null;
+      }
+      log.playback.warn(
+        'sacd.gapless',
+        'SACD 轨道准备失败，回退为不预建',
+        fields: {'uid': trackUid},
+        error: err,
+        stackTrace: trace,
+      );
+    }
+  }
+
+  bool _isGaplessPreparationCurrent(_PendingGaplessTransition pending) {
+    final items = _playlist.value;
+    final currentTarget =
+        pending.targetIndex < items.length ? items[pending.targetIndex] : null;
+    return isGaplessTargetStillCurrent(
+      closed: _closed,
+      playlistRevision: pending.playlistRevision,
+      currentPlaylistRevision: _playlistRevision,
+      fromIndex: pending.fromIndex,
+      currentIndex: _playlistIndex,
+      pendingStillActive: identical(_pendingGaplessTransition, pending),
+      currentTarget: currentTarget,
+      target: pending.audio,
+    );
+  }
+
+  void _applyGaplessReplayGain(_PendingGaplessTransition pending) {
     if (!_pref.replayGainEnabled) return;
     unawaited(
-      _readReplayGain(audio.path).then((gainDb) {
-        if (_closed || !_pref.replayGainEnabled) return;
-        _player.updateGaplessReplayGain(pending.id, gainDb);
-      }),
+      _readReplayGain(pending.audio.path)
+          .then((gainDb) {
+            if (_closed || !_pref.replayGainEnabled) return;
+            _player.updateGaplessReplayGain(pending.id, gainDb);
+          })
+          .catchError((Object err, StackTrace trace) {
+            log.playback.warn(
+              'gapless.replaygain',
+              '更新预建 ReplayGain 失败',
+              fields: {'transitionId': pending.id},
+              error: err,
+              stackTrace: trace,
+            );
+          }),
     );
   }
 
@@ -1333,19 +1410,26 @@ class PlaybackService extends ChangeNotifier {
   }
 
   /// 把 SACD 轨道提取为缓存 DSF，返回可交给 BASS 的文件路径。
-  Future<String> _ensureSacdSource(Audio audio) async {
+  ///
+  /// 同一轨道的并发提取共享同一个 Future，快速连切时不会重复提取同一轨。
+  Future<String> _ensureSacdSource(Audio audio) {
     final segment = audio.cueSegment;
     final area = segment?.sacdArea;
     if (segment == null || area == null) {
-      throw const FormatException('无效的 SACD 虚拟轨路径');
+      return Future<String>.error(
+        const FormatException('无效的 SACD 虚拟轨路径'),
+      );
     }
-    final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
-    return rust_sacd.ensureSacdTrackExtracted(
-      isoPath: segment.sourcePath,
-      area: area,
-      trackNumber: segment.trackNumber,
-      cacheRoot: cacheRoot,
-    );
+    final sacdArea = area;
+    return _sacdSourceCache.extract(segment.trackUid, () async {
+      final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
+      return rust_sacd.ensureSacdTrackExtracted(
+        isoPath: segment.sourcePath,
+        area: sacdArea,
+        trackNumber: segment.trackNumber,
+        cacheRoot: cacheRoot,
+      );
+    });
   }
 
   Future<bool> _loadAndPlayInDirection({
@@ -1537,9 +1621,33 @@ class PlaybackService extends ChangeNotifier {
       CoverImageCache.instance.preload(next.path, modified: next.modified);
       CoverImageCache.instance.preloadNowPlayingCover(next);
       playService.lyricService.prefetchLyric(next);
+      if (next.isSacdTrack) {
+        unawaited(_prefetchSacdSource(next));
+      }
       if (audioIndex + 2 < playlist.length) {
         playService.lyricService.prefetchLyric(playlist[audioIndex + 2]);
       }
+    }
+  }
+
+  /// 后台预提取下一首 SACD 轨道；失败只记 WARN，不影响当前播放与界面。
+  Future<void> _prefetchSacdSource(Audio audio) async {
+    final trackUid = audio.cueSegment?.trackUid ?? audio.path;
+    try {
+      await _ensureSacdSource(audio);
+      log.playback.debug(
+        'sacd.prefetch',
+        'SACD 预提取完成',
+        fields: {'uid': trackUid},
+      );
+    } catch (err, trace) {
+      log.playback.warn(
+        'sacd.prefetch',
+        'SACD 预提取失败',
+        fields: {'uid': trackUid},
+        error: err,
+        stackTrace: trace,
+      );
     }
   }
 
