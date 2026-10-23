@@ -6,14 +6,16 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `parse_area`, `path_to_string`, `replace_file`, `temporary_path`
+// These functions are ignored because they are not marked as `pub`: `ensure_sacd_track_extracted_serialized`, `lock_extraction`, `lookup_cached_toc`, `modified_secs`, `parse_area`, `path_to_string`, `read_sacd_toc_cached`, `read_u64_le`, `remove_cache_file`, `replace_file`, `store_cached_toc`, `temporary_path`, `verify_cached_dsf`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TocCacheEntry`
 
 /// 确保指定 SACD 轨道已提取为缓存中的 DSF 文件，并返回其路径。
 ///
 /// `area` 只接受 `2ch` 与 `mch`；`track_number` 是区内的轨号（从 1 开始）。
 /// 缓存键由 ISO 路径、区、轨号、ISO 文件长度与修改时间构成，镜像被替换或
 /// 修改后会重新提取。提取先写临时文件，成功后再改名到目标路径，中断的提取
-/// 不会留下被当作有效缓存的半截文件。
+/// 不会留下被当作有效缓存的半截文件。进程内的提取调用串行执行，目录解析
+/// 结果按镜像路径、长度与修改时间在内存中复用。
 Future<String> ensureSacdTrackExtracted({
   required String isoPath,
   required String area,
