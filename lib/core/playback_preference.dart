@@ -24,6 +24,16 @@ class PlaybackPreference {
   TransitionMode transitionMode;
   int transitionFadeOutMs;
   int transitionFadeInMs;
+  String dsdPlaybackMode;
+  int sacdPcmSampleRate;
+  int sacdPcmBitDepth;
+
+  static const String dsdPlaybackModePcm = 'pcm';
+  static const String dsdPlaybackModeDsf = 'dsf';
+  static const int defaultSacdPcmSampleRate = 44100;
+  static const int defaultSacdPcmBitDepth = 24;
+  static const List<int> sacdPcmSampleRates = [44100, 48000, 88200, 96000];
+  static const List<int> sacdPcmBitDepths = [16, 24];
 
   PlaybackPreference(
     this.playMode,
@@ -49,6 +59,9 @@ class PlaybackPreference {
     this.transitionMode = TransitionMode.seamless,
     this.transitionFadeOutMs = 300,
     this.transitionFadeInMs = 200,
+    this.dsdPlaybackMode = dsdPlaybackModePcm,
+    this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
+    this.sacdPcmBitDepth = defaultSacdPcmBitDepth,
   });
 
   Map<String, dynamic> toMap() => {
@@ -75,6 +88,9 @@ class PlaybackPreference {
     'transitionMode': transitionMode.name,
     'transitionFadeOutMs': transitionFadeOutMs,
     'transitionFadeInMs': transitionFadeInMs,
+    'dsdPlaybackMode': dsdPlaybackMode,
+    'sacdPcmSampleRate': sacdPcmSampleRate,
+    'sacdPcmBitDepth': sacdPcmBitDepth,
   };
 
   factory PlaybackPreference.fromMap(Object? value) {
@@ -108,7 +124,33 @@ class PlaybackPreference {
       transitionMode: transition.mode,
       transitionFadeOutMs: transition.fadeOutMs,
       transitionFadeInMs: transition.fadeInMs,
+      dsdPlaybackMode: _dsdPlaybackModeFromStored(map['dsdPlaybackMode']),
+      sacdPcmSampleRate: _sacdPcmSampleRateFromStored(
+        map['sacdPcmSampleRate'],
+      ),
+      sacdPcmBitDepth: _sacdPcmBitDepthFromStored(map['sacdPcmBitDepth']),
     );
+  }
+
+  static String _dsdPlaybackModeFromStored(Object? value) {
+    final mode = _normalizedString(value).toLowerCase();
+    return mode == dsdPlaybackModeDsf
+        ? dsdPlaybackModeDsf
+        : dsdPlaybackModePcm;
+  }
+
+  static int _sacdPcmSampleRateFromStored(Object? value) {
+    final rate = _normalizedInteger(value);
+    return rate != null && sacdPcmSampleRates.contains(rate)
+        ? rate
+        : defaultSacdPcmSampleRate;
+  }
+
+  static int _sacdPcmBitDepthFromStored(Object? value) {
+    final depth = _normalizedInteger(value);
+    return depth != null && sacdPcmBitDepths.contains(depth)
+        ? depth
+        : defaultSacdPcmBitDepth;
   }
 
   static ({

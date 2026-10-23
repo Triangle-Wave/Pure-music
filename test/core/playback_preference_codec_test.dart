@@ -40,4 +40,49 @@ void main() {
       'track',
     );
   });
+
+  test('SACD PCM 设置缺省为 PCM 44.1kHz 24bit', () {
+    final preference = PlaybackPreferenceCodec.decode(
+      const <String, dynamic>{},
+    );
+    expect(
+      preference.dsdPlaybackMode,
+      PlaybackPreference.dsdPlaybackModePcm,
+    );
+    expect(preference.sacdPcmSampleRate, 44100);
+    expect(preference.sacdPcmBitDepth, 24);
+
+    final encoded = PlaybackPreferenceCodec.encode(preference);
+    expect(encoded['dsdPlaybackMode'], 'pcm');
+    expect(encoded['sacdPcmSampleRate'], 44100);
+    expect(encoded['sacdPcmBitDepth'], 24);
+  });
+
+  test('SACD PCM 设置按受支持取值读取', () {
+    final preference = PlaybackPreferenceCodec.decode({
+      'dsdPlaybackMode': 'DSF',
+      'sacdPcmSampleRate': 96000,
+      'sacdPcmBitDepth': 16,
+    });
+    expect(
+      preference.dsdPlaybackMode,
+      PlaybackPreference.dsdPlaybackModeDsf,
+    );
+    expect(preference.sacdPcmSampleRate, 96000);
+    expect(preference.sacdPcmBitDepth, 16);
+  });
+
+  test('SACD PCM 设置非法值回退缺省值', () {
+    final preference = PlaybackPreferenceCodec.decode({
+      'dsdPlaybackMode': 'unknown',
+      'sacdPcmSampleRate': 32000,
+      'sacdPcmBitDepth': 32,
+    });
+    expect(
+      preference.dsdPlaybackMode,
+      PlaybackPreference.dsdPlaybackModePcm,
+    );
+    expect(preference.sacdPcmSampleRate, 44100);
+    expect(preference.sacdPcmBitDepth, 24);
+  });
 }

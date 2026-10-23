@@ -15,6 +15,7 @@ import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
 import 'package:pure_music/play_service/sacd_source_cache.dart';
+import 'package:pure_music/play_service/sacd_source_resolver.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
@@ -1409,9 +1410,10 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  /// 把 SACD 轨道提取为缓存 DSF，返回可交给 BASS 的文件路径。
+  /// 把 SACD 轨道解析为可播放的缓存文件路径。
   ///
-  /// 同一轨道的并发提取共享同一个 Future，快速连切时不会重复提取同一轨。
+  /// 默认优先转换为 PCM WAV，转换失败回退 DSF；DSF 模式直接提取 DSF。
+  /// 同一轨道的并发解析共享同一个 Future，快速连切时不会重复转换同一轨。
   Future<String> _ensureSacdSource(Audio audio) {
     final segment = audio.cueSegment;
     final area = segment?.sacdArea;
@@ -1420,16 +1422,60 @@ class PlaybackService extends ChangeNotifier {
         const FormatException('无效的 SACD 虚拟轨路径'),
       );
     }
+    final trackUid = segment.trackUid;
+    final isoPath = segment.sourcePath;
+    final trackNumber = segment.trackNumber;
     final sacdArea = area;
-    return _sacdSourceCache.extract(segment.trackUid, () async {
+    return _sacdSourceCache.extract(trackUid, () async {
       final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
-      return rust_sacd.ensureSacdTrackExtracted(
-        isoPath: segment.sourcePath,
-        area: sacdArea,
-        trackNumber: segment.trackNumber,
-        cacheRoot: cacheRoot,
+      final settings = _sacdPlaybackSettings();
+      return SacdSourceResolver.resolve(
+        trackUid: trackUid,
+        preferPcm: settings.preferPcm,
+        sampleRate: settings.sampleRate,
+        bitDepth: settings.bitDepth,
+        loadPcm: () => rust_sacd.ensureSacdTrackPcm(
+          isoPath: isoPath,
+          area: sacdArea,
+          trackNumber: trackNumber,
+          cacheRoot: cacheRoot,
+          sampleRate: settings.sampleRate,
+          bitDepth: settings.bitDepth,
+        ),
+        loadDsf: () => rust_sacd.ensureSacdTrackExtracted(
+          isoPath: isoPath,
+          area: sacdArea,
+          trackNumber: trackNumber,
+          cacheRoot: cacheRoot,
+        ),
       );
     });
+  }
+
+  /// 读取 SACD 播放设置；读取异常时退回 PCM、44.1kHz、24bit。
+  ({bool preferPcm, int sampleRate, int bitDepth}) _sacdPlaybackSettings() {
+    try {
+      final preference = AppPreference.instance.playbackPref;
+      return (
+        preferPcm:
+            preference.dsdPlaybackMode !=
+            PlaybackPreference.dsdPlaybackModeDsf,
+        sampleRate: preference.sacdPcmSampleRate,
+        bitDepth: preference.sacdPcmBitDepth,
+      );
+    } catch (err, trace) {
+      log.playback.warn(
+        'sacd.pcm',
+        '读取 SACD 播放设置失败，使用默认值',
+        error: err,
+        stackTrace: trace,
+      );
+      return (
+        preferPcm: true,
+        sampleRate: PlaybackPreference.defaultSacdPcmSampleRate,
+        bitDepth: PlaybackPreference.defaultSacdPcmBitDepth,
+      );
+    }
   }
 
   Future<bool> _loadAndPlayInDirection({
@@ -1630,7 +1676,8 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  /// 后台预提取下一首 SACD 轨道；失败只记 WARN，不影响当前播放与界面。
+  /// 后台准备下一首 SACD 轨道；PCM 模式下生成 PCM 缓存，
+  /// 失败只记 WARN，不影响当前播放与界面。
   Future<void> _prefetchSacdSource(Audio audio) async {
     final trackUid = audio.cueSegment?.trackUid ?? audio.path;
     try {
