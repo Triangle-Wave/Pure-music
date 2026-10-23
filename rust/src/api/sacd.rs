@@ -11,6 +11,7 @@ mod audio;
 mod dsf;
 mod extract;
 mod master_toc;
+mod pcm;
 mod reader;
 mod tracklist;
 mod types;
@@ -76,6 +77,35 @@ pub fn ensure_sacd_track_extracted(
     // 整个提取流程持锁，使同轨与跨轨的并发调用串行执行；后到者直接命中缓存。
     let _guard = lock_extraction();
     ensure_sacd_track_extracted_serialized(&iso_path, &area, kind, track_number, &cache_root)
+}
+
+/// 确保指定 SACD 轨道已转换为 PCM WAV 缓存，并返回其路径。
+///
+/// 先复用 [`ensure_sacd_track_extracted`] 得到 DSF 缓存，再按请求的采样率与
+/// 位深转换为 WAV。`sample_rate` 只接受 44100/48000/88200/96000，
+/// `bit_depth` 只接受 16/24；`rdsd2pcm` 无法把 DSD64 整数抽取到 48kHz 族，
+/// 请求 48000 时按 44100 输出并在日志中记录警告。缓存命中且 WAV 结构完整时
+/// 直接复用，不完整的缓存删除后重新转换。
+pub fn ensure_sacd_track_pcm(
+    iso_path: String,
+    area: String,
+    track_number: u32,
+    cache_root: String,
+    sample_rate: u32,
+    bit_depth: u16,
+) -> Result<String, String> {
+    let dsf_path = ensure_sacd_track_extracted(iso_path, area, track_number, cache_root)?;
+    let output = pcm::ensure_pcm_cached(Path::new(&dsf_path), sample_rate, bit_depth).map_err(
+        |error| {
+            let message = format!("转换 SACD 轨道为 PCM 失败: {error}");
+            log::warn!("{message}, dsf={dsf_path}");
+            message
+        },
+    )?;
+    path_to_string(&output).map_err(|error| {
+        log::warn!("{error}");
+        error
+    })
 }
 
 /// 取提交流程的进程级互斥锁；锁中毒时记录警告并恢复内层数据。

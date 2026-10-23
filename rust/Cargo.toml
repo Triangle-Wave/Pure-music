@@ -78,6 +78,10 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     "aiff",
     "wav",
 ] }
+# GPL-3.0，与项目许可证兼容。rdsd2pcm 未发布到 crates.io，源码固定在 vendor/；
+# upstream commit a06475eb8de3ff19c33aaf403158894f60b58d43，dsd-reader 子模块
+# commit c147e220bc715dd021537e1045fa2b81127812c9 同为 vendored 源码。
+rdsd2pcm = { path = "vendor/rdsd2pcm" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

@@ -1,0 +1,19 @@
+[package]
+name = "dsd-reader"
+version = "0.4.0"
+authors = ["clone206"]
+edition = "2024"
+license = "MIT/Apache-2.0"
+description = "A Rust library for reading DSD (Direct Stream Digital) audio data from DSF, DFF, or raw sources."
+readme = "README.md"
+repository = "https://github.com/clone206/dsd-reader"
+keywords = ["audio", "dsd", "dsf", "dff", "decoder"]
+categories = ["multimedia", "parsing"]
+
+[dependencies]
+# TEMP local-dev overrides, revert to version pins before publishing
+dsf-meta = "0.3.0"
+dff-meta = "0.2.0"
+dsd-source = "0.2.0"
+log = { version = "0.4.28", features = ["std"] }
+id3 = "1.16.3"
