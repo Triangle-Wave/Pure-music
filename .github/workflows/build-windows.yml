@@ -3,7 +3,18 @@ name: Build Windows
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（vX.Y.Z）；留空只构建'
+        required: false
+        type: string
+      prerelease:
+        description: '标记为预发布'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -153,3 +166,148 @@ jobs:
           name: pure-music-windows-x64
           path: build/windows/x64/runner/Release/
           if-no-files-found: error
+
+  release:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '') }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ inputs.tag || github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pure-music-windows-x64
+          path: build/windows/x64/runner/Release
+
+      # 打包脚本从仓库根读取 desktop_lyric；CI 不提交该目录，用构建产物恢复。
+      - name: Restore desktop_lyric for packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "build/windows/x64/runner/Release/desktop_lyric"
+          if (-not (Test-Path -LiteralPath "$src/desktop_lyric.exe" -PathType Leaf)) {
+            throw "desktop_lyric.exe missing from build artifact"
+          }
+          if (-not (Test-Path -LiteralPath "desktop_lyric")) {
+            Copy-Item -LiteralPath $src -Destination "desktop_lyric" -Recurse
+          }
+          if (-not (Test-Path -LiteralPath "desktop_lyric/desktop_lyric.exe" -PathType Leaf)) {
+            throw "desktop_lyric restore failed"
+          }
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe"
+          )
+          if (@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count -gt 0) {
+            Write-Host "Inno Setup already installed."
+            exit 0
+          }
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "choco install innosetup failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = if ($env:EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
+            $env:INPUT_TAG.Trim()
+          } else {
+            $env:REF_NAME.Trim()
+          }
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Release tag must be vX.Y.Z, got '$tag'"
+          }
+          $version = $Matches[1]
+
+          $pubspec = Get-Content -LiteralPath "pubspec.yaml" -Raw
+          $match = [regex]::Match($pubspec, '(?m)^\s*version\s*:\s*([0-9]+\.[0-9]+\.[0-9]+)')
+          if (-not $match.Success) { throw "version not found in pubspec.yaml" }
+          $pubVersion = $match.Groups[1].Value
+          if ($pubVersion -ne $version) {
+            throw "Tag $tag does not match pubspec version $pubVersion; bump pubspec.yaml before tagging"
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Package portable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 4 -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable packaging failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 5 -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer packaging failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify release assets
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = @(
+            "output/pure_music_${env:VERSION}_release_installer.exe",
+            "output/pure_music_${env:VERSION}_release_installer.exe.sha256",
+            "output/pure_music_${env:VERSION}_release_portable.zip",
+            "output/pure_music_${env:VERSION}_release_portable.zip.sha256"
+          )
+          $missing = @($expected | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($missing.Count -gt 0) {
+            throw "Missing release assets: $($missing -join ', ')"
+          }
+          foreach ($shaPath in @($expected | Where-Object { $_ -like "*.sha256" })) {
+            $text = (Get-Content -LiteralPath $shaPath -Raw).Trim()
+            if ($text -notmatch '^[0-9a-fA-F]{64}\s+\*?\S+$') {
+              throw "Invalid checksum content in $shaPath"
+            }
+          }
+          Get-ChildItem output -File | Select-Object Name, Length
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease || false }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe.sha256
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip.sha256

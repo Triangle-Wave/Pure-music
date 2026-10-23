@@ -47,6 +47,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
           MIN_TAG: v2.0.0
         run: node .github/generate-changelog.mjs
         continue-on-error: true

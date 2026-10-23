@@ -5,6 +5,10 @@ name: Sync release docs
 on:
   release:
     types: [published, edited]
+  # GITHUB_TOKEN 创建的 Release 不触发 release 事件，由构建工作流完成事件兜底同步。
+  workflow_run:
+    workflows: ['Build Windows']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +20,7 @@ concurrency:
 
 jobs:
   sync:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,6 +39,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
           MIN_TAG: v2.0.0
         run: node .github/generate-changelog.mjs
 

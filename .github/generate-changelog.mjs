@@ -4,7 +4,8 @@
  *
  * 环境变量:
  *   GITHUB_TOKEN / GH_TOKEN  — 可选，提高 API 限额
- *   GITHUB_REPOSITORY        — owner/repo，默认 qingyueyin/Pure-music
+ *   GITHUB_REPOSITORY        — owner/repo，默认 Triangle-Wave/Pure-music
+ *   GITEE_REPOSITORY / GITEE_REPO — 可选，Gitee 镜像 owner/repo；留空表示无镜像
  *   MIN_TAG                  — 收录的最低版本，默认 v2.0.0
  */
 import { writeFileSync, mkdirSync } from 'node:fs'
@@ -20,11 +21,14 @@ const latestReleasePath = join(
   'page/docs/public/latest-release.json',
 )
 
-const repo = process.env.GITHUB_REPOSITORY || 'qingyueyin/Pure-music'
-const giteeRepo =
+const repo = process.env.GITHUB_REPOSITORY || 'Triangle-Wave/Pure-music'
+// 未配置镜像时为空：所有 Gitee 字段输出 null，页面不展示镜像入口。
+const giteeRepo = (
   process.env.GITEE_REPOSITORY ||
   process.env.GITEE_REPO ||
-  'qingyueyin/Pure-music'
+  ''
+).trim()
+const hasGitee = giteeRepo.length > 0
 const minTag = (process.env.MIN_TAG || 'v2.0.0').trim()
 const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || ''
 
@@ -133,6 +137,10 @@ function buildChangelogMarkdown(releases) {
     ? displayVersion(latest.tag_name, latest.name)
     : '—'
 
+  const releaseLinks = hasGitee
+    ? `完整发布页：[GitHub](https://github.com/${repo}/releases) · [Gitee 镜像](https://gitee.com/${giteeRepo})（同步常滞后）`
+    : `完整发布页：[GitHub](https://github.com/${repo}/releases)（未配置 Gitee 镜像）`
+
   return `---
 outline: false
 description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
@@ -142,7 +150,7 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 从 **${minTag.replace(/^v/i, '')}** 起。每个版本默认折叠，点版本号展开。最新：**${latestLabel}**。
 
-完整发布页：[GitHub](https://github.com/${repo}/releases) · [Gitee 镜像](https://gitee.com/${giteeRepo})（同步常滞后）
+${releaseLinks}
 
 ${blocks.join('\n')}
 ---
@@ -245,7 +253,7 @@ function sha256Digest(asset) {
 }
 
 function giteeAssetUrl(release, assetName) {
-  if (!assetName) return null
+  if (!hasGitee || !assetName) return null
   return `https://gitee.com/${giteeRepo}/releases/download/` +
     `${encodeURIComponent(release.tag_name)}/${encodeURIComponent(assetName)}`
 }
@@ -289,7 +297,10 @@ function writeVersionJson(release, assets) {
       '## 更新内容\n\n请前往 GitHub Releases 查看完整更新日志',
     // 应用内「获取更新」优先打开 GitHub；访问慢时可改用文档站上的 Gitee 镜像说明
     html_url: githubUrl,
-    gitee_release_url: `https://gitee.com/${giteeRepo}/releases/tag/${release.tag_name}`,
+    gitee_release_url: hasGitee
+      ? `https://gitee.com/${giteeRepo}/releases/tag/${release.tag_name}`
+      : null,
+    gitee_available: hasGitee,
     installer_url: assets.installer.url || null,
     gitee_installer_url: assets.installer.giteeUrl,
     installer_sha256: assets.installer.sha256,
@@ -325,9 +336,14 @@ function writeLatestReleaseJson(release, assets) {
     github_release_url:
       release.html_url ||
       `https://github.com/${repo}/releases/tag/${release.tag_name}`,
-    gitee_release_url: `https://gitee.com/${giteeRepo}/releases/tag/${release.tag_name}`,
-    gitee_repo_url: `https://gitee.com/${giteeRepo}`,
-    gitee_releases_url: `https://gitee.com/${giteeRepo}/releases`,
+    gitee_release_url: hasGitee
+      ? `https://gitee.com/${giteeRepo}/releases/tag/${release.tag_name}`
+      : null,
+    gitee_repo_url: hasGitee ? `https://gitee.com/${giteeRepo}` : null,
+    gitee_releases_url: hasGitee
+      ? `https://gitee.com/${giteeRepo}/releases`
+      : null,
+    gitee_available: hasGitee,
     installer_url: assets.installer.url || null,
     gitee_installer_url: assets.installer.giteeUrl,
     installer_name: assets.installer.name || null,
@@ -346,8 +362,8 @@ function writeLatestReleaseJson(release, assets) {
       ? assets.portable.giteeChecksumUrl
       : null,
     portable_size: assets.portable.size,
-    // Gitee 镜像同步常滞后，前端可展示提示
-    gitee_may_lag: true,
+    // 仅在配置了 Gitee 镜像时提示同步滞后
+    gitee_may_lag: hasGitee,
     generated_at: new Date().toISOString(),
   }
   mkdirSync(dirname(latestReleasePath), { recursive: true })
@@ -360,7 +376,9 @@ function writeLatestReleaseJson(release, assets) {
 }
 
 async function main() {
-  console.log(`repo=${repo} gitee=${giteeRepo} minTag=${minTag}`)
+  console.log(
+    `repo=${repo} gitee=${hasGitee ? giteeRepo : '(none)'} minTag=${minTag}`,
+  )
   const raw = await fetchAllReleases()
   const releases = pickReleases(raw)
   if (releases.length === 0) {
