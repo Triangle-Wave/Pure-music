@@ -1618,7 +1618,7 @@ class PlaybackService extends ChangeNotifier {
     ThemeProvider.instance.applyThemeFromAudio(audio);
     if (audioIndex + 1 < playlist.length) {
       final next = playlist[audioIndex + 1];
-      CoverImageCache.instance.preload(next.path, modified: next.modified);
+      CoverImageCache.instance.preload(next.filePath, modified: next.modified);
       CoverImageCache.instance.preloadNowPlayingCover(next);
       playService.lyricService.prefetchLyric(next);
       if (next.isSacdTrack) {

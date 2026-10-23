@@ -1063,12 +1063,13 @@ class CoverImageCache {
   }
 
   void preloadNowPlayingCover(Audio audio) {
-    if (audio.path.isEmpty) return;
+    if (audio.filePath.isEmpty) return;
     unawaited(_preloadNowPlayingCover(audio));
   }
 
   Future<void> _preloadNowPlayingCover(Audio audio) async {
-    final path = audio.path;
+    // 虚拟轨的 path 是合成路径，读取封面必须用真实源文件路径。
+    final path = audio.filePath;
     final modified = audio.modified;
     final colors = ColorExtractionService();
     if (colors.getCachedPaletteForPath(path, modified: modified) != null) {

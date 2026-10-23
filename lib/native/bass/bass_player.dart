@@ -136,6 +136,8 @@ class BassPlayer {
   int? _smartOutgoingStream;
   int _mixerGeneration = 0;
   bool _streamWasapiExclusive = false;
+  /// WASAPI 独占输出的实际采样率；共享模式固定按 44100 处理。
+  int _wasapiOutputFrequency = 44100;
   bool _transitionHandledCompletion = false;
 
   double? _replayGainDb;
@@ -703,6 +705,7 @@ class BassPlayer {
         return;
       }
       final value = info.ref;
+      if (value.freq > 0) _wasapiOutputFrequency = value.freq;
       final format = switch (value.format) {
         bass_wasapi.BASS_WASAPI_FORMAT_FLOAT => ('float32', 4),
         bass_wasapi.BASS_WASAPI_FORMAT_8BIT => ('8bit', 1),
@@ -1561,6 +1564,9 @@ class BassPlayer {
       }
     }
 
+    // BASS_SetConfig 只影响之后创建的流：设备重建后先对齐 DSD 解码频率。
+    _applyDsdFreqConfig();
+
     // BASS_Free() 会释放所有 BASS 对象，包括 bass_fx.dll 创建的 tempo 流。
     _bassFx = null;
     _bassFxLib?.close();
@@ -1578,6 +1584,20 @@ class BassPlayer {
   void _applyOutputBufferConfig() {
     _bass.BASS_SetConfig(bass.BASS_CONFIG_BUFFER, _playbackBufferMs);
     _bass.BASS_SetConfig(bass.BASS_CONFIG_DEV_BUFFER, _deviceBufferMs);
+  }
+
+  /// 让 DSD 解码频率跟随当前输出采样率，避免解码到 88200Hz 后再重采样。
+  /// BASS_SetConfig 只影响之后创建的流，因此每个建流入口都会重新应用。
+  void _applyDsdFreqConfig() {
+    final target = (wasapiExclusive || _streamWasapiExclusive)
+        ? _wasapiOutputFrequency
+        : 44100;
+    if (_bass.BASS_SetConfig(bass.BASS_CONFIG_DSD_FREQ, target) == bass.FALSE) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to set DSD freq=$target: ${_bass.BASS_ErrorGetCode()}',
+      );
+    }
   }
 
   bool _startDevice() {
@@ -1917,6 +1937,7 @@ class BassPlayer {
   }
 
   int _createSharedSource(String audioPath) {
+    _applyDsdFreqConfig();
     const flags =
         bass.BASS_UNICODE |
         bass.BASS_SAMPLE_FLOAT |
@@ -1980,6 +2001,7 @@ class BassPlayer {
   }
 
   int _createDirectSharedStream(String audioPath) {
+    _applyDsdFreqConfig();
     const playableFlags =
         bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
 
@@ -3082,6 +3104,7 @@ class BassPlayer {
   }
 
   int _createDecodeStream(String path) {
+    _applyDsdFreqConfig();
     const flags =
         bass.BASS_UNICODE |
         bass.BASS_SAMPLE_FLOAT |

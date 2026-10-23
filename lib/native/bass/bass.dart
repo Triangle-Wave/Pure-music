@@ -10,6 +10,9 @@ const int BASS_CONFIG_ASYNCFILE_BUFFER = 45;
 
 const int BASS_CONFIG_UNICODE = 42;
 
+/// BASSDSD：DSD 转换为 PCM 时使用的默认采样率（Add-on 配置项）。
+const int BASS_CONFIG_DSD_FREQ = 0x10800;
+
 const int BASS_ERROR_UNKNOWN = -1;
 
 const int BASS_ERROR_NOTAUDIO = 17;

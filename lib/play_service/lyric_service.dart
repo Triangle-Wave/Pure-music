@@ -1093,10 +1093,12 @@ class LyricService extends ChangeNotifier {
   Future<_CachedLocalLyric?> _readLocalLyric(
     String audioPath, {
     required bool notifyFailure,
+    String? readPath,
   }) async {
     final selectedPath = lyricSources[audioPath]?.localLyricPath;
     if (selectedPath == null) {
-      final result = await loadLyricFromAudio(audioPath);
+      // 虚拟轨的内嵌歌词必须从真实源文件读取，合成路径会被标签层判为无效文件。
+      final result = await loadLyricFromAudio(readPath ?? audioPath);
       if (result == null) return null;
       return (lyric: result.lyric, isExternal: result.isExternal);
     }
@@ -1479,6 +1481,8 @@ class LyricService extends ChangeNotifier {
   /// 下一首切换时直接使用缓存
   void prefetchLyric(Audio audio) {
     final path = audio.path;
+    // 缓存与来源登记沿用虚拟轨 key，读取内嵌歌词用真实源文件路径。
+    final readPath = audio.filePath;
     final lyricSource = lyricSources[path];
     final usesLocalLyric =
         lyricSource?.source == LyricSourceType.local ||
@@ -1496,7 +1500,11 @@ class LyricService extends ChangeNotifier {
     late final Future<_CachedLocalLyric?> future;
     future = (() async {
       try {
-        final value = await _readLocalLyric(path, notifyFailure: false);
+        final value = await _readLocalLyric(
+          path,
+          notifyFailure: false,
+          readPath: readPath,
+        );
         if (value != null && generation == _prefetchGeneration) {
           _lyricCache.put(cacheKey, value);
         }
