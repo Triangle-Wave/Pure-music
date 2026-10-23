@@ -77,9 +77,11 @@ pub struct DayCount {
 pub struct PlayHistoryStats {
     /// 流水总条数。
     pub total: i64,
-    /// 最早/最晚播放时间戳（秒），无流水时为 0。
+    /// 统计窗口内最早/最晚播放时间戳（秒），无流水时为 0。
     pub first_at: i64,
     pub last_at: i64,
+    /// 全库最早播放时间戳（秒），不受统计窗口影响；无流水时为 0。
+    pub earliest_at: i64,
     /// 按本地日期聚合的每日播放次数，升序，只含有播放的日期。
     pub daily: Vec<DayCount>,
     /// 24 小时分布，索引 0-23。
@@ -429,6 +431,12 @@ fn should_rebuild_database(conn: &Connection) -> Result<bool> {
     )?)
 }
 
+fn legacy_audio_column_exists(conn: &Connection, column: &str) -> Result<bool> {
+    Ok(conn
+        .prepare(&format!("SELECT {column} FROM legacy.audios LIMIT 1"))
+        .is_ok())
+}
+
 fn rebuild_database_from_legacy(index_dir: &Path) -> Result<()> {
     let current_path = sqlite_path(index_dir);
     let legacy_path = legacy_sqlite_path(index_dir);
@@ -443,23 +451,39 @@ fn rebuild_database_from_legacy(index_dir: &Path) -> Result<()> {
             "ATTACH DATABASE ?1 AS legacy",
             params![legacy_path.to_string_lossy().as_ref()],
         )?;
+        let legacy_catalog_columns = ["genre", "year", "composer", "bpm"]
+            .into_iter()
+            .map(|column| {
+                if legacy_audio_column_exists(&conn, column)? {
+                    Ok(column)
+                } else {
+                    Ok("NULL")
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
         {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(
                 "INSERT OR REPLACE INTO meta(key, value)
                    SELECT key, value FROM legacy.meta;
                  INSERT INTO folders(path, modified, latest)
-                   SELECT path, modified, latest FROM legacy.folders;
-                 INSERT INTO audios(
-                   path, folder_path, title, artist, album, album_artist, track, disc,
-                   duration, bitrate, sample_rate, modified, created, by, play_count,
-                   media_id, metadata_key
-                 ) SELECT
-                   path, folder_path, title, artist, album, album_artist, track, disc,
-                   duration, bitrate, sample_rate, modified, created, by, play_count,
-                   media_id, metadata_key
-                 FROM legacy.audios;",
+                    SELECT path, modified, latest FROM legacy.folders;",
             )?;
+            tx.execute_batch(&format!(
+                "INSERT INTO audios(
+                   path, folder_path, title, artist, album, album_artist,
+                   genre, year, composer, bpm, track, disc, duration, bitrate,
+                   sample_rate, modified, created, by, play_count, media_id, metadata_key
+                 ) SELECT
+                   path, folder_path, title, artist, album, album_artist,
+                   {}, {}, {}, {}, track, disc, duration, bitrate,
+                   sample_rate, modified, created, by, play_count, media_id, metadata_key
+                 FROM legacy.audios;",
+                legacy_catalog_columns[0],
+                legacy_catalog_columns[1],
+                legacy_catalog_columns[2],
+                legacy_catalog_columns[3],
+            ))?;
             tx.execute(
                 "INSERT OR REPLACE INTO meta(key, value)
                  VALUES('database_layout_version', ?1)",
@@ -647,10 +671,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
           path TEXT PRIMARY KEY,
           folder_path TEXT NOT NULL,
           title TEXT NOT NULL,
-          artist TEXT NOT NULL,
-          album TEXT NOT NULL,
-          album_artist TEXT,
-          track INTEGER,
+           artist TEXT NOT NULL,
+           album TEXT NOT NULL,
+           album_artist TEXT,
+           genre TEXT,
+           year TEXT,
+           composer TEXT,
+           bpm TEXT,
+           track INTEGER,
           disc INTEGER,
           duration INTEGER NOT NULL,
           bitrate INTEGER,
@@ -725,6 +753,22 @@ fn init_schema(conn: &Connection) -> Result<()> {
     if !hidden_col {
         conn.execute_batch("ALTER TABLE audios ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;")?;
     }
+    let genre_col = conn.prepare("SELECT genre FROM audios LIMIT 1").is_ok();
+    if !genre_col {
+        conn.execute_batch("ALTER TABLE audios ADD COLUMN genre TEXT;")?;
+    }
+    let year_col = conn.prepare("SELECT year FROM audios LIMIT 1").is_ok();
+    if !year_col {
+        conn.execute_batch("ALTER TABLE audios ADD COLUMN year TEXT;")?;
+    }
+    let composer_col = conn.prepare("SELECT composer FROM audios LIMIT 1").is_ok();
+    if !composer_col {
+        conn.execute_batch("ALTER TABLE audios ADD COLUMN composer TEXT;")?;
+    }
+    let bpm_col = conn.prepare("SELECT bpm FROM audios LIMIT 1").is_ok();
+    if !bpm_col {
+        conn.execute_batch("ALTER TABLE audios ADD COLUMN bpm TEXT;")?;
+    }
     let cover_last_accessed_col = conn
         .prepare("SELECT last_accessed FROM cover_thumbnails LIMIT 1")
         .is_ok();
@@ -737,6 +781,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_audios_media_id ON audios(media_id);
          CREATE INDEX IF NOT EXISTS idx_audios_metadata_key ON audios(metadata_key);
          CREATE INDEX IF NOT EXISTS idx_audios_valid ON audios(valid);
+         CREATE INDEX IF NOT EXISTS idx_audios_genre ON audios(genre);
+         CREATE INDEX IF NOT EXISTS idx_audios_year ON audios(year);
+         CREATE INDEX IF NOT EXISTS idx_audios_composer ON audios(composer);
+         CREATE INDEX IF NOT EXISTS idx_audios_bpm ON audios(bpm);
          DROP INDEX IF EXISTS idx_audios_folder_path;",
     )?;
     let identity_backfill: Option<String> = conn
@@ -1006,6 +1054,15 @@ fn unique_play_count(candidates: &HashMap<String, Vec<i64>>, key: &str) -> Optio
     }
 }
 
+fn optional_audio_text(audio: &serde_json::Value, key: &str) -> Option<String> {
+    audio
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+}
+
 struct ParsedAudioEntry {
     path: String,
     path_key: String,
@@ -1013,6 +1070,10 @@ struct ParsedAudioEntry {
     artist: String,
     album: String,
     album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<String>,
+    composer: Option<String>,
+    bpm: Option<String>,
     track: u64,
     disc: u64,
     duration: u64,
@@ -1077,6 +1138,10 @@ fn parse_index_folders(folders: &[serde_json::Value]) -> Result<Vec<ParsedFolder
                     .get("album_artist")
                     .and_then(|v| v.as_str())
                     .map(String::from),
+                genre: optional_audio_text(audio, "genre"),
+                year: optional_audio_text(audio, "year"),
+                composer: optional_audio_text(audio, "composer"),
+                bpm: optional_audio_text(audio, "bpm"),
                 track: audio.get("track").and_then(|v| v.as_u64()).unwrap_or(0),
                 disc: audio.get("disc").and_then(|v| v.as_u64()).unwrap_or(0),
                 duration: audio.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -1271,15 +1336,19 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                 OR folders.latest IS NOT excluded.latest",
         )?;
         let mut audio_stmt = tx.prepare(
-            "INSERT INTO audios(path, folder_path, title, artist, album, album_artist, track, disc, duration, bitrate, sample_rate, modified, created, by, play_count, media_id, metadata_key, file_size, valid, hidden)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0)
+            "INSERT INTO audios(path, folder_path, title, artist, album, album_artist, genre, year, composer, bpm, track, disc, duration, bitrate, sample_rate, modified, created, by, play_count, media_id, metadata_key, file_size, valid, hidden)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0)
              ON CONFLICT(path) DO UPDATE SET
-               folder_path = excluded.folder_path,
-               title = excluded.title,
-               artist = excluded.artist,
-               album = excluded.album,
-               album_artist = excluded.album_artist,
-               track = excluded.track,
+                folder_path = excluded.folder_path,
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                album_artist = excluded.album_artist,
+                genre = excluded.genre,
+                year = excluded.year,
+                composer = excluded.composer,
+                bpm = excluded.bpm,
+                track = excluded.track,
                disc = excluded.disc,
                duration = excluded.duration,
                bitrate = excluded.bitrate,
@@ -1294,10 +1363,14 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                valid = excluded.valid
              WHERE audios.folder_path IS NOT excluded.folder_path
                 OR audios.title IS NOT excluded.title
-                OR audios.artist IS NOT excluded.artist
-                OR audios.album IS NOT excluded.album
-                OR audios.album_artist IS NOT excluded.album_artist
-                OR audios.track IS NOT excluded.track
+                 OR audios.artist IS NOT excluded.artist
+                 OR audios.album IS NOT excluded.album
+                 OR audios.album_artist IS NOT excluded.album_artist
+                 OR audios.genre IS NOT excluded.genre
+                 OR audios.year IS NOT excluded.year
+                 OR audios.composer IS NOT excluded.composer
+                 OR audios.bpm IS NOT excluded.bpm
+                 OR audios.track IS NOT excluded.track
                 OR audios.disc IS NOT excluded.disc
                 OR audios.duration IS NOT excluded.duration
                 OR audios.bitrate IS NOT excluded.bitrate
@@ -1352,6 +1425,10 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                     audio.artist,
                     audio.album,
                     audio.album_artist,
+                    audio.genre,
+                    audio.year,
+                    audio.composer,
+                    audio.bpm,
                     audio.track as i64,
                     audio.disc as i64,
                     audio.duration as i64,
@@ -1509,7 +1586,11 @@ pub fn read_index_from_sqlite(index_path: String) -> Result<Vec<IndexFolder>> {
 }
 
 /// 批量设置曲库条目的隐藏标记；被隐藏的路径不再出现在正常曲库读取中。
-pub fn set_audios_hidden(index_path: String, paths: Vec<String>, hidden: bool) -> Result<(), String> {
+pub fn set_audios_hidden(
+    index_path: String,
+    paths: Vec<String>,
+    hidden: bool,
+) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
@@ -1542,9 +1623,7 @@ pub fn read_hidden_audios(index_path: String) -> Result<Vec<IndexAudio>, String>
              FROM audios WHERE hidden != 0 ORDER BY folder_path, path",
         )
         .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let track: Option<i64> = row.get(5).map_err(|e| e.to_string())?;
@@ -1600,6 +1679,10 @@ mod tests {
             "artist": "Artist",
             "album": "Album",
             "album_artist": "Artist",
+            "genre": "Rock",
+            "year": "2024",
+            "composer": "Composer",
+            "bpm": "128",
             "track": 1,
             "disc": 1,
             "duration": 180,
@@ -1651,6 +1734,10 @@ mod tests {
                     "artist": "a",
                     "album": "al",
                     "album_artist": null,
+                    "genre": "Rock",
+                    "year": "2024",
+                    "composer": "Composer",
+                    "bpm": "128",
                     "track": 0,
                     "disc": 2,
                     "duration": 3,
@@ -1672,6 +1759,147 @@ mod tests {
         assert_eq!(folders[0].audios.len(), 1);
         assert_eq!(folders[0].audios[0].title, "t");
         assert_eq!(folders[0].audios[0].disc, 2);
+        let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
+        let catalog_tags = conn
+            .query_row("SELECT genre, year, composer, bpm FROM audios", [], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            catalog_tags,
+            (
+                Some("Rock".to_string()),
+                Some("2024".to_string()),
+                Some("Composer".to_string()),
+                Some("128".to_string()),
+            )
+        );
+        drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn init_schema_adds_catalog_tag_columns_to_existing_database() {
+        let base = test_dir("catalog_tag_schema_migration");
+        let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE audios (
+               path TEXT PRIMARY KEY,
+               folder_path TEXT NOT NULL,
+               title TEXT NOT NULL,
+               artist TEXT NOT NULL,
+               album TEXT NOT NULL,
+               album_artist TEXT,
+               track INTEGER,
+               disc INTEGER,
+               duration INTEGER NOT NULL,
+               bitrate INTEGER,
+               sample_rate INTEGER,
+               modified INTEGER NOT NULL,
+               created INTEGER NOT NULL,
+               by TEXT,
+               play_count INTEGER NOT NULL DEFAULT 0,
+               media_id TEXT,
+               metadata_key TEXT,
+               file_size INTEGER NOT NULL DEFAULT 0,
+               valid INTEGER NOT NULL DEFAULT 1,
+               hidden INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        for column in ["genre", "year", "composer", "bpm"] {
+            assert!(
+                conn.prepare(&format!("SELECT {column} FROM audios LIMIT 1"))
+                    .is_ok(),
+                "missing migrated column {column}",
+            );
+            let index_name = format!("idx_audios_{column}");
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    params![index_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing index for {column}");
+        }
+
+        drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_rebuild_accepts_database_without_catalog_tag_columns() {
+        let base = test_dir("legacy_catalog_tag_rebuild");
+        let legacy_path = legacy_sqlite_path(&base);
+        let legacy = open_raw_connection(&legacy_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE folders (
+                   path TEXT PRIMARY KEY,
+                   modified INTEGER NOT NULL,
+                   latest INTEGER NOT NULL
+                 );
+                 CREATE TABLE audios (
+                   path TEXT PRIMARY KEY,
+                   folder_path TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   artist TEXT NOT NULL,
+                   album TEXT NOT NULL,
+                   album_artist TEXT,
+                   track INTEGER,
+                   disc INTEGER,
+                   duration INTEGER NOT NULL,
+                   bitrate INTEGER,
+                   sample_rate INTEGER,
+                   modified INTEGER NOT NULL,
+                   created INTEGER NOT NULL,
+                   by TEXT,
+                   play_count INTEGER NOT NULL DEFAULT 0,
+                   media_id TEXT,
+                   metadata_key TEXT
+                 );
+                 INSERT INTO folders(path, modified, latest)
+                   VALUES('C:/Music', 1, 2);
+                 INSERT INTO audios(
+                   path, folder_path, title, artist, album, album_artist, track, disc,
+                   duration, bitrate, sample_rate, modified, created, by, play_count,
+                   media_id, metadata_key
+                 ) VALUES(
+                   'C:/Music/track.flac', 'C:/Music', 'Track', 'Artist', 'Album', NULL, 1, 1,
+                   180, 320, 44100, 4, 5, 'Lofty', 0, NULL, NULL
+                 );",
+            )
+            .unwrap();
+        drop(legacy);
+
+        rebuild_database_from_legacy(&base).unwrap();
+
+        let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
+        let catalog_tags = conn
+            .query_row("SELECT genre, year, composer, bpm FROM audios", [], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(catalog_tags, (None, None, None, None));
+
+        drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -2260,10 +2488,11 @@ mod tests {
         }];
         import_play_history(index.clone(), entries, false).unwrap();
 
-        let stats = get_play_history_stats(index.clone(), None).unwrap();
+        let stats = get_play_history_stats(index.clone(), None, None).unwrap();
         assert_eq!(stats.total, 3);
         assert_eq!(stats.first_at, 1_700_000_000);
         assert_eq!(stats.last_at, 1_700_086_400);
+        assert_eq!(stats.earliest_at, 1_700_000_000);
         assert_eq!(stats.hourly.len(), 24);
         assert_eq!(stats.weekday_hourly.len(), 168);
         assert_eq!(stats.hourly.iter().sum::<i64>(), 3);
@@ -2272,20 +2501,28 @@ mod tests {
         // daily 按日期升序
         assert!(stats.daily.windows(2).all(|w| w[0].day < w[1].day));
 
-        // since 过滤：只统计窗口内的流水
-        let windowed = get_play_history_stats(index.clone(), Some(1_700_003_600)).unwrap();
+        // since/until 过滤：只统计窗口内的流水，until 不包含
+        let windowed = get_play_history_stats(index.clone(), Some(1_700_003_600), None).unwrap();
         assert_eq!(windowed.total, 2);
         assert_eq!(windowed.first_at, 1_700_003_600);
+        assert_eq!(windowed.earliest_at, 1_700_000_000);
         assert_eq!(windowed.hourly.iter().sum::<i64>(), 2);
 
+        let bounded =
+            get_play_history_stats(index.clone(), Some(1_700_000_000), Some(1_700_086_400))
+                .unwrap();
+        assert_eq!(bounded.total, 2);
+        assert_eq!(bounded.last_at, 1_700_003_600);
+
         // 清空流水后全为 0 / 空
-        let target = get_play_history_stats(index.clone(), None).unwrap();
+        let target = get_play_history_stats(index.clone(), None, None).unwrap();
         assert_eq!(target.total, stats.total);
         let _ = import_play_history(index.clone(), vec![], true);
-        let empty = get_play_history_stats(index, None).unwrap();
+        let empty = get_play_history_stats(index, None, None).unwrap();
         assert_eq!(empty.total, 0);
         assert_eq!(empty.first_at, 0);
         assert_eq!(empty.last_at, 0);
+        assert_eq!(empty.earliest_at, 0);
         assert!(empty.daily.is_empty());
         assert_eq!(empty.hourly.iter().sum::<i64>(), 0);
         std::fs::remove_dir_all(base).unwrap();

@@ -690,6 +690,7 @@ class _MiniTimeTextState extends State<_MiniTimeText> {
     _lengthSeconds = playbackService.length.floor();
     playbackService.playerStateNotifier.addListener(_syncTimer);
     playbackService.nowPlayingNotifier.addListener(_onNowPlayingChanged);
+    playbackService.positionSyncNotifier.addListener(_onPositionSync);
     _syncTimer();
   }
 
@@ -759,6 +760,10 @@ class _MiniTimeTextState extends State<_MiniTimeText> {
     _syncNativePosition();
   }
 
+  void _onPositionSync() {
+    _syncNativePosition();
+  }
+
   @override
   void didUpdateWidget(covariant _MiniTimeText oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -771,6 +776,7 @@ class _MiniTimeTextState extends State<_MiniTimeText> {
   void dispose() {
     playbackService.playerStateNotifier.removeListener(_syncTimer);
     playbackService.nowPlayingNotifier.removeListener(_onNowPlayingChanged);
+    playbackService.positionSyncNotifier.removeListener(_onPositionSync);
     _positionTimer?.cancel();
     super.dispose();
   }

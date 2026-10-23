@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pure_music/lyric/karaok_parser.dart';
 import 'package:pure_music/lyric/lyric_loader.dart';
 
 void main() {
@@ -57,5 +59,57 @@ void main() {
 
       expect(lyric, isNull);
     });
+  });
+
+  test('loads translation embedded in a local KRC file', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'type': 1,
+              'lyricContent': [
+                ['第一译'],
+                ['第二译'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final lyric = parseExternalLyricText(
+      '[language:$language]\n'
+          '[0,1000]<0,1000,0>第一行\n'
+          '[1000,1000]<0,1000,0>第二行',
+      '.krc',
+    );
+
+    expect(lyric, isNotNull);
+    expect(lyric!.lines[0].translation, '第一译');
+    expect(lyric.lines[1].translation, '第二译');
+  });
+
+  test('matches every LRC timestamp on a translation line', () {
+    final lyric = parseKaraokToPureLyric(
+      '.krc',
+      '[1000,1000]<0,1000,0>第一行\n'
+          '[2000,1000]<0,1000,0>第二行',
+      '[00:01.00][00:02.00]重复译',
+    );
+
+    expect(lyric, isNotNull);
+    expect(lyric!.lines[0].translation, '重复译');
+    expect(lyric.lines[1].translation, '重复译');
+  });
+
+  test('accepts LRC timestamps without a fractional part', () {
+    final lyric = parseKaraokToPureLyric(
+      '.krc',
+      '[1000,1000]<0,1000,0>第一行',
+      '[00:01]译文',
+    );
+
+    expect(lyric, isNotNull);
+    expect(lyric!.lines.single.translation, '译文');
   });
 }

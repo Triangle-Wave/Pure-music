@@ -582,6 +582,7 @@ class _TransitionControllerManager {
   static const int _nativeSyncMs = 1000;
   Duration _lastTickElapsed = Duration.zero;
   late final VoidCallback _playerStateListener = _syncPlaybackState;
+  late final VoidCallback _positionSyncListener = _syncPosition;
 
   bool get _isPlaying =>
       PlayService.instance.playbackService.playerState == PlayerState.playing;
@@ -596,6 +597,9 @@ class _TransitionControllerManager {
     if (_controllers.isEmpty) {
       PlayService.instance.playbackService.playerStateNotifier.addListener(
         _playerStateListener,
+      );
+      PlayService.instance.playbackService.positionSyncNotifier.addListener(
+        _positionSyncListener,
       );
       LyricManualOffset.instance.addListener(_onManualOffset);
     }
@@ -613,6 +617,9 @@ class _TransitionControllerManager {
       PlayService.instance.playbackService.playerStateNotifier.removeListener(
         _playerStateListener,
       );
+      PlayService.instance.playbackService.positionSyncNotifier.removeListener(
+        _positionSyncListener,
+      );
       LyricManualOffset.instance.removeListener(_onManualOffset);
     } else {
       _syncProgressTicker();
@@ -623,6 +630,13 @@ class _TransitionControllerManager {
     final isPlaying = _isPlaying;
     _syncNativePosition();
     _updateControllers(_syncedPosition, isPlaying: isPlaying);
+    _syncProgressTicker();
+  }
+
+  void _syncPosition() {
+    if (_controllers.isEmpty) return;
+    _syncNativePosition();
+    _updateControllers(_syncedPosition);
     _syncProgressTicker();
   }
 
@@ -711,6 +725,9 @@ class _TransitionControllerManager {
       _stopProgressTicker();
       PlayService.instance.playbackService.playerStateNotifier.removeListener(
         _playerStateListener,
+      );
+      PlayService.instance.playbackService.positionSyncNotifier.removeListener(
+        _positionSyncListener,
       );
       LyricManualOffset.instance.removeListener(_onManualOffset);
     }

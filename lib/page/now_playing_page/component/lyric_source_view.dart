@@ -1138,52 +1138,66 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
                   ),
                 ],
               ),
-              ListTile(
-                leading: const Icon(Symbols.folder_open),
-                title: const Text('选择外置歌词文件'),
-                subtitle: selectedLocalPath == null
-                    ? null
-                    : Text(
-                        p.basename(selectedLocalPath),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                selected: selectedLocalPath != null,
-                selectedTileColor: scheme.secondaryContainer.withValues(
-                  alpha: 0.5,
-                ),
-                selectedColor: scheme.onSecondaryContainer,
-                trailing: _isApplyingLocal
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : selectedLocalPath != null
-                    ? const Icon(Symbols.check)
-                    : null,
+              Material(
+                type: MaterialType.transparency,
                 shape: RoundedRectangleBorder(
                   borderRadius: AppRadius.smCircular,
                 ),
-                onTap: localActionsEnabled ? _selectLocalLyricFile : null,
+                clipBehavior: Clip.hardEdge,
+                child: ListTile(
+                  leading: const Icon(Symbols.folder_open),
+                  title: const Text('选择外置歌词文件'),
+                  subtitle: selectedLocalPath == null
+                      ? null
+                      : Text(
+                          p.basename(selectedLocalPath),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                  selected: selectedLocalPath != null,
+                  selectedTileColor: scheme.secondaryContainer.withValues(
+                    alpha: 0.5,
+                  ),
+                  selectedColor: scheme.onSecondaryContainer,
+                  trailing: _isApplyingLocal
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : selectedLocalPath != null
+                      ? const Icon(Symbols.check)
+                      : null,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: AppRadius.smCircular,
+                  ),
+                  onTap: localActionsEnabled ? _selectLocalLyricFile : null,
+                ),
               ),
-              ListTile(
-                leading: const Icon(Symbols.restart_alt),
-                title: const Text('自动匹配外置 / 内嵌'),
-                selected: isAutomaticLocalSelected,
-                selectedTileColor: scheme.secondaryContainer.withValues(
-                  alpha: 0.5,
-                ),
-                selectedColor: scheme.onSecondaryContainer,
-                trailing: isAutomaticLocalSelected
-                    ? const Icon(Symbols.check)
-                    : null,
+              Material(
+                type: MaterialType.transparency,
                 shape: RoundedRectangleBorder(
                   borderRadius: AppRadius.smCircular,
                 ),
-                onTap: localActionsEnabled && !isAutomaticLocalSelected
-                    ? _restoreAutomaticLocalLyric
-                    : null,
+                clipBehavior: Clip.hardEdge,
+                child: ListTile(
+                  leading: const Icon(Symbols.restart_alt),
+                  title: const Text('自动匹配外置 / 内嵌'),
+                  selected: isAutomaticLocalSelected,
+                  selectedTileColor: scheme.secondaryContainer.withValues(
+                    alpha: 0.5,
+                  ),
+                  selectedColor: scheme.onSecondaryContainer,
+                  trailing: isAutomaticLocalSelected
+                      ? const Icon(Symbols.check)
+                      : null,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: AppRadius.smCircular,
+                  ),
+                  onTap: localActionsEnabled && !isAutomaticLocalSelected
+                      ? _restoreAutomaticLocalLyric
+                      : null,
+                ),
               ),
               const Divider(),
               Flexible(
@@ -1290,24 +1304,30 @@ class _ManualSearchTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final selected = _isSavedLyricResult(audio.path, searchResult);
-    return ListTile(
-      title: Text(searchResult.title),
-      subtitle: Text('${searchResult.artists} - ${searchResult.album}'),
-      selected: selected,
-      selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.5),
-      selectedColor: scheme.onSecondaryContainer,
-      trailing: isApplying
-          ? const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : _buildLyricResultTrailing(
-              context,
-              selected: selected,
-              lyricType: searchResult.lyricType,
-            ),
-      onTap: enabled ? onTap : null,
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        title: Text(searchResult.title),
+        subtitle: Text('${searchResult.artists} - ${searchResult.album}'),
+        selected: selected,
+        selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.5),
+        selectedColor: scheme.onSecondaryContainer,
+        trailing: isApplying
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : _buildLyricResultTrailing(
+                context,
+                selected: selected,
+                lyricType: searchResult.lyricType,
+              ),
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        onTap: enabled ? onTap : null,
+      ),
     );
   }
 }
@@ -1338,69 +1358,74 @@ class _SearchResultItem extends StatelessWidget {
       ResultSource.amll => 'AMLL',
     };
 
-    return ListTile(
-      selected: selected,
-      selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.5),
-      selectedColor: scheme.onSecondaryContainer,
-      trailing: isApplying
-          ? const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : selected
-          ? const Icon(Symbols.check)
-          : null,
-      onTap: enabled ? onTap : null,
-      leading: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            constraints: const BoxConstraints(minWidth: 36),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primaryContainer,
-              borderRadius: AppRadius.xsCircular,
-            ),
-            child: Text(
-              sourceText,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: AppType.microlabel,
-                fontWeight: AppType.weightSemibold,
-                color: Theme.of(context).colorScheme.onPrimaryContainer,
-              ),
-            ),
-          ),
-          if (searchResult.lyricType != null) ...[
-            const SizedBox(height: 3),
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        selected: selected,
+        selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.5),
+        selectedColor: scheme.onSecondaryContainer,
+        trailing: isApplying
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : selected
+            ? const Icon(Symbols.check)
+            : null,
+        onTap: enabled ? onTap : null,
+        leading: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
             Container(
+              constraints: const BoxConstraints(minWidth: 36),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.secondaryContainer,
+                color: Theme.of(context).colorScheme.primaryContainer,
                 borderRadius: AppRadius.xsCircular,
               ),
               child: Text(
-                searchResult.lyricType!,
+                sourceText,
+                textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: AppType.microlabel,
                   fontWeight: AppType.weightSemibold,
-                  color: Theme.of(context).colorScheme.onSecondaryContainer,
+                  color: Theme.of(context).colorScheme.onPrimaryContainer,
                 ),
               ),
             ),
+            if (searchResult.lyricType != null) ...[
+              const SizedBox(height: 3),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.secondaryContainer,
+                  borderRadius: AppRadius.xsCircular,
+                ),
+                child: Text(
+                  searchResult.lyricType!,
+                  style: TextStyle(
+                    fontSize: AppType.microlabel,
+                    fontWeight: AppType.weightSemibold,
+                    color: Theme.of(context).colorScheme.onSecondaryContainer,
+                  ),
+                ),
+              ),
+            ],
           ],
-        ],
-      ),
-      title: Text(
-        searchResult.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: Text(
-        '${searchResult.artists} - ${searchResult.album}',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+        ),
+        title: Text(
+          searchResult.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          '${searchResult.artists} - ${searchResult.album}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
     );
   }

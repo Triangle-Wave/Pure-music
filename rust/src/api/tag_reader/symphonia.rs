@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use flutter_rust_bridge::frb;
 use symphonia::core::meta::{MetadataContainer, RawValue, StandardTag, Tag as SymphoniaTag};
 
 use super::{join_deduped, optional_nonempty, parse_alternative_number};
@@ -23,6 +24,10 @@ pub(super) struct SymphoniaMetadata {
     pub(super) artist: Option<String>,
     pub(super) album: Option<String>,
     pub(super) album_artist: Option<String>,
+    pub(super) genre: Option<String>,
+    pub(super) year: Option<String>,
+    pub(super) composer: Option<String>,
+    pub(super) bpm: Option<String>,
     pub(super) track: Option<u32>,
     pub(super) disc: Option<u32>,
     pub(super) duration: u64,
@@ -34,11 +39,16 @@ pub(super) struct SymphoniaMetadata {
 }
 
 #[derive(Default)]
-pub struct SymphoniaTagCollection {
+#[frb(ignore)]
+struct SymphoniaTagCollection {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
     pub album_artist: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<String>,
+    pub composer: Option<String>,
+    pub bpm: Option<String>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub items: Vec<(String, String)>,
@@ -120,6 +130,18 @@ fn collect_symphonia_tags(container: &MetadataContainer, tags: &mut SymphoniaTag
             "album" | "talb" | "©alb" => merge_symphonia_field(&mut tags.album, value),
             "albumartist" | "album artist" | "albumartistname" | "tpe2" | "aart" => {
                 merge_symphonia_field(&mut tags.album_artist, value)
+            }
+            "genre" | "tcon" => merge_symphonia_field(&mut tags.genre, value),
+            "year" | "recordingyear" | "recordingdate" | "date" | "tdrc" | "tyer" => {
+                if tags.year.is_none() {
+                    tags.year = Some(value);
+                }
+            }
+            "composer" | "tcom" => merge_symphonia_field(&mut tags.composer, value),
+            "bpm" | "tbpm" => {
+                if tags.bpm.is_none() {
+                    tags.bpm = Some(value);
+                }
             }
             "track" | "tracknumber" | "trck" | "trkn" => {
                 tags.track_number = parse_alternative_number(&value);
@@ -206,6 +228,10 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
             tags.artist = track_tags.artist.or(tags.artist);
             tags.album = track_tags.album.or(tags.album);
             tags.album_artist = track_tags.album_artist.or(tags.album_artist);
+            tags.genre = track_tags.genre.or(tags.genre);
+            tags.year = track_tags.year.or(tags.year);
+            tags.composer = track_tags.composer.or(tags.composer);
+            tags.bpm = track_tags.bpm.or(tags.bpm);
             tags.track_number = track_tags.track_number.or(tags.track_number);
             tags.disc_number = track_tags.disc_number.or(tags.disc_number);
             tags.items.extend(track_tags.items);
@@ -231,6 +257,10 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
         artist: tags.artist,
         album: tags.album,
         album_artist: tags.album_artist,
+        genre: tags.genre,
+        year: tags.year,
+        composer: tags.composer,
+        bpm: tags.bpm,
         track: tags.track_number,
         disc: tags.disc_number,
         duration,

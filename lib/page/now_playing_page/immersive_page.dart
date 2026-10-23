@@ -395,18 +395,22 @@ class _ImmersiveCoverThumbnailState extends State<_ImmersiveCoverThumbnail> {
     );
 
     final cover = _cover == null
-        ? Center(child: placeholder)
-        : ClipRRect(
-            borderRadius: AppRadius.mdCircular,
-            child: Image(
-              image: _cover!,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              filterQuality: FilterQuality.high,
-              errorBuilder: (_, _, _) => Center(child: placeholder),
-            ),
+        ? ColoredBox(
+            color: scheme.surfaceContainerHighest.withValues(alpha: 0.28),
+            child: Center(child: placeholder),
+          )
+        : Image(
+            image: _cover!,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.high,
+            errorBuilder: (_, _, _) => Center(child: placeholder),
           );
-    return _PlaybackCoverScale(child: cover);
+    return _PlaybackCoverMotion(
+      rotate: AppSettings.instance.circlePlaybackCover,
+      identity: playbackService.nowPlaying?.path,
+      child: _PlaybackCoverFrame(scheme: scheme, child: cover),
+    );
   }
 }
 

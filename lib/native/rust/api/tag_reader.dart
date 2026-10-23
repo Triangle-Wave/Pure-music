@@ -7,7 +7,6 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'tag_reader/extra_metadata.dart';
 import 'tag_reader/index_state.dart';
-
 export 'tag_reader/extra_metadata.dart';
 export 'tag_reader/index_state.dart';
 

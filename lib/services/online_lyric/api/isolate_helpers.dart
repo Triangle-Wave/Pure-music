@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 
@@ -32,38 +31,58 @@ const _kgApiHeaders = {
   'Accept': 'application/json,text/plain,*/*',
 };
 
+final _networkRequestScopeKey = Object();
+
+class _NetworkRequestScope {
+  final _clients = <HttpClient>{};
+  var _closed = false;
+
+  void add(HttpClient client) {
+    if (_closed) {
+      client.close(force: true);
+      return;
+    }
+    _clients.add(client);
+  }
+
+  void remove(HttpClient client) {
+    _clients.remove(client);
+  }
+
+  void close() {
+    _closed = true;
+    for (final client in _clients) {
+      client.close(force: true);
+    }
+    _clients.clear();
+  }
+}
+
 Future<T> _runCancelable<T>(
   Future<T> Function() operation, {
   required Duration timeout,
   required T timeoutValue,
-}) async {
-  if (timeout <= Duration.zero) return timeoutValue;
-  final receivePort = ReceivePort();
-  final isolate = await Isolate.spawn(_runCancelableEntry<T>, (
-    sendPort: receivePort.sendPort,
-    operation: operation,
-  ));
-  try {
-    final result = await receivePort.first.timeout(timeout);
-    if (result case (true, final T value)) return value;
-    throw StateError((result as (bool, Object?)).$2.toString());
-  } on TimeoutException {
-    return timeoutValue;
-  } finally {
-    isolate.kill(priority: Isolate.immediate);
-    receivePort.close();
-  }
+}) {
+  if (timeout <= Duration.zero) return Future<T>.value(timeoutValue);
+  final scope = _NetworkRequestScope();
+  return runZoned<Future<T>>(() async {
+    try {
+      return await operation().timeout(
+        timeout,
+        onTimeout: () {
+          scope.close();
+          return timeoutValue;
+        },
+      );
+    } finally {
+      // 首个镜像命中后，主动停止仍在跑的并行请求。
+      scope.close();
+    }
+  }, zoneValues: {_networkRequestScopeKey: scope});
 }
 
-Future<void> _runCancelableEntry<T>(
-  ({SendPort sendPort, Future<T> Function() operation}) message,
-) async {
-  try {
-    message.sendPort.send((true, await message.operation()));
-  } catch (error, trace) {
-    message.sendPort.send((false, '$error\n$trace'));
-  }
-}
+_NetworkRequestScope? get _networkRequestScope =>
+    Zone.current[_networkRequestScopeKey] as _NetworkRequestScope?;
 
 Duration _effectiveTimeout(Duration? requested, Duration fallback) {
   if (requested == null) return fallback;
@@ -132,9 +151,11 @@ Future<String?> _httpPost(
   Map<String, String> headers,
 ) async {
   HttpClient? client;
+  final scope = _networkRequestScope;
   try {
     final uri = Uri.parse(urlStr);
     client = HttpClient();
+    scope?.add(client);
     client.connectionTimeout = const Duration(seconds: 4);
     final request = await client.postUrl(uri);
     for (final entry in headers.entries) {
@@ -147,6 +168,7 @@ Future<String?> _httpPost(
   } catch (_) {
     return null;
   } finally {
+    if (client != null) scope?.remove(client);
     client?.close(force: true);
   }
 }
@@ -373,6 +395,7 @@ Future<String?> _httpGet(
   String? uriSuffix,
 }) async {
   HttpClient? client;
+  final scope = _networkRequestScope;
   try {
     Uri uri;
     if (uriSuffix != null) {
@@ -381,6 +404,7 @@ Future<String?> _httpGet(
       uri = Uri.parse(urlStr).replace(queryParameters: queryParameters);
     }
     client = HttpClient();
+    scope?.add(client);
     client.connectionTimeout = const Duration(seconds: 4);
     final request = await client.getUrl(uri);
     request.headers.removeAll(HttpHeaders.acceptEncodingHeader);
@@ -395,6 +419,7 @@ Future<String?> _httpGet(
   } catch (_) {
     return null;
   } finally {
+    if (client != null) scope?.remove(client);
     client?.close(force: true);
   }
 }

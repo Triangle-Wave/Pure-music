@@ -10,7 +10,7 @@ import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/stats_page/stats_shared.dart';
 import 'package:pure_music/play_service/play_service.dart';
 
-/// 单曲榜单 tab：最常播放 Top100 + 从未播放，右下角定位/回顶按钮。
+/// 单曲榜单 tab：最常播放 Top100，右下角定位/回顶按钮。
 class RankedTab extends StatefulWidget {
   const RankedTab({
     super.key,
@@ -31,7 +31,6 @@ class RankedTab extends StatefulWidget {
 
 class _RankedTabState extends State<RankedTab> {
   static const _rankedTrackExtent = 68.0;
-  static const _unheardPreviewLimit = 8;
 
   final _scrollController = SmoothScrollController();
   double _rankedLeadingExtent = 0;
@@ -47,7 +46,9 @@ class _RankedTabState extends State<RankedTab> {
     final nowPlaying = PlayService.instance.playbackService.nowPlaying;
     final ranked = widget.rankedTracks;
     if (nowPlaying == null || ranked.isEmpty) return null;
-    final targetAt = ranked.indexWhere((entry) => entry.path == nowPlaying.path);
+    final targetAt = ranked.indexWhere(
+      (entry) => entry.path == nowPlaying.path,
+    );
     return targetAt < 0 ? null : targetAt;
   }
 
@@ -89,7 +90,6 @@ class _RankedTabState extends State<RankedTab> {
     final stacked =
         AppSettings.instance.enableStackedScrollEffect &&
         !MediaQuery.disableAnimationsOf(context);
-    final library = AudioLibrary.instance;
     return Stack(
       children: [
         Positioned.fill(
@@ -105,8 +105,9 @@ class _RankedTabState extends State<RankedTab> {
                 ),
               ),
               ..._rankedSlivers(scheme, stacked),
-              ..._unheardSlivers(scheme, library),
-              const SliverToBoxAdapter(child: SizedBox(height: Spacing.bottomNav)),
+              const SliverToBoxAdapter(
+                child: SizedBox(height: Spacing.bottomNav),
+              ),
             ],
           ),
         ),
@@ -195,34 +196,6 @@ class _RankedTabState extends State<RankedTab> {
     ];
   }
 
-  List<Widget> _unheardSlivers(ColorScheme scheme, AudioLibrary library) {
-    final unheard = [
-      for (final audio in library.audioCollection)
-        if (audio.playCount <= 0) audio,
-    ];
-    if (unheard.isEmpty) return const [];
-    unheard.sort((a, b) {
-      final byCreated = a.created.compareTo(b.created);
-      return byCreated != 0 ? byCreated : a.title.compareTo(b.title);
-    });
-    final preview = unheard.take(_unheardPreviewLimit).toList(growable: false);
-    final subtitle = unheard.length > preview.length
-        ? '共 ${unheard.length} 首，入库较早的 ${preview.length} 首'
-        : '${preview.length} 首曲目';
-    return [
-      SliverToBoxAdapter(
-        child: statsSectionTitle(context, title: '从未播放', subtitle: subtitle),
-      ),
-      SliverToBoxAdapter(
-        child: StackedEffectScope(
-          child: Column(
-            children: [for (final audio in preview) _buildUnheardRow(scheme, library, audio)],
-          ),
-        ),
-      ),
-    ];
-  }
-
   Widget _buildRow(
     ColorScheme scheme,
     rust_library_db.PlayCountEntry entry, {
@@ -235,9 +208,12 @@ class _RankedTabState extends State<RankedTab> {
     return DirectionalListItemEntrance(
       identity: entry.path,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 2),
-        child: SizedBox(
-          height: 64,
+        padding: const EdgeInsets.symmetric(
+          horizontal: Spacing.sm,
+          vertical: 2,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 64),
           child: Material(
             color: Colors.transparent,
             borderRadius: AppRadius.smCircular,
@@ -247,7 +223,7 @@ class _RankedTabState extends State<RankedTab> {
               onTap: audio == null ? null : () => playAudio(library, audio),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final modeWidth = SidebarMotionScope.layoutWidthOf(
+                  final modeWidth = SidebarMotionScope.contentWidthOf(
                     context,
                     constraints.maxWidth,
                   );
@@ -311,13 +287,16 @@ class _RankedTabState extends State<RankedTab> {
   Widget _rankLabel(ColorScheme scheme, int index) {
     return SizedBox(
       width: 36,
-      child: Text(
-        '${index + 1}',
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          fontSize: AppType.caption,
-          fontWeight: index < 3 ? AppType.weightBold : AppType.weightRegular,
-          color: index < 3 ? scheme.primary : scheme.onSurfaceVariant,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          '${index + 1}',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: AppType.caption,
+            fontWeight: index < 3 ? AppType.weightBold : AppType.weightRegular,
+            color: index < 3 ? scheme.primary : scheme.onSurfaceVariant,
+          ),
         ),
       ),
     );
@@ -361,6 +340,9 @@ class _RankedTabState extends State<RankedTab> {
         children: [
           Text(
             '${formatCount(count)} 次',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
             style: TextStyle(
               fontSize: AppType.body,
               fontWeight: AppType.weightSemibold,
@@ -380,47 +362,6 @@ class _RankedTabState extends State<RankedTab> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildUnheardRow(
-    ColorScheme scheme,
-    AudioLibrary library,
-    Audio audio,
-  ) {
-    return DirectionalListItemEntrance(
-      identity: audio.path,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 2),
-        child: SizedBox(
-          height: 64,
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: AppRadius.smCircular,
-            child: InkWell(
-              hoverColor: scheme.onSurface.withValues(alpha: Alpha.hover),
-              borderRadius: AppRadius.smCircular,
-              onTap: () => playAudio(library, audio),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
-                child: Row(
-                  children: [
-                    StatsCover(audio: audio),
-                    const SizedBox(width: Spacing.md),
-                    Expanded(
-                      child: _titleArtistTexts(
-                        scheme,
-                        audio.title,
-                        audio.artist,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }

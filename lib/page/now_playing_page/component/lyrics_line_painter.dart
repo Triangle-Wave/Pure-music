@@ -322,11 +322,24 @@ double lyricCosineLiftPx({
   return -(factor * maxLift);
 }
 
+@visibleForTesting
+double lyricFollowLiftCursor({
+  required double target,
+  required double previous,
+  required double fontSize,
+  required bool restoreFromPlayback,
+}) {
+  if (restoreFromPlayback) return target;
+  final limit = fontSize * 0.45;
+  return previous + (target - previous).clamp(-limit, limit);
+}
+
 class LyricCharLiftCache {
   List<double> values = const [];
   List<double> effectProgress = const [];
   double? cursor;
   final Map<int, double> rowCursors = {};
+  bool restoreCursorFromPlayback = false;
 
   void resetCursor() {
     cursor = null;
@@ -832,9 +845,12 @@ class LyricsLinePainter extends CustomPainter {
     final cache = liftCache;
     if (cache == null) return target;
     final prev = cache.rowCursors[row] ?? originX;
-    final limit = fontSize * 0.45;
-    final step = (target - prev).clamp(-limit, limit);
-    final next = prev + step;
+    final next = lyricFollowLiftCursor(
+      target: target,
+      previous: prev,
+      fontSize: fontSize,
+      restoreFromPlayback: cache.restoreCursorFromPlayback,
+    );
     cache.rowCursors[row] = next;
     return next;
   }
@@ -1914,6 +1930,7 @@ class LyricsLinePainter extends CustomPainter {
     debugLyricCharYLifts = [for (final info in charInfos) info.yLift];
     if (isMainVocalActive) {
       _captureCharLifts(charInfos);
+      liftCache?.restoreCursorFromPlayback = false;
     }
 
     // ── Post-original sub-tracks ─────────────────────────────────────────────

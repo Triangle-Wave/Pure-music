@@ -299,19 +299,26 @@ class AudioFolderTile extends StatelessWidget {
           enabled:
               view == ContentView.table &&
               AppSettings.instance.enableInteractiveSurfaceMotion,
-          child: InkWell(
-            borderRadius: AppRadius.smCircular,
-            onTap: () =>
-                context.push(app_paths.FOLDER_DETAIL_PAGE, extra: audioFolder),
-            onSecondaryTapDown: (details) {
-              controller.open(position: details.localPosition);
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 16.0,
-                vertical: 10.0,
+          child: Material(
+            type: MaterialType.transparency,
+            shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+            clipBehavior: Clip.hardEdge,
+            child: InkWell(
+              borderRadius: AppRadius.smCircular,
+              onTap: () => context.push(
+                app_paths.FOLDER_DETAIL_PAGE,
+                extra: audioFolder,
               ),
-              child: _row(scheme),
+              onSecondaryTapDown: (details) {
+                controller.open(position: details.localPosition);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 10.0,
+                ),
+                child: _row(scheme),
+              ),
             ),
           ),
         ),

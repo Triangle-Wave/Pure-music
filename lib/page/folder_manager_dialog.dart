@@ -630,26 +630,36 @@ class _ManagedFolderTile extends StatelessWidget {
     );
 
     if (tree.children.isEmpty) {
-      return ListTile(
-        title: title,
-        subtitle: Text('${tree.displayAudioCount} 首乐曲'),
-        trailing: removeButton,
+      return Material(
+        type: MaterialType.transparency,
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        clipBehavior: Clip.hardEdge,
+        child: ListTile(
+          title: title,
+          subtitle: Text('${tree.displayAudioCount} 首乐曲'),
+          trailing: removeButton,
+        ),
       );
     }
 
-    return ExpansionTile(
-      initiallyExpanded: tree.pendingFolderCount > 0,
-      controlAffinity: ListTileControlAffinity.leading,
-      childrenPadding: const EdgeInsets.only(left: 20),
-      title: title,
-      subtitle: Text(
-        '${tree.children.length} 个子文件夹 · ${tree.displayAudioCount} 首乐曲',
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ExpansionTile(
+        initiallyExpanded: tree.pendingFolderCount > 0,
+        controlAffinity: ListTileControlAffinity.leading,
+        childrenPadding: const EdgeInsets.only(left: 20),
+        title: title,
+        subtitle: Text(
+          '${tree.children.length} 个子文件夹 · ${tree.displayAudioCount} 首乐曲',
+        ),
+        trailing: removeButton,
+        children: [
+          for (final child in tree.children)
+            _FolderTreeTile(node: child, onRemoveFolder: onRemoveFolder),
+        ],
       ),
-      trailing: removeButton,
-      children: [
-        for (final child in tree.children)
-          _FolderTreeTile(node: child, onRemoveFolder: onRemoveFolder),
-      ],
     );
   }
 }
@@ -686,28 +696,38 @@ class _FolderTreeTile extends StatelessWidget {
     );
 
     if (node.children.isEmpty) {
-      return ListTile(
-        dense: true,
-        title: title,
-        subtitle: Text('${node.displayAudioCount} 首乐曲'),
-        trailing: removeButton,
+      return Material(
+        type: MaterialType.transparency,
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        clipBehavior: Clip.hardEdge,
+        child: ListTile(
+          dense: true,
+          title: title,
+          subtitle: Text('${node.displayAudioCount} 首乐曲'),
+          trailing: removeButton,
+        ),
       );
     }
 
-    return ExpansionTile(
-      dense: true,
-      initiallyExpanded: node.pendingFolderCount > 0,
-      controlAffinity: ListTileControlAffinity.leading,
-      childrenPadding: const EdgeInsets.only(left: 20),
-      title: title,
-      subtitle: Text(
-        '${node.children.length} 个子文件夹 · ${node.displayAudioCount} 首乐曲',
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ExpansionTile(
+        dense: true,
+        initiallyExpanded: node.pendingFolderCount > 0,
+        controlAffinity: ListTileControlAffinity.leading,
+        childrenPadding: const EdgeInsets.only(left: 20),
+        title: title,
+        subtitle: Text(
+          '${node.children.length} 个子文件夹 · ${node.displayAudioCount} 首乐曲',
+        ),
+        trailing: removeButton,
+        children: [
+          for (final child in node.children)
+            _FolderTreeTile(node: child, onRemoveFolder: onRemoveFolder),
+        ],
       ),
-      trailing: removeButton,
-      children: [
-        for (final child in node.children)
-          _FolderTreeTile(node: child, onRemoveFolder: onRemoveFolder),
-      ],
     );
   }
 }

@@ -1867,36 +1867,42 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
 
   Widget _resultTile(ColorScheme scheme, _LyricSearchItem item) {
     final isFetching = _fetchingItem == item;
-    return ListTile(
-      dense: true,
-      title: Text(
-        item.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: AppType.body, color: scheme.onSurface),
-      ),
-      subtitle: Text(
-        '${item.artist}${item.album.isNotEmpty ? ' · ${item.album}' : ''}',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: AppType.caption,
-          color: scheme.onSurfaceVariant,
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        dense: true,
+        title: Text(
+          item.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: AppType.body, color: scheme.onSurface),
         ),
+        subtitle: Text(
+          '${item.artist}${item.album.isNotEmpty ? ' · ${item.album}' : ''}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: AppType.caption,
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        trailing: isFetching
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : IconButton(
+                tooltip: '直接写入标签',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Symbols.task_alt, size: 18),
+                onPressed: () => _selectResult(item, writeDirectly: true),
+              ),
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        onTap: isFetching ? null : () => _selectResult(item),
       ),
-      trailing: isFetching
-          ? const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : IconButton(
-              tooltip: '直接写入标签',
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Symbols.task_alt, size: 18),
-              onPressed: () => _selectResult(item, writeDirectly: true),
-            ),
-      onTap: isFetching ? null : () => _selectResult(item),
     );
   }
 
@@ -2287,17 +2293,22 @@ class _CoverSearchDialogState extends State<_CoverSearchDialog> {
     return Tooltip(
       message:
           '${item.title}\n${item.artist}${item.album.isNotEmpty ? '\n${item.album}' : ''}',
-      child: InkWell(
-        onTap: _isDownloading ? null : () => _selectResult(item),
-        borderRadius: AppRadius.smCircular,
-        child: ClipRRect(
+      child: Material(
+        type: MaterialType.transparency,
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        clipBehavior: Clip.hardEdge,
+        child: InkWell(
+          onTap: _isDownloading ? null : () => _selectResult(item),
           borderRadius: AppRadius.smCircular,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              _coverNetworkImage(scheme, item),
-              if (size != null) _coverSizeBadge(size),
-            ],
+          child: ClipRRect(
+            borderRadius: AppRadius.smCircular,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _coverNetworkImage(scheme, item),
+                if (size != null) _coverSizeBadge(size),
+              ],
+            ),
           ),
         ),
       ),

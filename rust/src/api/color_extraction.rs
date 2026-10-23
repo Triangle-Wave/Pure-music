@@ -13,7 +13,8 @@ const MIN_RELATED_CLUSTER_PERCENTAGE: f32 = 0.0075;
 const RELATED_COLOR_DISTANCE: f32 = 38.0;
 const DOMINANT_FAMILY_CHROMA_DISTANCE: f32 = 8.0;
 
-pub fn extract_colors_from_image(image_bytes: Vec<u8>, num_colors: i32) -> Vec<u32> {
+#[cfg(test)]
+fn extract_colors_from_image(image_bytes: Vec<u8>, num_colors: i32) -> Vec<u32> {
     let num_colors = num_colors.clamp(2, 8) as usize;
     match _extract_colors_from_image(image_bytes, num_colors) {
         Ok(colors) => colors,
@@ -24,6 +25,7 @@ pub fn extract_colors_from_image(image_bytes: Vec<u8>, num_colors: i32) -> Vec<u
     }
 }
 
+#[cfg(test)]
 fn _extract_colors_from_image(
     image_bytes: Vec<u8>,
     num_colors: usize,

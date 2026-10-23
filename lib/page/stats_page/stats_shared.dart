@@ -37,15 +37,10 @@ String formatDuration(int seconds) {
   return '$minutes 分钟';
 }
 
-/// epoch 秒格式化为“M月D日”。
-String formatDay(int epochSeconds) {
-  final date = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
-  return '${date.month}月${date.day}日';
-}
-
 /// frb 严格 Int64List（元素为 BigInt）转普通 int 列表。
-List<int> toIntList(Iterable<BigInt> values) =>
-    [for (final value in values) value.toInt()];
+List<int> toIntList(Iterable<BigInt> values) => [
+  for (final value in values) value.toInt(),
+];
 
 void playAudio(AudioLibrary library, Audio audio) {
   final audioIndex = library.audioCollection.indexOf(audio);
@@ -66,7 +61,7 @@ class NamedPlayStat {
 List<NamedPlayStat> buildTopArtists(
   List<Audio> audios,
   List<rust_library_db.PlayCountEntry>? entries, {
-  required int limit,
+  int? limit,
 }) {
   final counts = <String, int>{};
   final source = entries == null
@@ -85,11 +80,7 @@ List<NamedPlayStat> buildTopArtists(
     for (final artist in artists) {
       final name = artist.trim();
       if (name.isEmpty) continue;
-      counts.update(
-        name,
-        (value) => value + item.$3,
-        ifAbsent: () => item.$3,
-      );
+      counts.update(name, (value) => value + item.$3, ifAbsent: () => item.$3);
     }
   }
   return _sortedNamed(counts, limit);
@@ -98,7 +89,7 @@ List<NamedPlayStat> buildTopArtists(
 List<NamedPlayStat> buildTopAlbums(
   List<Audio> audios,
   List<rust_library_db.PlayCountEntry>? entries, {
-  required int limit,
+  int? limit,
 }) {
   final counts = <String, int>{};
   final source = entries == null
@@ -116,7 +107,7 @@ List<NamedPlayStat> buildTopAlbums(
   return _sortedNamed(counts, limit);
 }
 
-List<NamedPlayStat> _sortedNamed(Map<String, int> counts, int limit) {
+List<NamedPlayStat> _sortedNamed(Map<String, int> counts, int? limit) {
   final result =
       counts.entries
           .map((entry) => NamedPlayStat(entry.key, entry.value))
@@ -125,6 +116,7 @@ List<NamedPlayStat> _sortedNamed(Map<String, int> counts, int limit) {
           final byCount = b.playCount.compareTo(a.playCount);
           return byCount != 0 ? byCount : a.name.compareTo(b.name);
         });
+  if (limit == null) return result;
   return result.take(limit).toList(growable: false);
 }
 
@@ -143,21 +135,31 @@ Widget statsSectionTitle(
       Spacing.sm,
     ),
     child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          title,
-          style: TextStyle(
-            fontSize: AppType.sectionTitle,
-            fontWeight: AppType.weightSemibold,
-            color: scheme.onSurface,
+        Flexible(
+          child: Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: AppType.sectionTitle,
+              fontWeight: AppType.weightSemibold,
+              color: scheme.onSurface,
+            ),
           ),
         ),
-        const Spacer(),
-        Text(
-          subtitle,
-          style: TextStyle(
-            fontSize: AppType.caption,
-            color: scheme.onSurfaceVariant,
+        const SizedBox(width: Spacing.sm),
+        Flexible(
+          child: Text(
+            subtitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              fontSize: AppType.caption,
+              color: scheme.onSurfaceVariant,
+            ),
           ),
         ),
       ],
@@ -235,7 +237,7 @@ Widget statsSplitRow(
 }) {
   return LayoutBuilder(
     builder: (context, constraints) {
-      final modeWidth = SidebarMotionScope.layoutWidthOf(
+      final modeWidth = SidebarMotionScope.contentWidthOf(
         context,
         constraints.maxWidth,
       );
@@ -274,13 +276,17 @@ Widget buildMetricGrid(
     listenable: AppSettings.listMotionNotifier,
     builder: (context, _) => LayoutBuilder(
       builder: (context, constraints) {
-        final modeWidth = SidebarMotionScope.layoutWidthOf(
+        final modeWidth = SidebarMotionScope.contentWidthOf(
           context,
           constraints.maxWidth,
         );
         final columns =
             columnsFor?.call(modeWidth) ??
-            (modeWidth >= 1000 ? 4 : modeWidth >= 520 ? 2 : 1);
+            (modeWidth >= 1000
+                ? 4
+                : modeWidth >= 520
+                ? 2
+                : 1);
         final width =
             (constraints.maxWidth - (columns - 1) * Spacing.sm) / columns;
         return Wrap(
@@ -304,40 +310,42 @@ Widget buildMetricTile(
   final scheme = Theme.of(context).colorScheme;
   return SizedBox(
     width: width,
-    height: 68,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              borderRadius: AppRadius.smCircular,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 68),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: AppRadius.smCircular,
+              ),
+              child: Icon(icon, size: 20, color: color),
             ),
-            child: Icon(icon, size: 20, color: color),
-          ),
-          const SizedBox(width: Spacing.md),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                AnimatedMetricValue(value, color: scheme.onSurface),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: AppType.caption,
-                    color: scheme.onSurfaceVariant,
+            const SizedBox(width: Spacing.md),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AnimatedMetricValue(value, color: scheme.onSurface),
+                  Text(
+                    label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: AppType.caption,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     ),
   );
@@ -438,11 +446,15 @@ Widget _namedWrap(
   void Function(String name) onTap,
   BoxConstraints constraints,
 ) {
-  final modeWidth = SidebarMotionScope.layoutWidthOf(
+  final modeWidth = SidebarMotionScope.contentWidthOf(
     context,
     constraints.maxWidth,
   );
-  final columns = modeWidth >= 980 ? 3 : modeWidth >= 560 ? 2 : 1;
+  final columns = modeWidth >= 980
+      ? 3
+      : modeWidth >= 560
+      ? 2
+      : 1;
   final width = (constraints.maxWidth - (columns - 1) * Spacing.lg) / columns;
   final maxPlays = items.first.playCount;
   return Wrap(
@@ -612,73 +624,138 @@ class _StatsCoverState extends State<StatsCover> {
   }
 }
 
-/// 趋势数据点：x 轴标签与数值。
+/// 趋势数据点：x 轴标签、数值与悬停时显示的完整说明。
 class TrendPoint {
-  const TrendPoint(this.label, this.value);
+  const TrendPoint(this.label, this.value, this.fullLabel);
 
   final String label;
   final int value;
+  final String fullLabel;
 }
 
-List<TrendPoint> buildDailyTrend(List<rust_library_db.DayCount> daily) {
-  final days = _sortedDaily(daily);
-  if (days.isEmpty) return const [];
-  final counts = {for (final d in days) d.day: d.count};
-  final first = _dayOnly(DateTime.parse(days.first.day));
-  final last = _dayOnly(DateTime.parse(days.last.day));
-  final points = <TrendPoint>[];
-  for (var date = first; !date.isAfter(last); date = date.add(
-    const Duration(days: 1),
-  )) {
-    points.add(TrendPoint('${date.month}/${date.day}', counts[_dayKey(date)] ?? 0));
+enum StatsPeriodMode { day, week, month }
+
+/// 统计页当前查看的时间段；翻页时只移动 [start]。
+class StatsPeriod {
+  const StatsPeriod(this.mode, this.start);
+
+  final StatsPeriodMode mode;
+  final DateTime start;
+
+  factory StatsPeriod.current(StatsPeriodMode mode) =>
+      StatsPeriod(mode, _startOf(mode, DateTime.now()));
+
+  StatsPeriod shift(int delta) => StatsPeriod(mode, switch (mode) {
+    StatsPeriodMode.day => DateTime(start.year, start.month, start.day + delta),
+    StatsPeriodMode.week => DateTime(
+      start.year,
+      start.month,
+      start.day + delta * 7,
+    ),
+    StatsPeriodMode.month => DateTime(start.year, start.month + delta),
+  });
+
+  DateTime get endExclusive => switch (mode) {
+    StatsPeriodMode.day => DateTime(start.year, start.month, start.day + 1),
+    StatsPeriodMode.week => DateTime(start.year, start.month, start.day + 7),
+    StatsPeriodMode.month => DateTime(start.year, start.month + 1),
+  };
+
+  int get startEpoch => start.millisecondsSinceEpoch ~/ 1000;
+  int get endEpoch => endExclusive.millisecondsSinceEpoch ~/ 1000;
+
+  bool get isCurrent => _sameDay(StatsPeriod.current(mode).start, start);
+
+  String get title {
+    switch (mode) {
+      case StatsPeriodMode.day:
+        final today = _startOf(StatsPeriodMode.day, DateTime.now());
+        final yesterday = DateTime(today.year, today.month, today.day - 1);
+        if (_sameDay(start, today)) return '今天 (${start.month}/${start.day})';
+        if (_sameDay(start, yesterday)) {
+          return '昨天 (${start.month}/${start.day})';
+        }
+        return '${start.month}月${start.day}日 ${_weekdayName(start)}';
+      case StatsPeriodMode.week:
+        final end = DateTime(start.year, start.month, start.day + 6);
+        final range = '${start.month}.${start.day}–${end.month}.${end.day}';
+        return isCurrent ? '本周 ($range)' : range;
+      case StatsPeriodMode.month:
+        return isCurrent
+            ? '本月 (${start.year}年${start.month}月)'
+            : '${start.year}年${start.month}月';
+    }
   }
-  return points;
+
+  String get rangeLabel {
+    switch (mode) {
+      case StatsPeriodMode.day:
+        return '${start.year}年${start.month}月${start.day}日 ${_weekdayName(start)}';
+      case StatsPeriodMode.week:
+        final end = DateTime(start.year, start.month, start.day + 6);
+        return '${start.month}月${start.day}日 – ${end.month}月${end.day}日';
+      case StatsPeriodMode.month:
+        return '${start.year}年${start.month}月';
+    }
+  }
 }
 
-List<TrendPoint> buildWeeklyTrend(List<rust_library_db.DayCount> daily) {
-  final days = _sortedDaily(daily);
-  if (days.isEmpty) return const [];
-  final counts = <String, int>{};
-  for (final d in days) {
-    final monday = _mondayOf(DateTime.parse(d.day));
-    counts.update(
-      _dayKey(monday),
-      (value) => value + d.count,
-      ifAbsent: () => d.count,
-    );
-  }
-  final first = _mondayOf(DateTime.parse(days.first.day));
-  final last = _mondayOf(DateTime.parse(days.last.day));
-  final points = <TrendPoint>[];
-  for (var monday = first; !monday.isAfter(last); monday = monday.add(
-    const Duration(days: 7),
-  )) {
-    points.add(
-      TrendPoint('${monday.month}/${monday.day}', counts[_dayKey(monday)] ?? 0),
-    );
-  }
-  return points;
+DateTime _startOf(StatsPeriodMode mode, DateTime date) => switch (mode) {
+  StatsPeriodMode.day => DateTime(date.year, date.month, date.day),
+  StatsPeriodMode.week => DateTime(
+    date.year,
+    date.month,
+    date.day - (date.weekday - 1),
+  ),
+  StatsPeriodMode.month => DateTime(date.year, date.month),
+};
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+String _weekdayName(DateTime date) {
+  const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  return names[date.weekday - 1];
 }
 
-List<TrendPoint> buildMonthlyTrend(List<rust_library_db.DayCount> daily) {
-  final days = _sortedDaily(daily);
-  if (days.isEmpty) return const [];
-  final counts = <String, int>{};
-  for (final d in days) {
-    final date = DateTime.parse(d.day);
-    final key = '${date.year}-${date.month}';
-    counts.update(key, (value) => value + d.count, ifAbsent: () => d.count);
+String _two(int value) => value.toString().padLeft(2, '0');
+
+/// 当前时段的趋势点：日=24 小时，周=7 天，月=当月每日。
+List<TrendPoint> buildPeriodTrend(
+  StatsPeriod period,
+  rust_library_db.PlayHistoryStats stats,
+) {
+  if (period.mode == StatsPeriodMode.day) {
+    final hourly = toIntList(stats.hourly);
+    return [
+      for (var hour = 0; hour < 24; hour++)
+        TrendPoint(
+          hour % 4 == 0 ? _two(hour) : '',
+          hour < hourly.length ? hourly[hour] : 0,
+          '${_two(hour)}:00 – ${_two((hour + 1) % 24)}:00',
+        ),
+    ];
   }
-  final first = DateTime.parse(days.first.day);
-  final last = DateTime.parse(days.last.day);
+  final counts = {for (final day in stats.daily) day.day: day.count.toInt()};
   final points = <TrendPoint>[];
   for (
-    var month = DateTime(first.year, first.month);
-    !month.isAfter(DateTime(last.year, last.month));
-    month = DateTime(month.year, month.month + 1)
+    var date = period.start;
+    date.isBefore(period.endExclusive);
+    date = DateTime(date.year, date.month, date.day + 1)
   ) {
-    final key = '${month.year}-${month.month}';
-    points.add(TrendPoint('${month.month}月', counts[key] ?? 0));
+    final label = period.mode == StatsPeriodMode.week
+        ? _weekdayName(date)
+        : switch (date.day) {
+            1 || 5 || 10 || 15 || 20 || 25 || 30 => '${date.day}',
+            _ => '',
+          };
+    points.add(
+      TrendPoint(
+        label,
+        counts[_dayKey(date)] ?? 0,
+        '${date.month}月${date.day}日 ${_weekdayName(date)}',
+      ),
+    );
   }
   return points;
 }
@@ -689,13 +766,8 @@ List<rust_library_db.DayCount> _sortedDaily(
 
 DateTime _dayOnly(DateTime date) => DateTime(date.year, date.month, date.day);
 
-DateTime _mondayOf(DateTime date) =>
-    DateTime(date.year, date.month, date.day - (date.weekday - 1));
-
 String _dayKey(DateTime date) =>
-    '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day
-        .toString()
-        .padLeft(2, '0')}';
+    '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 
 /// 连续有播放记录的最长天数。
 int longestStreakDays(List<rust_library_db.DayCount> daily) {

@@ -227,6 +227,12 @@ class BassPlayer {
 
   Timer? _fadeInTimer;
 
+  /// 暂停淡出：淡出完成前不真正暂停，期间可被播放/换源打断
+  Timer? _pauseFadeTimer;
+  int? _pauseFadeHandle;
+  double _pauseFadeGain = 1.0;
+  static const int _pauseFadeMs = 150;
+
   /// 淡出旧流时延迟释放资源的定时器
   Timer? _fadeOutTimer;
   int? _fadeOutHandle;
@@ -288,6 +294,7 @@ class BassPlayer {
   int _positionUpdaterVersion = 0;
   late final StreamController<double> _positionStreamController;
   late final StreamController<Float32List> _spectrumStreamController;
+  late final StreamController<Float32List> _spectrumDisplayStreamController;
   late final StreamController<GaplessTransition>
   _gaplessTransitionStreamController;
   final _playerStateStreamController =
@@ -461,6 +468,7 @@ class BassPlayer {
     if (_fstream == null) {
       return PlayerState.unknown;
     }
+    if (_pauseFadeTimer != null) return PlayerState.paused;
 
     switch (_bass.BASS_ChannelIsActive(_sharedOutputHandle!)) {
       case bass.BASS_ACTIVE_STOPPED:
@@ -496,6 +504,10 @@ class BassPlayer {
 
   Stream<Float32List> get spectrumStream => _spectrumStreamController.stream;
 
+  /// 播放页频谱条用的细分段频谱（与 [spectrumStream] 同源同节奏，互不影响）。
+  Stream<Float32List> get spectrumDisplayStream =>
+      _spectrumDisplayStreamController.stream;
+
   Stream<PlayerState> get playerStateStream =>
       _playerStateStreamController.stream;
 
@@ -523,6 +535,32 @@ class BassPlayer {
   final Int32List _spectrumBandStarts = Int32List(_spectrumBandCount);
   final Int32List _spectrumBandEnds = Int32List(_spectrumBandCount);
   double _spectrumBandsSampleRate = 0.0;
+
+  // 频谱条：32 段、独立平滑与输出缓冲，不与流光那条流互相干扰
+  static const int _displaySpectrumBandCount = 64;
+  final Float32List _displaySpectrumBands = Float32List(
+    _displaySpectrumBandCount,
+  );
+  final Float32List _displaySpectrumSmoothed = Float32List(
+    _displaySpectrumBandCount,
+  );
+  final Float32List _displaySpectrumOutputA = Float32List(
+    _displaySpectrumBandCount,
+  );
+  final Float32List _displaySpectrumOutputB = Float32List(
+    _displaySpectrumBandCount,
+  );
+  bool _useDisplaySpectrumOutputA = true;
+  final Int32List _displaySpectrumBandStarts = Int32List(
+    _displaySpectrumBandCount,
+  );
+  final Int32List _displaySpectrumBandEnds = Int32List(
+    _displaySpectrumBandCount,
+  );
+  double _displaySpectrumBandsSampleRate = 0.0;
+  bool get _hasAnySpectrumListener =>
+      _spectrumStreamController.hasListener ||
+      _spectrumDisplayStreamController.hasListener;
 
   void setSpectrumUpdateMode(SpectrumUpdateMode mode) {
     spectrumUpdateMode = mode;
@@ -590,7 +628,7 @@ class BassPlayer {
     if (_positionStreamController.hasListener) {
       return _computePlayingTickPeriod();
     }
-    if (_spectrumStreamController.hasListener) {
+    if (_hasAnySpectrumListener) {
       return _computeSpectrumTickPeriod();
     }
     return _computeIdleTickPeriod();
@@ -679,7 +717,7 @@ class BassPlayer {
 
   void _maybeUpdateSpectrum({PlayerState? knownState}) {
     if (_fstream == null) return;
-    if (!_spectrumStreamController.hasListener) return;
+    if (!_hasAnySpectrumListener) return;
     final state = knownState ?? playerState;
     if (state != PlayerState.playing) return;
 
@@ -706,7 +744,7 @@ class BassPlayer {
   void _emitSpectrumFrame() {
     final handle = _sharedOutputHandle;
     if (handle == null) return;
-    if (!_spectrumStreamController.hasListener) return;
+    if (!_hasAnySpectrumListener) return;
     final getData = _bassChannelGetData;
     if (getData == null) return;
 
@@ -718,13 +756,11 @@ class BassPlayer {
     );
     if (bytesRead <= 0) return;
 
-    final fft = _fftBuffer!.asTypedList(256);
-    _computeSpectrum8Into(fft, _streamSampleRate, _spectrumBands);
-    _emitSmoothedSpectrum();
+    _emitSpectrumOutputs(_fftBuffer!.asTypedList(256));
   }
 
   void _emitWasapiSpectrumFrame() {
-    if (!_spectrumStreamController.hasListener) return;
+    if (!_hasAnySpectrumListener) return;
 
     _wasapiFftBuffer ??= malloc.allocate<ffi.Float>(
       256 * ffi.sizeOf<ffi.Float>(),
@@ -736,9 +772,7 @@ class BassPlayer {
     // BASS_WASAPI_GetData returns the number of bytes written; negative means error
     if (bytesRead <= 0) return;
 
-    final fft = _wasapiFftBuffer!.asTypedList(256);
-    _computeSpectrum8Into(fft, _streamSampleRate, _spectrumBands);
-    _emitSmoothedSpectrum();
+    _emitSpectrumOutputs(_wasapiFftBuffer!.asTypedList(256));
   }
 
   void _emitSmoothedSpectrum() {
@@ -760,9 +794,23 @@ class BassPlayer {
     _spectrumStreamController.add(out);
   }
 
+  /// 同一帧 FFT 分别发给流光（8 段）与频谱条（64 段），各自只关心自己的监听者。
+  void _emitSpectrumOutputs(Float32List fft) {
+    if (_spectrumStreamController.hasListener) {
+      _computeSpectrum8Into(fft, _streamSampleRate, _spectrumBands);
+      _emitSmoothedSpectrum();
+    }
+    if (_spectrumDisplayStreamController.hasListener) {
+      _computeDisplaySpectrumInto(fft, _streamSampleRate);
+      _emitSmoothedDisplaySpectrum();
+    }
+  }
+
   void _resetSpectrumSmoothing() {
     _spectrumBands.fillRange(0, _spectrumBands.length, 0.0);
     _spectrumSmoothed.fillRange(0, _spectrumSmoothed.length, 0.0);
+    _displaySpectrumBands.fillRange(0, _displaySpectrumBands.length, 0.0);
+    _displaySpectrumSmoothed.fillRange(0, _displaySpectrumSmoothed.length, 0.0);
     _lastSpectrumUpdateUs = 0;
   }
 
@@ -822,6 +870,78 @@ class BassPlayer {
           .clamp(0.0, 1.0)
           .toDouble();
     }
+  }
+
+  void _ensureDisplaySpectrumBandBins(double sampleRate) {
+    const fftSize = 512.0;
+    const minF = 45.0;
+    const maxF = 16000.0;
+    if ((_displaySpectrumBandsSampleRate - sampleRate).abs() < 1e-3 &&
+        _displaySpectrumBandsSampleRate > 0) {
+      return;
+    }
+
+    final nyquist = sampleRate * 0.5;
+    final clampedMaxF = math.min(maxF, nyquist - 1.0);
+    if (clampedMaxF <= minF || nyquist <= 1.0) {
+      for (int i = 0; i < _displaySpectrumBandCount; i++) {
+        _displaySpectrumBandStarts[i] = 1;
+        _displaySpectrumBandEnds[i] = 2;
+      }
+      _displaySpectrumBandsSampleRate = sampleRate;
+      return;
+    }
+
+    final ratio = clampedMaxF / minF;
+    for (int i = 0; i < _displaySpectrumBandCount; i++) {
+      final a = i / _displaySpectrumBandCount;
+      final b = (i + 1) / _displaySpectrumBandCount;
+      final fa = minF * math.pow(ratio, a).toDouble();
+      final fb = minF * math.pow(ratio, b).toDouble();
+      final start = ((fa / sampleRate) * fftSize).floor().clamp(1, 255).toInt();
+      final end = ((fb / sampleRate) * fftSize)
+          .ceil()
+          .clamp(start + 1, 255)
+          .toInt();
+      _displaySpectrumBandStarts[i] = start;
+      _displaySpectrumBandEnds[i] = end;
+    }
+    _displaySpectrumBandsSampleRate = sampleRate;
+  }
+
+  void _computeDisplaySpectrumInto(Float32List fft, double sampleRate) {
+    _ensureDisplaySpectrumBandBins(sampleRate);
+
+    for (int i = 0; i < _displaySpectrumBandCount; i++) {
+      final start = _displaySpectrumBandStarts[i];
+      final end = _displaySpectrumBandEnds[i];
+      double m = 0.0;
+      for (int k = start; k < end; k++) {
+        final v = fft[k];
+        if (v.isFinite && v > m) m = v.toDouble();
+      }
+      _displaySpectrumBands[i] =
+          (math.log(1.0 + m * 18.0) / _spectrumLogDenominator)
+              .clamp(0.0, 1.0)
+              .toDouble();
+    }
+  }
+
+  void _emitSmoothedDisplaySpectrum() {
+    final out = _useDisplaySpectrumOutputA
+        ? _displaySpectrumOutputA
+        : _displaySpectrumOutputB;
+    _useDisplaySpectrumOutputA = !_useDisplaySpectrumOutputA;
+    for (int i = 0; i < _displaySpectrumBandCount; i++) {
+      final target = _displaySpectrumBands[i];
+      final prev = _displaySpectrumSmoothed[i];
+      // 快起慢落，柱条跳动更干脆
+      final a = target > prev ? 0.72 : 0.28;
+      final next = (prev + (target - prev) * a).clamp(0.0, 1.0).toDouble();
+      _displaySpectrumSmoothed[i] = next;
+      out[i] = next;
+    }
+    _spectrumDisplayStreamController.add(out);
   }
 
   void setEQ(int band, double gain) {
@@ -1431,6 +1551,7 @@ class BassPlayer {
   }
 
   void _resetBassHandles() {
+    _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
@@ -1569,6 +1690,10 @@ class BassPlayer {
       onCancel: _syncPositionUpdaterPeriod,
     );
     _spectrumStreamController = StreamController<Float32List>.broadcast(
+      onListen: _syncPositionUpdaterPeriod,
+      onCancel: _syncPositionUpdaterPeriod,
+    );
+    _spectrumDisplayStreamController = StreamController<Float32List>.broadcast(
       onListen: _syncPositionUpdaterPeriod,
       onCancel: _syncPositionUpdaterPeriod,
     );
@@ -1843,14 +1968,14 @@ class BassPlayer {
       _bass.BASS_ChannelSetAttribute(
         current,
         bass.BASS_ATTRIB_VOLDSP,
-        _baseOutputVolume * _sourceGain(_replayGainDb),
+        _baseOutputVolume * _pauseFadeGain * _sourceGain(_replayGainDb),
       );
       return;
     }
     _bass.BASS_ChannelSetAttribute(
       _mixerStream!,
       bass.BASS_ATTRIB_VOLDSP,
-      _baseOutputVolume,
+      _baseOutputVolume * _pauseFadeGain,
     );
     _applySourceGain(current, _replayGainDb);
     final queued = _queuedStream;
@@ -2734,6 +2859,7 @@ class BassPlayer {
 
   /// true: 操作成功；false: 操作失败
   bool useExclusiveMode(bool exclusive) {
+    _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     final prevState = wasapiExclusive;
     if (exclusive == prevState) return true;
@@ -3081,6 +3207,7 @@ class BassPlayer {
   /// if setSource has been called once,
   /// it will pause current channel and free current stream.
   void setSource(String path) {
+    _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     _replayGainDb = null;
     _activeGaplessTransitionId = null;
@@ -3432,6 +3559,7 @@ class BassPlayer {
   }
 
   void _fallbackFromExclusive() {
+    _cancelPendingPause();
     final seekPos = position;
     final sourcePath = _fPath;
     _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
@@ -3476,6 +3604,7 @@ class BassPlayer {
   /// do nothing if [setSource] hasn't been called
   void start() {
     if (_fstream == null) return;
+    _cancelPendingPause();
 
     if (wasapiExclusive) {
       _logAudioState('start(wasapi)');
@@ -3532,18 +3661,75 @@ class BassPlayer {
     }
   }
 
+  void _startWasapiPauseFade() {
+    _pauseFadeHandle = _fstream;
+    _playerStateStreamController.add(PlayerState.paused);
+    _logAudioState('pause(wasapi-fade)');
+    const steps = 8;
+    const stepMs = 18;
+    var step = 0;
+    _pauseFadeTimer = Timer.periodic(
+      const Duration(milliseconds: stepMs),
+      (timer) {
+        step++;
+        _pauseFadeGain = math.max(0.0, 1.0 - step / steps);
+        _applyPlaybackGains();
+        if (step < steps) return;
+        timer.cancel();
+        _finishWasapiPause();
+      },
+    );
+  }
+
+  void _finishWasapiPause() {
+    _pauseFadeTimer = null;
+    final handle = _pauseFadeHandle;
+    _pauseFadeHandle = null;
+    final stopped =
+        handle != null &&
+        _fstream == handle &&
+        _bassWasapi.BASS_WASAPI_Stop(bass.FALSE) == bass.TRUE;
+    _pauseFadeGain = 1.0;
+    _applyPlaybackGains();
+    _playerStateStreamController.add(playerState);
+    _positionUpdater?.cancel();
+    _emitPositionSnapshot();
+    if (stopped) _logAudioState('pause(wasapi-fade-done)');
+  }
+
+  /// 取消待执行的暂停淡出，输出增益立即回到正常
+  void _cancelPendingPause() {
+    _pauseFadeTimer?.cancel();
+    _pauseFadeTimer = null;
+    _pauseFadeHandle = null;
+    if (_pauseFadeGain != 1.0) {
+      _pauseFadeGain = 1.0;
+      _applyPlaybackGains();
+    }
+  }
+
   /// pause channel, call [start] to resume channel
   ///
   /// do nothing if [setSource] hasn't been called
   void pause() {
     if (_fstream == null) return;
+    if (_pauseFadeTimer != null) return;
+
+    final state = playerState;
+    final fading = state == PlayerState.playing || state == PlayerState.stalled;
 
     if (wasapiExclusive) {
       _logAudioState('pause(wasapi)');
-      return _pauseWasapiExclusive();
+      if (!fading) return _pauseWasapiExclusive();
+      return _startWasapiPauseFade();
     }
     _logAudioState('pause(normal)');
 
+    if (!fading) return _pauseSharedImmediate();
+    _startSharedPauseFade();
+  }
+
+  void _pauseSharedImmediate() {
     final output = _sharedOutputHandle!;
     if (_bass.BASS_ChannelPause(output) == 0) {
       switch (_bass.BASS_ErrorGetCode()) {
@@ -3566,6 +3752,47 @@ class BassPlayer {
     _positionUpdater?.cancel();
     _emitPositionSnapshot();
     _logAudioState('pause(done)');
+  }
+
+  void _startSharedPauseFade() {
+    final output = _sharedOutputHandle!;
+    final sliding = _bass.BASS_ChannelSlideAttribute(
+      output,
+      bass.BASS_ATTRIB_VOL,
+      0.0,
+      _pauseFadeMs,
+    );
+    if (sliding == bass.FALSE) {
+      _bass.BASS_ChannelSetAttribute(output, bass.BASS_ATTRIB_VOL, 0.0);
+    }
+    _playerStateStreamController.add(PlayerState.paused);
+    _logAudioState('pause(fade)');
+    _pauseFadeTimer = Timer(
+      const Duration(milliseconds: _pauseFadeMs + 20),
+      _finishSharedPause,
+    );
+  }
+
+  void _finishSharedPause() {
+    _pauseFadeTimer = null;
+    final output = _sharedOutputHandle;
+    if (output == null) return;
+    final paused = _bass.BASS_ChannelPause(output);
+    if (paused == 0) {
+      // 定时器内不能向上抛，记录错误并恢复音量，避免停在 0 音量
+      final code = _bass.BASS_ErrorGetCode();
+      _bass.BASS_ChannelSetAttribute(output, bass.BASS_ATTRIB_VOL, 1.0);
+      _playerStateStreamController.add(playerState);
+      _positionUpdater?.cancel();
+      _emitPositionSnapshot();
+      log.bass.warn('legacy', '[bass] pause(fade) failed: $code');
+      return;
+    }
+    _bass.BASS_ChannelSetAttribute(output, bass.BASS_ATTRIB_VOL, 1.0);
+    _playerStateStreamController.add(PlayerState.paused);
+    _positionUpdater?.cancel();
+    _emitPositionSnapshot();
+    _logAudioState('pause(fade-done)');
   }
 
   /// set channel's position to given [position]
@@ -3689,6 +3916,7 @@ class BassPlayer {
   ///
   /// Also free the bass.dll.
   void free() {
+    _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
@@ -3770,6 +3998,7 @@ class BassPlayer {
     _playerStateStreamController.close();
     _positionStreamController.close();
     _spectrumStreamController.close();
+    _spectrumDisplayStreamController.close();
     _gaplessTransitionStreamController.close();
     if (_fftBuffer != null) {
       malloc.free(_fftBuffer!);

@@ -58,13 +58,16 @@ Future<List<PlayHistoryEntry>> exportPlayHistory({required String indexPath}) =>
 
 /// 播放流水聚合：趋势按日、收听节律按小时、报告按星期×小时。
 /// 日期/小时按本机时区（SQLite localtime）分桶。
-/// `since` 为统计起始时间戳（秒），None 表示不过滤。
+/// `since` 为统计起始时间戳（秒），包含；`until` 为结束时间戳（秒），不包含。
+/// 两者为 None 时对应方向不过滤。
 Future<PlayHistoryStats> getPlayHistoryStats({
   required String indexPath,
   PlatformInt64? since,
+  PlatformInt64? until,
 }) => RustLib.instance.api.crateApiLibraryDbPlayCountsGetPlayHistoryStats(
   indexPath: indexPath,
   since: since,
+  until: until,
 );
 
 /// 导入播放流水。`overwrite` 为 true 时先清空本机流水；

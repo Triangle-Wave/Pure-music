@@ -55,7 +55,7 @@ pub mod index_state;
 pub use index_state::IndexActionState;
 pub use index_state::IndexPhase;
 
-pub mod symphonia;
+mod symphonia;
 use symphonia::read_symphonia_metadata;
 
 mod midi;
@@ -100,6 +100,26 @@ fn estimated_bitrate(path: &Path, duration: u64) -> Option<u32> {
 
 fn optional_nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+pub(super) fn id3_text(tag: &id3::Tag, id: &str) -> Option<String> {
+    optional_nonempty(
+        tag.get(id)
+            .and_then(|frame| frame.content().text())
+            .map(str::to_string),
+    )
+}
+
+fn lofty_text(tag: &Tag, key: &ItemKey) -> Option<String> {
+    optional_nonempty(
+        tag.get(key)
+            .and_then(|item| item.value().text())
+            .map(str::to_string),
+    )
+}
+
+fn lofty_joined_text(tag: &Tag, key: &ItemKey) -> Option<String> {
+    optional_nonempty(Some(join_deduped(tag.get_strings(key))))
 }
 
 fn unknown_if_empty(value: Option<String>) -> String {
@@ -616,7 +636,7 @@ pub fn read_audio_extra_metadata(path: String) -> AudioExtraMetadata {
     }
 }
 
-const CURRENT_INDEX_VERSION: u64 = 111;
+const CURRENT_INDEX_VERSION: u64 = 112;
 const MAX_TAG_READER_WORKERS: usize = 4;
 const RESERVED_LOGICAL_CORES: usize = 2;
 const INDEX_PROGRESS_MIN_BATCH: usize = 16;
@@ -628,6 +648,10 @@ struct Audio {
     artist: String,
     album: String,
     album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<String>,
+    composer: Option<String>,
+    bpm: Option<String>,
     track: Option<u32>,
     disc: Option<u32>,
     /// in secs
@@ -656,6 +680,10 @@ impl Audio {
             artist: "UNKNOWN".to_string(),
             album: "UNKNOWN".to_string(),
             album_artist: None,
+            genre: None,
+            year: None,
+            composer: None,
+            bpm: None,
             track: None,
             disc: None,
             duration: 0,
@@ -677,6 +705,10 @@ impl Audio {
             "artist": self.artist,
             "album": self.album,
             "album_artist": self.album_artist,
+            "genre": self.genre,
+            "year": self.year,
+            "composer": self.composer,
+            "bpm": self.bpm,
             "track": self.track,
             "disc": self.disc,
             "duration": self.duration,
@@ -792,6 +824,12 @@ impl Audio {
                     Some(joined)
                 }
             };
+            let genre = lofty_joined_text(tag, &ItemKey::Genre);
+            let year = lofty_text(tag, &ItemKey::Year)
+                .or_else(|| lofty_text(tag, &ItemKey::RecordingDate));
+            let composer = lofty_joined_text(tag, &ItemKey::Composer);
+            let bpm =
+                lofty_text(tag, &ItemKey::Bpm).or_else(|| lofty_text(tag, &ItemKey::IntegerBpm));
 
             return Some(Audio {
                 title: tag
@@ -804,6 +842,10 @@ impl Audio {
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "UNKNOWN".to_string()),
                 album_artist,
+                genre,
+                year,
+                composer,
+                bpm,
                 track: tag.track(),
                 disc: tag.disk(),
                 duration: properties.duration().as_secs(),
@@ -827,6 +869,10 @@ impl Audio {
             artist: std::borrow::Cow::Borrowed("UNKNOWN").to_string(),
             album: std::borrow::Cow::Borrowed("UNKNOWN").to_string(),
             album_artist: None,
+            genre: None,
+            year: None,
+            composer: None,
+            bpm: None,
             track: None,
             disc: None,
             duration: properties.duration().as_secs(),
@@ -896,6 +942,10 @@ impl Audio {
             artist,
             album,
             album_artist,
+            genre: None,
+            year: None,
+            composer: None,
+            bpm: None,
             track: Some(music_properties.TrackNumber()?),
             disc: None,
             duration: duration.as_secs(),
@@ -1876,7 +1926,7 @@ fn add_missing_audio_files(
     folder_path: &str,
     audios: &mut Vec<serde_json::Value>,
     latest: u64,
-) -> io::Result<(u64, bool)> {
+) -> io::Result<(u64, bool, u64)> {
     let existing_audio_paths: HashSet<String> = audios
         .iter()
         .filter_map(|item| item["path"].as_str().map(|path| path.to_string()))
@@ -1885,7 +1935,7 @@ fn add_missing_audio_files(
     let dir = match fs::read_dir(folder_path) {
         Ok(value) => value,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((new_latest, false));
+            return Ok((new_latest, false, 0));
         }
         Err(error) => return Err(error),
     };
@@ -1900,24 +1950,20 @@ fn add_missing_audio_files(
         }
     }
     let read_results = read_audio_paths_parallel(&paths, |_| {});
-    if let Some(failed_index) = read_results.iter().position(Option::is_none) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "failed to read new audio while updating index: {}",
-                paths[failed_index].display()
-            ),
-        ));
-    }
     let mut added = false;
-    for new_audio in read_results.into_iter().flatten() {
+    let mut unreadable = 0_u64;
+    for new_audio in read_results.into_iter() {
+        let Some(new_audio) = new_audio else {
+            unreadable += 1;
+            continue;
+        };
         if new_audio.created > new_latest {
             new_latest = new_audio.created;
         }
         audios.push(new_audio.to_json_value());
         added = true;
     }
-    Ok((new_latest, added))
+    Ok((new_latest, added, unreadable))
 }
 
 /// for Flutter   
@@ -2087,7 +2133,7 @@ mod tag_reader_tests {
         is_lyric_item_key, join_deduped, parse_midi_metadata, probe_indexed_path,
         read_audio_extra_metadata, read_by_asf, should_emit_index_progress,
         should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
-        IndexedAudioUpdate, SUPPORTED_FORMATS,
+        Audio, IndexedAudioUpdate, SUPPORTED_FORMATS,
     };
 
     fn asf_object(guid: [u8; 16], data: Vec<u8>) -> Vec<u8> {
@@ -2245,10 +2291,18 @@ mod tag_reader_tests {
         let mut tag = id3::Tag::new();
         tag.set_genre("Rock");
         tag.set_year(2024);
+        tag.set_text("TCOM", "Composer");
+        tag.set_text("TBPM", "128");
         tag.set_track(4);
         tag.set_disc(2);
         std::fs::write(&path, []).unwrap();
         tag.write_to_path(&path, id3::Version::Id3v24).unwrap();
+
+        let indexed = Audio::read_from_path(&path).expect("indexed ID3 tag");
+        assert_eq!(indexed.genre.as_deref(), Some("Rock"));
+        assert_eq!(indexed.year.as_deref(), Some("2024"));
+        assert_eq!(indexed.composer.as_deref(), Some("Composer"));
+        assert_eq!(indexed.bpm.as_deref(), Some("128"));
 
         let metadata = read_audio_extra_metadata(path.to_string_lossy().to_string());
         let fields = metadata
@@ -2263,6 +2317,38 @@ mod tag_reader_tests {
         assert_eq!(fields.get("disc").map(String::as_str), Some("2"));
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn index_snapshot_serializes_catalog_tags() {
+        let audio = Audio {
+            title: "Track".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_artist: None,
+            genre: Some("Rock".to_string()),
+            year: Some("2024".to_string()),
+            composer: Some("Composer".to_string()),
+            bpm: Some("128".to_string()),
+            track: Some(1),
+            disc: None,
+            duration: 180,
+            bitrate: Some(320),
+            sample_rate: Some(44_100),
+            path: "C:/Music/track.flac".to_string(),
+            modified: 1,
+            created: 2,
+            by: Some("Lofty".to_string()),
+            size: 3,
+            valid: true,
+            media_id: None,
+        };
+
+        let snapshot = audio.to_json_value();
+        assert_eq!(snapshot["genre"], "Rock");
+        assert_eq!(snapshot["year"], "2024");
+        assert_eq!(snapshot["composer"], "Composer");
+        assert_eq!(snapshot["bpm"], "128");
     }
 
     #[test]
@@ -2553,6 +2639,7 @@ pub fn update_index(
     let mut tag_rereads = 0_u64;
     let mut invalidated = 0_u64;
     let mut revived = 0_u64;
+    let mut unreadable_total = 0_u64;
     let total = folders
         .iter()
         .filter_map(|folder| folder["audios"].as_array())
@@ -2616,7 +2703,7 @@ pub fn update_index(
             },
             message: String::from("正在更新 ") + &folder_path,
             phase: IndexPhase::Scanning,
-            unreadable_total: 0,
+            unreadable_total,
         });
 
         if new_folder_modified != old_folder_modified {
@@ -2697,21 +2784,22 @@ pub fn update_index(
                     },
                     message: String::new(),
                     phase: IndexPhase::Scanning,
-                    unreadable_total: 0,
+                    unreadable_total,
                 });
             }
         });
-        if let Some(failed_index) = refreshed.iter().position(Option::is_none) {
-            return Err(anyhow::anyhow!(
-                "failed to refresh audio while updating index: {}",
-                refresh_paths[failed_index].display()
-            ));
-        }
         checked += refresh_jobs.len() as u64;
         for ((audio_index, _), modified_audio) in refresh_jobs.into_iter().zip(refreshed) {
             if let Some(modified_audio) = modified_audio {
                 audios[audio_index] = modified_audio.to_json_value();
                 index_changed = true;
+            } else {
+                unreadable_total += 1;
+                if audio_json_is_valid(&audios[audio_index]) {
+                    set_audio_json_valid(&mut audios[audio_index], false);
+                    invalidated += 1;
+                    index_changed = true;
+                }
             }
         }
         if refresh_paths.is_empty() {
@@ -2723,11 +2811,13 @@ pub fn update_index(
                 },
                 message: String::new(),
                 phase: IndexPhase::Scanning,
-                unreadable_total: 0,
+                unreadable_total,
             });
         }
 
-        let (new_latest, added) = add_missing_audio_files(&folder_path, audios, latest)?;
+        let (new_latest, added, unreadable) =
+            add_missing_audio_files(&folder_path, audios, latest)?;
+        unreadable_total += unreadable;
         if added || new_latest != latest {
             folder_item["latest"] = serde_json::json!(new_latest);
             index_changed = true;
@@ -2750,7 +2840,7 @@ pub fn update_index(
                 },
                 message: format!("正在检查新增文件夹 {}", root_path.to_string_lossy()),
                 phase: IndexPhase::Scanning,
-                unreadable_total: 0,
+                unreadable_total,
             });
             discover_new_audio_folders(
                 &root_path,
@@ -2776,7 +2866,7 @@ pub fn update_index(
             progress: 1.0,
             message: String::from("正在保存索引"),
             phase: IndexPhase::Saving,
-            unreadable_total: 0,
+            unreadable_total,
         });
         library_db::write_index_snapshot(&index_dir, &index)?;
     }
@@ -2794,7 +2884,7 @@ pub fn update_index(
         progress: 1.0,
         message: String::from("音乐库更新完成"),
         phase: IndexPhase::Complete,
-        unreadable_total: 0,
+        unreadable_total,
     });
 
     Ok(())

@@ -78,6 +78,11 @@ class _HiddenSongsPageState extends State<HiddenSongsPage> {
           variant: ToastVariant.success,
         );
       }
+    } catch (error, trace) {
+      log.library.error('legacy', '恢复隐藏歌曲失败', error: error, stackTrace: trace);
+      if (mounted) {
+        showTextOnSnackBar('恢复失败，请查看日志', variant: ToastVariant.error);
+      }
     } finally {
       if (mounted) setState(() => _restoringAll = false);
     }
@@ -174,6 +179,7 @@ class _HiddenSongsPageState extends State<HiddenSongsPage> {
         playlist: items,
         multiSelectController: _multiSelectController,
         allowRestore: true,
+        onRestore: (_) => _reload(),
       ),
     );
   }

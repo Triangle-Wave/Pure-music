@@ -878,6 +878,108 @@ class _WavyProgressBarSwitchState extends State<_WavyProgressBarSwitch> {
   }
 }
 
+class _SpectrumBarSwitch extends StatefulWidget {
+  const _SpectrumBarSwitch();
+
+  @override
+  State<_SpectrumBarSwitch> createState() => _SpectrumBarSwitchState();
+}
+
+class _SpectrumBarSwitchState extends State<_SpectrumBarSwitch> {
+  final settings = AppSettings.instance;
+
+  Future<void> _setEnabled(bool value) async {
+    setState(() => settings.showSpectrumBar = value);
+    AppSettings.rebuildNotifier.rebuild();
+    final saved = await settings.saveSettings();
+    if (!saved && mounted) {
+      setState(() => settings.showSpectrumBar = !value);
+      AppSettings.rebuildNotifier.rebuild();
+      showTextOnSnackBar('频谱条设置保存失败', variant: ToastVariant.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '频谱条',
+      subtitle: settings.showSpectrumBar ? '播放页进度条上方显示柱状频谱' : '不在播放页显示频谱',
+      action: Switch(value: settings.showSpectrumBar, onChanged: _setEnabled),
+    );
+  }
+}
+
+class _CirclePlaybackCoverSwitch extends StatefulWidget {
+  const _CirclePlaybackCoverSwitch();
+
+  @override
+  State<_CirclePlaybackCoverSwitch> createState() =>
+      _CirclePlaybackCoverSwitchState();
+}
+
+class _CirclePlaybackCoverSwitchState
+    extends State<_CirclePlaybackCoverSwitch> {
+  final settings = AppSettings.instance;
+
+  Future<void> _setEnabled(bool value) async {
+    setState(() => settings.circlePlaybackCover = value);
+    AppSettings.rebuildNotifier.rebuild();
+    final saved = await settings.saveSettings();
+    if (!saved && mounted) {
+      setState(() => settings.circlePlaybackCover = !value);
+      AppSettings.rebuildNotifier.rebuild();
+      showTextOnSnackBar('圆形封面设置保存失败', variant: ToastVariant.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '圆形播放页封面',
+      subtitle: settings.circlePlaybackCover ? '播放页封面使用圆形裁剪' : '播放页封面使用圆角矩形',
+      action: Switch(
+        value: settings.circlePlaybackCover,
+        onChanged: _setEnabled,
+      ),
+    );
+  }
+}
+
+class _SpectrumBarMonetSwitch extends StatefulWidget {
+  const _SpectrumBarMonetSwitch();
+
+  @override
+  State<_SpectrumBarMonetSwitch> createState() =>
+      _SpectrumBarMonetSwitchState();
+}
+
+class _SpectrumBarMonetSwitchState extends State<_SpectrumBarMonetSwitch> {
+  final settings = AppSettings.instance;
+
+  Future<void> _setEnabled(bool value) async {
+    setState(() => settings.useMaterialYouForSpectrumBar = value);
+    AppSettings.rebuildNotifier.rebuild();
+    final saved = await settings.saveSettings();
+    if (!saved && mounted) {
+      setState(() => settings.useMaterialYouForSpectrumBar = !value);
+      AppSettings.rebuildNotifier.rebuild();
+      showTextOnSnackBar('主题色频谱设置保存失败', variant: ToastVariant.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '主题色频谱',
+      subtitle: '频谱条使用主题色',
+      action: Switch(
+        value: settings.useMaterialYouForSpectrumBar,
+        onChanged: _setEnabled,
+      ),
+    );
+  }
+}
+
 class _TopBarLyricAnimationSelector extends StatefulWidget {
   const _TopBarLyricAnimationSelector();
 
@@ -3921,7 +4023,13 @@ class _AppearancePlayerGroup extends StatelessWidget {
         SizedBox(height: 4.0),
         _NowPlayingBackgroundSettings(),
         SizedBox(height: 16.0),
+        _CirclePlaybackCoverSwitch(),
+        SizedBox(height: 16.0),
         _WavyProgressBarSwitch(),
+        SizedBox(height: 16.0),
+        _SpectrumBarSwitch(),
+        SizedBox(height: 16.0),
+        _SpectrumBarMonetSwitch(),
         SizedBox(height: 16.0),
         _MonetProgressBarSwitch(),
         SizedBox(height: 16.0),

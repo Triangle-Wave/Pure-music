@@ -7,6 +7,13 @@ void main() {
     expect(windowRenderShouldEnableFrames(trayHidden: false), isTrue);
   });
 
+  test('minimized window does not keep rendering frames', () {
+    expect(
+      windowRenderShouldEnableFrames(trayHidden: false, windowMinimized: true),
+      isFalse,
+    );
+  });
+
   test('only hiding to tray is background', () {
     expect(windowRenderShouldEnableFrames(trayHidden: true), isFalse);
   });
@@ -36,6 +43,31 @@ void main() {
 
     await tester.pump();
     expect(applied, [false]);
+  });
+
+  testWidgets('minimizing only disables ticker mode', (tester) async {
+    final applied = <bool>[];
+    final gate = WindowRenderGate(applyFramesEnabled: applied.add);
+    addTearDown(gate.detach);
+
+    await tester.pumpWidget(
+      ValueListenableBuilder<bool>(
+        valueListenable: gate.framesEnabled,
+        builder: (context, enabled, _) {
+          return TickerMode(enabled: enabled, child: const SizedBox.shrink());
+        },
+      ),
+    );
+
+    gate.setWindowMinimized(true);
+    expect(gate.framesEnabled.value, isFalse);
+
+    await tester.pump();
+    expect(applied, isEmpty);
+
+    gate.setWindowMinimized(false);
+    expect(gate.framesEnabled.value, isTrue);
+    expect(applied, isEmpty);
   });
 
   testWidgets('showing the window resumes the scheduler before ticker mode', (

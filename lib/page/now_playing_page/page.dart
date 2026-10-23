@@ -40,6 +40,7 @@ import 'package:pure_music/page/now_playing_page/component/lyric_source_view.dar
 import 'package:pure_music/page/now_playing_page/component/sleep_timer_dialog.dart';
 import 'package:pure_music/page/now_playing_page/component/pitch_control.dart';
 import 'package:pure_music/page/now_playing_page/component/player_chrome_foreground.dart';
+import 'package:pure_music/page/now_playing_page/component/spectrum_bar.dart';
 import 'package:pure_music/page/now_playing_page/component/vertical_lyric_view.dart';
 import 'package:pure_music/page/now_playing_page/component/now_playing_background.dart';
 import 'package:pure_music/page/now_playing_page/now_playing_visibility.dart';
@@ -1902,6 +1903,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   late final PlaybackService _playbackService;
   late final VoidCallback _playerStateListener;
   late final VoidCallback _nowPlayingListener;
+  late final VoidCallback _positionSyncListener;
   Timer? _positionSyncTimer;
   Ticker? _progressTicker;
   Duration _lastProgressTickElapsed = Duration.zero;
@@ -1936,7 +1938,13 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
       _syncProgressDriver(_playbackService.playerState);
       if (mounted) setState(() {});
     };
+    _positionSyncListener = () {
+      _lastProgressTickElapsed = Duration.zero;
+      _lastProcessedElapsed = Duration.zero;
+      _syncFromNative(force: true);
+    };
     _playbackService.nowPlayingNotifier.addListener(_nowPlayingListener);
+    _playbackService.positionSyncNotifier.addListener(_positionSyncListener);
   }
 
   @override
@@ -2039,6 +2047,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     _progressTicker?.dispose();
     _playbackService.playerStateNotifier.removeListener(_playerStateListener);
     _playbackService.nowPlayingNotifier.removeListener(_nowPlayingListener);
+    _playbackService.positionSyncNotifier.removeListener(_positionSyncListener);
     dragPosition.dispose();
     livePosition.dispose();
     livePositionSeconds.dispose();
@@ -2052,39 +2061,162 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final playbackService = context.read<PlaybackService>();
-    final nowPlayingLength = playbackService.length;
-    final useMonetBar = AppSettings.instance.useMaterialYouForProgressBar;
-    final useWavyBar = AppSettings.instance.wavyBarEnabledModes.contains(
-      widget.mode,
-    );
-    final barColor = playerChromeForeground(context, enabled: useMonetBar);
-    final barGlow = useMonetBar
-        ? scheme.primaryContainer
-        : playerThemeForeground(scheme, enabled: false).withValues(alpha: 0.3);
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _timeRow(scheme, nowPlayingLength),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16.0),
-          child: SizedBox(
-            height: 24,
-            child: LayoutBuilder(
-              builder: (context, constraints) => _seekBar(
-                context,
+    return ListenableBuilder(
+      listenable: AppSettings.rebuildNotifier,
+      builder: (context, _) {
+        final nowPlayingLength = playbackService.length;
+        final useMonetBar = AppSettings.instance.useMaterialYouForProgressBar;
+        final useWavyBar = AppSettings.instance.wavyBarEnabledModes.contains(
+          widget.mode,
+        );
+        final barColor = playerChromeForeground(context, enabled: useMonetBar);
+        final barGlow = useMonetBar
+            ? scheme.primaryContainer
+            : playerThemeForeground(
                 scheme,
-                playbackService,
-                constraints.maxWidth,
-                nowPlayingLength > 0 ? nowPlayingLength : 1.0,
-                barColor,
-                barGlow,
-                useWavyBar,
-              ),
+                enabled: false,
+              ).withValues(alpha: 0.3);
+        final showSpectrum =
+            widget.mode != NowPlayingMode.immersive &&
+            AppSettings.instance.showSpectrumBar;
+
+        if (showSpectrum) {
+          return _spectrumProgressArea(
+            scheme: scheme,
+            playbackService: playbackService,
+            nowPlayingLength: nowPlayingLength,
+            barColor: barColor,
+            barGlow: barGlow,
+            useWavyBar: useWavyBar,
+          );
+        }
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _timeRow(scheme, nowPlayingLength),
+            _progressArea(
+              scheme: scheme,
+              playbackService: playbackService,
+              nowPlayingLength: nowPlayingLength,
+              barColor: barColor,
+              barGlow: barGlow,
+              useWavyBar: useWavyBar,
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _spectrumProgressArea({
+    required ColorScheme scheme,
+    required PlaybackService playbackService,
+    required double nowPlayingLength,
+    required Color barColor,
+    required Color barGlow,
+    required bool useWavyBar,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 50.0),
+            child: _seekBarTrack(
+              scheme: scheme,
+              playbackService: playbackService,
+              nowPlayingLength: nowPlayingLength,
+              barColor: barColor,
+              barGlow: barGlow,
+              useWavyBar: useWavyBar,
             ),
           ),
+          SizedBox(
+            height: 46.0,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _PlaybackPositionText(
+                  secondsListenable: livePositionSeconds,
+                  color: scheme.onSurface,
+                ),
+                const SizedBox(width: 8.0),
+                Expanded(
+                  child: SpectrumBar(
+                    height: 42.0,
+                    color: playerChromeForeground(
+                      context,
+                      enabled:
+                          AppSettings.instance.useMaterialYouForSpectrumBar,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8.0),
+                Text(
+                  Duration(
+                    milliseconds: (nowPlayingLength * 1000).toInt(),
+                  ).toStringMSS(),
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.5,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _progressArea({
+    required ColorScheme scheme,
+    required PlaybackService playbackService,
+    required double nowPlayingLength,
+    required Color barColor,
+    required Color barGlow,
+    required bool useWavyBar,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: _seekBarTrack(
+        scheme: scheme,
+        playbackService: playbackService,
+        nowPlayingLength: nowPlayingLength,
+        barColor: barColor,
+        barGlow: barGlow,
+        useWavyBar: useWavyBar,
+      ),
+    );
+  }
+
+  Widget _seekBarTrack({
+    required ColorScheme scheme,
+    required PlaybackService playbackService,
+    required double nowPlayingLength,
+    required Color barColor,
+    required Color barGlow,
+    required bool useWavyBar,
+  }) {
+    return SizedBox(
+      height: 24,
+      child: LayoutBuilder(
+        builder: (context, constraints) => _seekBar(
+          context,
+          scheme,
+          playbackService,
+          constraints.maxWidth,
+          nowPlayingLength > 0 ? nowPlayingLength : 1.0,
+          barColor,
+          barGlow,
+          useWavyBar,
         ),
-      ],
+      ),
     );
   }
 
@@ -2448,31 +2580,242 @@ class _ProgressSliderPainter extends CustomPainter {
   }
 }
 
-// 播放中封面为 1，暂停、停止、播完缩到 0.88。缓冲不算暂停。
-class _PlaybackCoverScale extends StatelessWidget {
-  const _PlaybackCoverScale({required this.child});
+const _playbackCoverRotationPeriod = Duration(seconds: 24);
+
+class _PlaybackCoverRotationMemory {
+  static String? _path;
+  static double _offsetTurns = 0.0;
+  static int _generation = 0;
+
+  static double initialTurns({
+    required String? path,
+    required double position,
+  }) {
+    final baseTurns = _positionTurns(position);
+    if (_path != path) {
+      _path = path;
+      _offsetTurns = 0.0;
+      _generation++;
+    }
+    return _wrapTurns(baseTurns + _offsetTurns);
+  }
+
+  static int get generation => _generation;
+
+  static void remember({
+    required String path,
+    required double position,
+    required double turns,
+    required int generation,
+  }) {
+    if (_path != path || _generation != generation) return;
+    _path = path;
+    _offsetTurns = _wrapTurns(turns - _positionTurns(position));
+  }
+
+  static double _positionTurns(double position) {
+    if (!position.isFinite || position < 0) return 0.0;
+    return position / (_playbackCoverRotationPeriod.inMilliseconds / 1000.0);
+  }
+
+  static double _wrapTurns(double turns) {
+    final wrapped = turns % 1.0;
+    return wrapped < 0 ? wrapped + 1.0 : wrapped;
+  }
+}
+
+// 播放中封面为 1，暂停、停止、播完缩到 0.88。圆形封面播放时旋转，暂停时减速收停。
+class _PlaybackCoverMotion extends StatefulWidget {
+  const _PlaybackCoverMotion({
+    required this.child,
+    required this.rotate,
+    required this.identity,
+  });
 
   final Widget child;
+  final bool rotate;
+  final String? identity;
 
+  @override
+  State<_PlaybackCoverMotion> createState() => _PlaybackCoverMotionState();
+}
+
+class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
+    with SingleTickerProviderStateMixin {
   static const _pausedCoverScale = 0.88;
+  static const _pauseSettleDuration = Duration(milliseconds: 180);
+  static const _pauseSettleTurns = 0.018;
+
+  final playback = PlayService.instance.playbackService;
+  late final AnimationController _rotationController;
+  late PlayerState _playerState;
+  bool _reduceMotion = false;
+  bool _isSettling = false;
+  int _rotationMemoryGeneration = 0;
+
+  bool get _isPlaying => _playerState == PlayerState.playing;
+
+  @override
+  void initState() {
+    super.initState();
+    final initialTurns = _PlaybackCoverRotationMemory.initialTurns(
+      path: widget.identity,
+      position: playback.position,
+    );
+    _rotationMemoryGeneration = _PlaybackCoverRotationMemory.generation;
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: _playbackCoverRotationPeriod,
+      value: initialTurns,
+    );
+    _playerState = playback.playerStateNotifier.value;
+    playback.playerStateNotifier.addListener(_onPlayerStateChanged);
+    _syncRotation(immediate: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    if (_reduceMotion == reduceMotion) return;
+    _reduceMotion = reduceMotion;
+    _syncRotation(immediate: reduceMotion);
+  }
+
+  void _onPlayerStateChanged() {
+    final nextState = playback.playerStateNotifier.value;
+    if (_playerState == nextState) return;
+    _playerState = nextState;
+    if (mounted) setState(() {});
+    _syncRotation(immediate: false);
+  }
+
+  void _syncRotation({required bool immediate}) {
+    if (!widget.rotate || _reduceMotion) {
+      _rotationController.stop(canceled: false);
+      _isSettling = false;
+      return;
+    }
+
+    if (_isPlaying) {
+      if (_isSettling) {
+        _rotationController.stop(canceled: false);
+        _isSettling = false;
+      }
+      if (!_rotationController.isAnimating) {
+        _rotationController.repeat();
+      }
+      return;
+    }
+
+    if (!_rotationController.isAnimating || _isSettling) return;
+    _rotationController.stop(canceled: false);
+    if (immediate) return;
+
+    final current = _rotationController.value;
+    final target = min(1.0, current + _pauseSettleTurns);
+    if (target <= current) return;
+    _isSettling = true;
+    _rotationController
+        .animateTo(
+          target,
+          duration: _pauseSettleDuration,
+          curve: Curves.easeOutCubic,
+        )
+        .whenCompleteOrCancel(() => _isSettling = false);
+  }
+
+  @override
+  void didUpdateWidget(covariant _PlaybackCoverMotion oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.rotate != widget.rotate) {
+      _syncRotation(immediate: !widget.rotate);
+    }
+    if (oldWidget.identity != widget.identity) {
+      _rotationController.stop(canceled: false);
+      _rotationController.value = _PlaybackCoverRotationMemory.initialTurns(
+        path: widget.identity,
+        position: playback.position,
+      );
+      _rotationMemoryGeneration = _PlaybackCoverRotationMemory.generation;
+      _syncRotation(immediate: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    final nowPlaying = playback.nowPlaying;
+    if (widget.identity != null && nowPlaying?.path == widget.identity) {
+      _PlaybackCoverRotationMemory.remember(
+        path: widget.identity!,
+        position: playback.position,
+        turns: _rotationController.value,
+        generation: _rotationMemoryGeneration,
+      );
+    }
+    playback.playerStateNotifier.removeListener(_onPlayerStateChanged);
+    _rotationController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final playback = PlayService.instance.playbackService;
-    return ValueListenableBuilder<PlayerState>(
-      valueListenable: playback.playerStateNotifier,
-      builder: (context, state, child) {
-        final playing =
-            state == PlayerState.playing || state == PlayerState.stalled;
-        return SpringProgress(
-          target: playing ? 1.0 : _pausedCoverScale,
-          spring: MotionSpring.layout,
-          child: child,
-          builder: (context, scale, child) =>
-              Transform.scale(scale: scale, child: child),
-        );
-      },
-      child: child,
+    final active =
+        _playerState == PlayerState.playing ||
+        _playerState == PlayerState.stalled;
+    return SpringProgress(
+      target: active ? 1.0 : _pausedCoverScale,
+      spring: MotionSpring.layout,
+      child: widget.child,
+      builder: (context, scale, child) => AnimatedBuilder(
+        animation: _rotationController,
+        child: child,
+        builder: (context, child) {
+          final rotation = widget.rotate
+              ? _rotationController.value * 2 * pi
+              : 0.0;
+          return Transform.rotate(
+            angle: rotation,
+            child: Transform.scale(scale: scale, child: child),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _PlaybackCoverFrame extends StatelessWidget {
+  const _PlaybackCoverFrame({required this.scheme, required this.child});
+
+  final ColorScheme scheme;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final circle = AppSettings.instance.circlePlaybackCover;
+    final borderRadius = BorderRadius.circular(12.0);
+    return Container(
+      decoration: BoxDecoration(
+        shape: circle ? BoxShape.circle : BoxShape.rectangle,
+        borderRadius: circle ? null : borderRadius,
+        border: circle
+            ? Border.all(
+                color: scheme.onSurface.withValues(alpha: 0.09),
+                width: 1.0,
+              )
+            : null,
+        boxShadow: [
+          BoxShadow(
+            color: scheme.shadow.withValues(alpha: 0.2),
+            spreadRadius: 0,
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: circle
+          ? ClipOval(child: child)
+          : ClipRRect(borderRadius: borderRadius, child: child),
     );
   }
 }
@@ -2711,29 +3054,27 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
     double coverSize,
     bool heroEnabled,
   ) {
-    final framed = _coverImage(
-      scheme,
-      nowPlayingPath,
-      coverSize,
-      framed: true,
+    final framed = _coverImage(scheme, nowPlayingPath, coverSize, framed: true);
+    final motion = _PlaybackCoverMotion(
+      rotate: AppSettings.instance.circlePlaybackCover,
+      identity: nowPlayingPath,
+      child: framed,
     );
     return SizedBox(
       width: coverSize,
       height: coverSize,
-      child: _PlaybackCoverScale(
-        child: heroEnabled && nowPlayingPath != null
-            ? Hero(
-                tag: nowPlayingPath,
-                curve: AppSettings.instance.enableNowPlayingOpenMotion
-                    ? nowPlayingOpenCurve
-                    : Curves.fastOutSlowIn,
-                reverseCurve: AppSettings.instance.enableNowPlayingOpenMotion
-                    ? nowPlayingCloseCurve
-                    : Curves.fastOutSlowIn.flipped,
-                child: framed,
-              )
-            : RepaintBoundary(child: framed),
-      ),
+      child: heroEnabled && nowPlayingPath != null
+          ? Hero(
+              tag: nowPlayingPath,
+              curve: AppSettings.instance.enableNowPlayingOpenMotion
+                  ? nowPlayingOpenCurve
+                  : Curves.fastOutSlowIn,
+              reverseCurve: AppSettings.instance.enableNowPlayingOpenMotion
+                  ? nowPlayingCloseCurve
+                  : Curves.fastOutSlowIn.flipped,
+              child: motion,
+            )
+          : RepaintBoundary(child: motion),
     );
   }
 
@@ -2793,35 +3134,23 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
             _immediateCoverPath == nowPlayingPath
         ? _cachedImmediateCoverImage
         : null;
-    if (currentCover == null && fallbackCover == null) {
-      return Center(child: placeholder);
-    }
-    final image = Image(
-      image: currentCover ?? fallbackCover!,
-      fit: BoxFit.cover,
-      gaplessPlayback: true,
-      filterQuality: _routeReady ? FilterQuality.high : FilterQuality.medium,
-      errorBuilder: (_, _, _) =>
-          FittedBox(fit: BoxFit.contain, child: placeholder),
-    );
+    final image = currentCover == null && fallbackCover == null
+        ? ColoredBox(
+            color: scheme.surfaceContainerHighest.withValues(alpha: 0.28),
+            child: Center(child: placeholder),
+          )
+        : Image(
+            image: currentCover ?? fallbackCover!,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            filterQuality: _routeReady
+                ? FilterQuality.high
+                : FilterQuality.medium,
+            errorBuilder: (_, _, _) =>
+                FittedBox(fit: BoxFit.contain, child: placeholder),
+          );
     if (!framed) return image;
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12.0),
-        boxShadow: [
-          BoxShadow(
-            color: scheme.shadow.withValues(alpha: 0.2),
-            spreadRadius: 0,
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12.0),
-        child: image,
-      ),
-    );
+    return _PlaybackCoverFrame(scheme: scheme, child: image);
   }
 
   Widget _infoText(

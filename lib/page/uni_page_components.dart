@@ -649,6 +649,11 @@ class _HideSelectedSongsState extends State<HideSelectedSongs> {
       if (mounted) {
         showTextOnSnackBar('已隐藏 ${selected.length} 首，可在「隐藏歌曲」中恢复');
       }
+    } catch (error, trace) {
+      log.library.error('legacy', '批量隐藏歌曲失败', error: error, stackTrace: trace);
+      if (mounted) {
+        showTextOnSnackBar('隐藏失败，请查看日志', variant: ToastVariant.error);
+      }
     } finally {
       if (mounted) setState(() => _hiding = false);
     }

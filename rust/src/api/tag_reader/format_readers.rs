@@ -5,8 +5,9 @@ use id3::TagLike;
 use ratag::tag::Basic as RatagBasic;
 
 use super::{
-    estimated_bitrate, file_name, join_deduped, read_dff_metadata, read_dsf_audio_properties,
-    read_midi_metadata, read_symphonia_metadata, unknown_if_empty, Audio,
+    estimated_bitrate, file_name, id3_text, join_deduped, read_dff_metadata,
+    read_dsf_audio_properties, read_midi_metadata, read_symphonia_metadata, unknown_if_empty,
+    Audio,
 };
 
 pub(super) fn read_by_dsf(path: &Path, modified: u64, created: u64) -> Option<Audio> {
@@ -22,6 +23,12 @@ pub(super) fn read_by_dsf(path: &Path, modified: u64, created: u64) -> Option<Au
         artist: unknown_if_empty(tag.and_then(|tag| tag.artist().map(str::to_string))),
         album: unknown_if_empty(tag.and_then(|tag| tag.album().map(str::to_string))),
         album_artist: tag.and_then(|tag| tag.album_artist().map(str::to_string)),
+        genre: tag.and_then(|tag| tag.genre().map(str::to_string)),
+        year: tag
+            .and_then(|tag| tag.year())
+            .map(|value| value.to_string()),
+        composer: tag.and_then(|tag| id3_text(tag, "TCOM")),
+        bpm: tag.and_then(|tag| id3_text(tag, "TBPM")),
         track: tag.and_then(|tag| tag.track()),
         disc: tag.and_then(|tag| tag.disc()),
         duration: properties.duration,
@@ -44,6 +51,10 @@ pub(super) fn read_by_midi(path: &Path, modified: u64, created: u64) -> Option<A
         artist: "UNKNOWN".to_string(),
         album: "UNKNOWN".to_string(),
         album_artist: None,
+        genre: None,
+        year: None,
+        composer: None,
+        bpm: None,
         track: None,
         disc: None,
         duration: metadata.duration,
@@ -66,6 +77,10 @@ pub(super) fn read_by_dff(path: &Path, modified: u64, created: u64) -> Option<Au
         artist: unknown_if_empty(metadata.artist),
         album: unknown_if_empty(metadata.album),
         album_artist: metadata.album_artist,
+        genre: metadata.genre,
+        year: metadata.year,
+        composer: metadata.composer,
+        bpm: metadata.bpm,
         track: metadata.track,
         disc: metadata.disc,
         duration: metadata.duration,
@@ -90,6 +105,10 @@ pub(super) fn read_by_symphonia(path: &Path, modified: u64, created: u64) -> Opt
         artist: metadata.artist.unwrap_or_else(|| "UNKNOWN".to_string()),
         album: metadata.album.unwrap_or_else(|| "UNKNOWN".to_string()),
         album_artist: metadata.album_artist,
+        genre: metadata.genre,
+        year: metadata.year,
+        composer: metadata.composer,
+        bpm: metadata.bpm,
         track: metadata.track,
         disc: metadata.disc,
         duration: metadata.duration,
@@ -125,6 +144,10 @@ pub(super) fn read_by_id3(path: &Path, modified: u64, created: u64) -> Option<Au
                 .or_else(|| windows.as_ref().map(|value| value.album.clone())),
         ),
         album_artist: tag.album_artist().map(str::to_string),
+        genre: tag.genre().map(str::to_string),
+        year: tag.year().map(|value| value.to_string()),
+        composer: id3_text(&tag, "TCOM"),
+        bpm: id3_text(&tag, "TBPM"),
         track: tag.track(),
         disc: tag.disc(),
         duration: windows.as_ref().map(|value| value.duration).unwrap_or(0),
@@ -144,6 +167,7 @@ pub(super) fn read_by_asf(path: &Path, modified: u64, created: u64) -> Option<Au
     let metadata = RatagBasic::from_file(path).ok()?;
     let windows = Audio::read_by_win_music_properties(path, modified, created).ok();
     let artist = join_deduped(metadata.artists.iter().map(String::as_str));
+    let genre = join_deduped(metadata.genres.iter().map(String::as_str));
     Some(Audio {
         title: metadata
             .title
@@ -156,6 +180,10 @@ pub(super) fn read_by_asf(path: &Path, modified: u64, created: u64) -> Option<Au
                 .or_else(|| windows.as_ref().map(|value| value.album.clone())),
         ),
         album_artist: metadata.album_artist,
+        genre: (!genre.is_empty()).then_some(genre),
+        year: metadata.year.map(|value| value.to_string()),
+        composer: None,
+        bpm: None,
         track: metadata.track,
         disc: metadata.disc,
         duration: metadata

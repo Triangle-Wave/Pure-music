@@ -397,31 +397,36 @@ class _PlaylistViewItem extends StatelessWidget {
       targetIndex: index,
     );
 
-    return InkWell(
-      borderRadius: AppRadius.smCircular,
-      onTap: canActivate
-          ? () => playbackService.playIndexOfPlaylist(index)
-          : null,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8.0),
-        child: Row(
-          children: [
-            Expanded(child: _titles(scheme)),
-            const SizedBox(width: 8),
-            // 移除按钮
-            IconButton(
-              tooltip: '从队列移除',
-              icon: Icon(
-                Symbols.remove_circle_outline,
-                size: 20,
-                color: scheme.onSecondaryContainer.withAlpha(153),
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: InkWell(
+        borderRadius: AppRadius.smCircular,
+        onTap: canActivate
+            ? () => playbackService.playIndexOfPlaylist(index)
+            : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8.0),
+          child: Row(
+            children: [
+              Expanded(child: _titles(scheme)),
+              const SizedBox(width: 8),
+              // 移除按钮
+              IconButton(
+                tooltip: '从队列移除',
+                icon: Icon(
+                  Symbols.remove_circle_outline,
+                  size: 20,
+                  color: scheme.onSecondaryContainer.withAlpha(153),
+                ),
+                visualDensity: VisualDensity.compact,
+                onPressed: () {
+                  playbackService.removeFromQueue(index);
+                },
               ),
-              visualDensity: VisualDensity.compact,
-              onPressed: () {
-                playbackService.removeFromQueue(index);
-              },
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

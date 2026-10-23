@@ -631,6 +631,32 @@ void main() {
     });
   });
 
+  group('lyricFollowLiftCursor', () {
+    test('restores directly to the current playback cursor', () {
+      expect(
+        lyricFollowLiftCursor(
+          target: 180,
+          previous: 12,
+          fontSize: 32,
+          restoreFromPlayback: true,
+        ),
+        180,
+      );
+    });
+
+    test('keeps the normal cursor follow rate limited', () {
+      expect(
+        lyricFollowLiftCursor(
+          target: 180,
+          previous: 12,
+          fontSize: 32,
+          restoreFromPlayback: false,
+        ),
+        closeTo(26.4, 0.001),
+      );
+    });
+  });
+
   test('cosine paint raises sung glyphs and leaves later ones down', () {
     final line =
         SyncLyricLine(Duration.zero, const Duration(milliseconds: 800), [
