@@ -1,6 +1,9 @@
 import 'dart:io';
 
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/native/rust/api/network_proxy.dart'
+    as rust_network_proxy;
 
 /// 代理模式。
 ///
@@ -64,6 +67,22 @@ class ProxyConfig {
       return const ProxyConfig(mode: ProxyMode.direct);
     }
     return this;
+  }
+
+  /// Rust 网络层接受的模式名。
+  String get rustModeName => switch (mode) {
+    ProxyMode.system => 'system',
+    ProxyMode.direct => 'direct',
+    ProxyMode.manual => 'manual',
+  };
+
+  /// Rust 网络层接受的主机形式，IPv6 地址带方括号。
+  String get rustHost {
+    final target = normalizedHost;
+    if (target.contains(':') && !target.startsWith('[')) {
+      return '[$target]';
+    }
+    return target;
   }
 
   bool get hasValidManualTarget {
@@ -233,6 +252,51 @@ class NetworkProxy {
   void apply(ProxyConfig config) {
     _config = config.effective;
     HttpOverrides.global = AppHttpOverrides(config: _config);
+  }
+
+  String? _appliedRustSignature;
+
+  /// 把代理配置同步给 Rust 网络层（网易云、AMLL 等请求共用）。
+  ///
+  /// 手动配置不完整时按直连同步，与 [apply] 的生效结果一致。调用失败只记录
+  /// 告警，Dart 侧代理与启动流程继续使用已有配置；相同配置重复调用会跳过。
+  Future<void> applyToRust(ProxyConfig config) async {
+    final effective = config.effective;
+    final isManual = effective.mode == ProxyMode.manual;
+    final username = isManual ? effective.username.trim() : '';
+    final host = isManual ? effective.rustHost : '';
+    final port = isManual ? effective.port : 0;
+    final bypass = isManual ? effective.bypass : '';
+    // Rust 拒绝无用户名的密码，Dart 侧同样不使用该密码。
+    final password = username.isEmpty ? '' : effective.password;
+    final signature = [
+      effective.rustModeName,
+      host,
+      '$port',
+      username,
+      password,
+      bypass,
+    ].join('\u0000');
+    if (signature == _appliedRustSignature) return;
+    try {
+      await rust_network_proxy.setNetworkProxy(
+        mode: effective.rustModeName,
+        host: host,
+        port: port,
+        username: username,
+        password: password,
+        bypass: bypass,
+      );
+      _appliedRustSignature = signature;
+    } catch (error, trace) {
+      log.app.warn(
+        'legacy',
+        '[network] Rust 代理设置失败（mode: ${config.mode.name}）',
+        fields: {'mode': config.mode.name},
+        error: error,
+        stackTrace: trace,
+      );
+    }
   }
 
   HttpClient createHttpClient({SecurityContext? context}) {

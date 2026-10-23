@@ -277,6 +277,7 @@ void _installNetworkProxy() {
     final stored = ProxyConfig.fromSettings(AppSettings.instance);
     final effective = stored.effective;
     NetworkProxy.instance.apply(effective);
+    unawaited(NetworkProxy.instance.applyToRust(effective));
     if (stored.mode == ProxyMode.manual && !stored.hasValidManualTarget) {
       log.app.warn('legacy', '[network] 代理配置不完整，已回退直连');
     } else if (effective.mode == ProxyMode.manual) {
@@ -289,7 +290,9 @@ void _installNetworkProxy() {
     }
   } catch (err, trace) {
     try {
-      NetworkProxy.instance.apply(const ProxyConfig(mode: ProxyMode.direct));
+      const fallback = ProxyConfig(mode: ProxyMode.direct);
+      NetworkProxy.instance.apply(fallback);
+      unawaited(NetworkProxy.instance.applyToRust(fallback));
     } catch (fallbackError, fallbackTrace) {
       log.app.error(
         'legacy',

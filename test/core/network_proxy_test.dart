@@ -19,6 +19,25 @@ void main() {
       expect(config.bypass, defaultProxyBypass);
     });
 
+    test('Rust 模式名与生效模式一致', () {
+      expect(const ProxyConfig(mode: ProxyMode.system).rustModeName, 'system');
+      expect(const ProxyConfig(mode: ProxyMode.direct).rustModeName, 'direct');
+      expect(
+        const ProxyConfig(
+          mode: ProxyMode.manual,
+          host: '127.0.0.1',
+        ).rustModeName,
+        'manual',
+      );
+      expect(
+        const ProxyConfig(
+          mode: ProxyMode.manual,
+          host: '',
+        ).effective.rustModeName,
+        'direct',
+      );
+    });
+
     test('手动模式按主机与绕过规则选择代理', () {
       const config = ProxyConfig(
         mode: ProxyMode.manual,
@@ -104,6 +123,7 @@ void main() {
       );
 
       expect(config.proxyRule, 'PROXY [::1]:7890');
+      expect(config.rustHost, '[::1]');
     });
   });
 

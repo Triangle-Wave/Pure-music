@@ -89,6 +89,7 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
       }
       NetworkProxy.instance.apply(config);
       AppHttp.instance.rebuild();
+      await NetworkProxy.instance.applyToRust(config);
       if (!mounted) return;
       if (config.mode == ProxyMode.manual && !config.hasValidManualTarget) {
         showTextOnSnackBar('代理地址不完整，已回退直连', variant: ToastVariant.error);
@@ -103,6 +104,7 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
       try {
         NetworkProxy.instance.apply(previous);
         AppHttp.instance.rebuild();
+        await NetworkProxy.instance.applyToRust(previous);
       } catch (recoverError, recoverTrace) {
         log.settings.error(
           'legacy',
