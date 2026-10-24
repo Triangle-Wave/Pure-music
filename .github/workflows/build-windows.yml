@@ -348,7 +348,9 @@ jobs:
           PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
         run: |
           $ErrorActionPreference = "Stop"
-          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 5 -NonInteractive
+          # 安装版必须以 PORTABLE_BUILD=false 编译，数据根才会落在 <exe>\user_data；
+          # Mode 3 由脚本重新编译并制作安装器，便携版产物已在上一阶段打包。
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 3 -NonInteractive
           if ($LASTEXITCODE -ne 0) {
             throw "Installer packaging failed with exit code $LASTEXITCODE"
           }

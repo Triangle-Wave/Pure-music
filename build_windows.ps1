@@ -420,7 +420,7 @@ function Invoke-Build([string]$version, [bool]$isPortable) {
     }
 }
 
-function New-AppPackage([string]$artifactRoot, [string]$version) {
+function New-AppPackage([string]$artifactRoot, [string]$version, [bool]$isPortable) {
     $buildDir = Join-Path $PSScriptRoot "build\windows\x64\runner\Release"
     if (-not (Test-Path -LiteralPath (Join-Path $buildDir "pure_music.exe") -PathType Leaf)) {
         throw "Build output is incomplete: $buildDir"
@@ -531,6 +531,13 @@ function New-AppPackage([string]$artifactRoot, [string]$version) {
         Optimize-FlutterIconFonts $finalAppDir
     }
 
+    # 安装版的用户数据根固定为 exe 旁的 user_data。产物中保留空目录用于检查布局；
+    # 不放占位文件，导入脚本要求目标目录为空才会导入便携版或旧版安装数据。
+    if (-not $isPortable) {
+        $userDataDir = Join-Path $finalAppDir "user_data"
+        New-Item -ItemType Directory -Force -Path $userDataDir | Out-Null
+    }
+
     return $finalAppDir
 }
 
@@ -566,6 +573,63 @@ function Test-KeyFiles([string]$appDir) {
         throw "Package missing required files: $($missing -join ', ')"
     }
     Write-Host "Key file check passed." -ForegroundColor Green
+}
+
+function Read-InnoSections([string]$path) {
+    $sections = @{}
+    $current = ""
+    foreach ($raw in [System.IO.File]::ReadAllLines($path)) {
+        $line = $raw.Trim()
+        if ($line.Length -eq 0) { continue }
+        if ($line.StartsWith(";") -or $line.StartsWith("#")) { continue }
+        $header = [regex]::Match($line, '^\[(.+)\]$')
+        if ($header.Success) {
+            $current = $header.Groups[1].Value.ToLowerInvariant()
+            if (-not $sections.ContainsKey($current)) { $sections[$current] = @() }
+            continue
+        }
+        if (-not $current) { continue }
+        $sections[$current] += $line
+    }
+    return $sections
+}
+
+function Assert-InstallerScriptLayout([string]$issPath) {
+    $sections = Read-InnoSections $issPath
+
+    foreach ($line in @($sections["installdelete"])) {
+        $name = [regex]::Match($line, 'Name:\s*"([^"]*)"').Groups[1].Value
+        if ($name -match 'user_data') {
+            throw "Installer [InstallDelete] must not touch user_data: $line"
+        }
+    }
+
+    $dirs = @($sections["dirs"])
+    if (-not ($dirs | Where-Object { $_ -match 'Name:\s*"\{app\}\\user_data"' })) {
+        throw "Installer [Dirs] must declare {app}\user_data"
+    }
+
+    $files = @($sections["files"])
+    if (-not ($files | Where-Object { $_ -match 'Excludes:.*user_data' })) {
+        throw "Installer [Files] must exclude user_data so an install never overwrites user data"
+    }
+
+    Write-Host "Installer data layout check passed." -ForegroundColor Green
+}
+
+function Assert-InstallerUserDataDir([string]$appDir) {
+    $userDataDir = Join-Path $appDir "user_data"
+    if (-not (Test-Path -LiteralPath $userDataDir -PathType Container)) {
+        throw "Installer package is missing the user_data directory: $userDataDir"
+    }
+    $entries = @(Get-ChildItem -LiteralPath $userDataDir -Force)
+    if ($entries.Count -gt 0) {
+        throw "user_data in the installer package must stay empty: $(($entries | ForEach-Object { $_.Name }) -join ', ')"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $appDir "data\app.so") -PathType Leaf)) {
+        throw "Installer package is missing Flutter runtime resources: $appDir\data"
+    }
+    Write-Host "Installer user_data layout check passed." -ForegroundColor Green
 }
 
 function Write-PortableIntegrityFiles([string]$artifactRoot, [string]$version) {
@@ -669,7 +733,7 @@ function New-PortablePackage([string]$version, [bool]$buildFirst, [bool]$makeZip
     try {
         $artifactRoot = Join-Path $staging $artifactName
         New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-        $finalAppDir = New-AppPackage $artifactRoot $version
+        $finalAppDir = New-AppPackage $artifactRoot $version $true
 
         Invoke-Step "copy portable update scripts" {
             $supportDir = Join-Path $artifactRoot ".update"
@@ -756,7 +820,12 @@ function New-PortablePackage([string]$version, [bool]$buildFirst, [bool]$makeZip
 }
 
 function New-InstallerPackage([string]$version, [bool]$buildFirst) {
-    if ($buildFirst) { Invoke-Build $version $false }
+    if ($buildFirst) {
+        Invoke-Build $version $false
+    }
+    else {
+        Write-Warning "复用的已有产物必须是以 PORTABLE_BUILD=false 编译的安装版，否则数据根会落在 <exe>\data 而不是 <exe>\user_data。"
+    }
     $artifactName = "pure_music_{0}_release_installer" -f $version
     $publishedInstaller = Join-Path $finalOutputDir "$artifactName.exe"
     $publishedChecksum = "$publishedInstaller.sha256"
@@ -770,15 +839,17 @@ function New-InstallerPackage([string]$version, [bool]$buildFirst) {
     if (-not (Test-Path -LiteralPath $installerScript -PathType Leaf)) {
         throw "Inno Setup script not found: $installerScript"
     }
+    Assert-InstallerScriptLayout $installerScript
 
     $staging = New-StagingContainer
     try {
         $artifactRoot = Join-Path $staging $artifactName
         New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-        $finalAppDir = New-AppPackage $artifactRoot $version
+        $finalAppDir = New-AppPackage $artifactRoot $version $false
 
         Invoke-Step "validate installer application" {
             Test-KeyFiles $finalAppDir
+            Assert-InstallerUserDataDir $finalAppDir
         }
 
         Invoke-Step "create Inno Setup installer" {
