@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 export 'library_db/play_counts.dart';
 
-// These functions are ignored because they are not marked as `pub`: `atomic_write_with_replace`, `audio_identity`, `backfill_audio_identities`, `cover_access_timestamp`, `cover_source_signature`, `cover_tier_exceeds_limit`, `cover_tier`, `ensure_database_layout`, `ensure_index_source_current`, `file_source_signature`, `has_database_layout_marker`, `index_source_signature`, `index_temp_file`, `init_schema`, `legacy_sqlite_path`, `load_stored_audio_stats`, `metadata_match_key`, `migrating_sqlite_path`, `normalize_identity_part`, `open_connection`, `open_raw_connection`, `parse_index_folders`, `path_lookup_key`, `prune_cover_thumbnail_tier`, `read_cover_thumbnail`, `read_current_index_snapshot`, `rebuild_database_from_legacy`, `remove_database_file`, `remove_database_files`, `replace_file_atomically`, `should_rebuild_database`, `sqlite_path`, `sqlite_sidecar_path`, `stable_file_id_for_path`, `stable_file_id`, `stored_index_source_signature`, `unique_play_count`, `with_cover_connection`, `with_index_write_lock`, `write_cover_thumbnail`, `write_index_json`, `write_index_snapshot_with`, `write_index_snapshot`, `write_index_value_to_sqlite`
+// These functions are ignored because they are not marked as `pub`: `atomic_write_with_replace`, `audio_identity`, `backfill_audio_identities`, `cover_access_timestamp`, `cover_source_signature`, `cover_tier_exceeds_limit`, `cover_tier`, `ensure_database_layout`, `ensure_index_source_current`, `file_source_signature`, `has_database_layout_marker`, `index_source_signature`, `index_temp_file`, `init_schema`, `legacy_audio_column_exists`, `legacy_sqlite_path`, `load_stored_audio_stats`, `metadata_match_key`, `migrating_sqlite_path`, `normalize_identity_part`, `open_connection`, `open_raw_connection`, `optional_audio_text`, `parse_index_folders`, `path_lookup_key`, `prune_cover_thumbnail_tier`, `read_cover_thumbnail`, `read_current_index_snapshot`, `rebuild_database_from_legacy`, `remove_database_file`, `remove_database_files`, `replace_file_atomically`, `should_rebuild_database`, `sqlite_path`, `sqlite_sidecar_path`, `stable_file_id_for_path`, `stable_file_id`, `stored_index_source_signature`, `unique_play_count`, `with_cover_connection`, `with_index_write_lock`, `write_cover_thumbnail`, `write_index_json`, `write_index_snapshot_with`, `write_index_snapshot`, `write_index_value_to_sqlite`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AudioIdentity`, `CoverTier`, `IndexFolderSnapshot`, `IndexSnapshot`, `ParsedAudioEntry`, `ParsedFolder`, `StoredAudioStats`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -229,9 +229,12 @@ class PlayHistoryStats {
   /// 流水总条数。
   final PlatformInt64 total;
 
-  /// 最早/最晚播放时间戳（秒），无流水时为 0。
+  /// 统计窗口内最早/最晚播放时间戳（秒），无流水时为 0。
   final PlatformInt64 firstAt;
   final PlatformInt64 lastAt;
+
+  /// 全库最早播放时间戳（秒），不受统计窗口影响；无流水时为 0。
+  final PlatformInt64 earliestAt;
 
   /// 按本地日期聚合的每日播放次数，升序，只含有播放的日期。
   final List<DayCount> daily;
@@ -246,6 +249,7 @@ class PlayHistoryStats {
     required this.total,
     required this.firstAt,
     required this.lastAt,
+    required this.earliestAt,
     required this.daily,
     required this.hourly,
     required this.weekdayHourly,
@@ -256,6 +260,7 @@ class PlayHistoryStats {
       total.hashCode ^
       firstAt.hashCode ^
       lastAt.hashCode ^
+      earliestAt.hashCode ^
       daily.hashCode ^
       hourly.hashCode ^
       weekdayHourly.hashCode;
@@ -268,6 +273,7 @@ class PlayHistoryStats {
           total == other.total &&
           firstAt == other.firstAt &&
           lastAt == other.lastAt &&
+          earliestAt == other.earliestAt &&
           daily == other.daily &&
           hourly == other.hourly &&
           weekdayHourly == other.weekdayHourly;

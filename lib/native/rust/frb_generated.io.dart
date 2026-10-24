@@ -4,7 +4,6 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/amll_ttml.dart';
-import 'api/color_extraction.dart';
 import 'api/installed_font.dart';
 import 'api/library_db.dart';
 import 'api/library_db/play_counts.dart';
@@ -16,11 +15,9 @@ import 'api/smart_sort.dart';
 import 'api/smart_transition.dart';
 import 'api/smtc_flutter.dart';
 import 'api/system_theme.dart';
-import 'api/system_volume.dart';
 import 'api/tag_reader.dart';
 import 'api/tag_reader/extra_metadata.dart';
 import 'api/tag_reader/index_state.dart';
-import 'api/tag_reader/symphonia.dart';
 import 'api/utils.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -88,9 +85,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RustStreamSink<String> dco_decode_StreamSink_String_Sse(dynamic raw);
-
-  @protected
-  RustStreamSink<double> dco_decode_StreamSink_f_64_Sse(dynamic raw);
 
   @protected
   RustStreamSink<IndexActionState> dco_decode_StreamSink_index_action_state_Sse(
@@ -272,9 +266,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SMTCState dco_decode_smtc_state(dynamic raw);
 
   @protected
-  SymphoniaTagCollection dco_decode_symphonia_tag_collection(dynamic raw);
-
-  @protected
   SystemTheme dco_decode_system_theme(dynamic raw);
 
   @protected
@@ -344,11 +335,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RustStreamSink<String> sse_decode_StreamSink_String_Sse(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  RustStreamSink<double> sse_decode_StreamSink_f_64_Sse(
     SseDeserializer deserializer,
   );
 
@@ -568,11 +554,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SMTCState sse_decode_smtc_state(SseDeserializer deserializer);
 
   @protected
-  SymphoniaTagCollection sse_decode_symphonia_tag_collection(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   SystemTheme sse_decode_system_theme(SseDeserializer deserializer);
 
   @protected
@@ -653,12 +634,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_StreamSink_String_Sse(
     RustStreamSink<String> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_StreamSink_f_64_Sse(
-    RustStreamSink<double> self,
     SseSerializer serializer,
   );
 
@@ -943,12 +918,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_smtc_state(SMTCState self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_symphonia_tag_collection(
-    SymphoniaTagCollection self,
-    SseSerializer serializer,
-  );
 
   @protected
   void sse_encode_system_theme(SystemTheme self, SseSerializer serializer);
