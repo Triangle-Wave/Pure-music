@@ -99,6 +99,8 @@ function Invoke-RoboCopy([string]$src, [string]$dest) {
     if ($LASTEXITCODE -gt 7) {
         throw "robocopy failed (code=$LASTEXITCODE) src=$src dest=$dest"
     }
+    # 成功复制会留下 1-7 的退出码，重置以免后续调用方误判失败。
+    $global:LASTEXITCODE = 0
 }
 
 function Write-Utf8NoBom([string]$path, [string]$content) {
