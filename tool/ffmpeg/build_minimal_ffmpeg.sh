@@ -32,6 +32,11 @@ DECODERS="${DECODERS} speex cook tak"
 PARSERS="aac aac_latm ac3 dca flac mpegaudio opus tak vorbis"
 BSFS="aac_adtstoasc extract_extradata null"
 
+# 共享 DLL 静态链接 MSYS2 运行时：产物不得依赖 libwinpthread-1.dll、libgcc_s_*.dll、libstdc++-6.dll。
+# -static 让链接器对目标文件之后的所有 -l（含 configure 探测到的 winpthread）选择静态库，
+# 不受 --extra-ldflags 位于链接行前部的影响，对四个 DLL 一致生效。
+STATIC_RUNTIME_LDFLAGS="-static -static-libgcc -static-libstdc++"
+
 CONFIGURE_FLAGS=(
   "--arch=x86_64"
   "--target-os=mingw32"
@@ -55,7 +60,7 @@ CONFIGURE_FLAGS=(
   "--enable-decoder=${DECODERS// /,}"
   "--enable-parser=${PARSERS// /,}"
   "--enable-bsf=${BSFS// /,}"
-  "--extra-ldflags=-static-libgcc"
+  "--extra-ldflags=${STATIC_RUNTIME_LDFLAGS}"
 )
 
 CONFIG_HASH="$(printf '%s\n' "${CONFIGURE_FLAGS[@]}" | sha256sum | cut -d' ' -f1)"
@@ -114,11 +119,12 @@ echo "校验产物依赖"
 for name in "${DLL_NAMES[@]}"; do
   path="${RUNTIME_DIR}/${name}"
   deps="$(objdump -p "${path}" | awk '/DLL Name/ {print $3}' | sort -u)"
+  echo "  ${name} 导入：$(tr '\n' ' ' <<< "${deps}")"
   while IFS= read -r dep; do
     [[ -z "${dep}" ]] && continue
     case "${dep}" in
       libgcc*|libwinpthread*|libstdc++*)
-        die "${name} 仍依赖 MSYS2 运行时 DLL：${dep}"
+        die "${name} 仍依赖 MSYS2 运行时 DLL：${dep}（--extra-ldflags 的 -static 未生效）"
         ;;
       avcodec-62.dll|avformat-62.dll|avutil-60.dll|swresample-6.dll|bass.dll)
         continue

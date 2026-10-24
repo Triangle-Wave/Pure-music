@@ -144,6 +144,14 @@ if (-not (Test-Path -LiteralPath $bassDll -PathType Leaf)) {
 $localNames = @{}
 foreach ($name in $requiredDlls) { $localNames[$name.ToLowerInvariant()] = $true }
 
+# MSYS2 运行时不得随包分发：裁剪构建要求 libwinpthread/libgcc/libstdc++ 全部静态链接。
+$msys2Runtime = @(
+    "libwinpthread-1.dll",
+    "libgcc_s_seh-1.dll",
+    "libgcc_s_dw2-1.dll",
+    "libstdc++-6.dll"
+)
+
 $info = @{}
 foreach ($name in $requiredDlls) {
     $path = Join-Path $BundleDir $name
@@ -169,6 +177,9 @@ foreach ($name in $requiredDlls) {
         $depKey = $dep.ToLowerInvariant()
         if ($localNames.ContainsKey($depKey)) { continue }
         if ($depKey -eq "bass.dll") { continue }
+        if ($msys2Runtime -contains $depKey) {
+            throw "$name 依赖 MSYS2 运行时 $dep；裁剪构建必须静态链接 libwinpthread/libgcc/libstdc++"
+        }
         if (Test-SystemLibrary $dep) { continue }
         throw "$name 依赖 $dep，但该 DLL 不在 $BundleDir，也不在系统目录；请补齐运行时 DLL"
     }
