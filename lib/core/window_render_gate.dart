@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
-/// 前台：主窗口在桌面上（含失焦、最小化到任务栏）。
-/// 后台：只有「关闭主窗口，隐藏到通知区」这一条路径。
-bool windowRenderShouldEnableFrames({required bool trayHidden}) => !trayHidden;
+/// 只有主窗口可见且未最小化时才持续绘制。
+bool windowRenderShouldEnableFrames({
+  required bool trayHidden,
+  bool windowMinimized = false,
+}) => !trayHidden && !windowMinimized;
 
 bool shouldAcceptLyricUiUpdate({required bool windowFramesEnabled}) =>
     windowFramesEnabled;
@@ -27,12 +29,15 @@ class WindowRenderGate with WidgetsBindingObserver {
   final ValueNotifier<bool> framesEnabled = ValueNotifier(true);
 
   bool _trayHidden = false;
+  bool _windowMinimized = false;
   bool _schedulerFramesEnabled = true;
   bool _pauseScheduled = false;
   bool _attached = false;
 
-  bool get shouldRender =>
-      windowRenderShouldEnableFrames(trayHidden: _trayHidden);
+  bool get shouldRender => windowRenderShouldEnableFrames(
+    trayHidden: _trayHidden,
+    windowMinimized: _windowMinimized,
+  );
 
   void attach() {
     if (_attached) return;
@@ -53,9 +58,19 @@ class WindowRenderGate with WidgetsBindingObserver {
     _sync();
   }
 
+  void setWindowMinimized(bool minimized) {
+    if (_windowMinimized == minimized) return;
+    _windowMinimized = minimized;
+    _sync();
+  }
+
   /// 主窗口只要还在桌面上，就必须回到前台。
   void enterForeground() {
-    setTrayHidden(false);
+    final changed = _trayHidden || _windowMinimized;
+    if (!changed) return;
+    _trayHidden = false;
+    _windowMinimized = false;
+    _sync();
   }
 
   @override
@@ -90,7 +105,9 @@ class WindowRenderGate with WidgetsBindingObserver {
     if (framesEnabled.value) {
       framesEnabled.value = false;
     }
-    if (!_schedulerFramesEnabled || _pauseScheduled) return;
+    // 任务栏最小化只停视觉 ticker，不改变 Flutter 生命周期；音频、媒体会话和
+    // 其他依赖生命周期的后台工作仍保持运行。隐藏到托盘才暂停 scheduler。
+    if (!_trayHidden || !_schedulerFramesEnabled || _pauseScheduled) return;
     _pauseScheduled = true;
     final binding = WidgetsBinding.instance;
     binding.addPostFrameCallback((_) {

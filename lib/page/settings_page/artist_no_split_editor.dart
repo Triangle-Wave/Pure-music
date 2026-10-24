@@ -218,33 +218,43 @@ class _ArtistNoSplitEditDialogState extends State<_ArtistNoSplitEditDialog> {
     return ListView(
       children: [
         ...names.map(
-          (name) => ListTile(
-            title: Text(name),
-            trailing: IconButton(
-              tooltip: '移除',
-              onPressed: () => setState(() => names.remove(name)),
-              icon: const Icon(Symbols.remove_circle),
+          (name) => Material(
+            type: MaterialType.transparency,
+            shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+            clipBehavior: Clip.hardEdge,
+            child: ListTile(
+              title: Text(name),
+              trailing: IconButton(
+                tooltip: '移除',
+                onPressed: () => setState(() => names.remove(name)),
+                icon: const Icon(Symbols.remove_circle),
+              ),
             ),
           ),
         ),
         if (editing)
-          ListTile(
-            title: Focus(
-              onFocusChange: HotkeysHelper.onFocusChanges,
-              child: TextField(
-                controller: currEditController,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: '艺术家名称',
-                  suffixIcon: IconButton(
-                    tooltip: '添加',
-                    onPressed: _canAddName ? _addName : null,
-                    icon: const Icon(Symbols.done),
+          Material(
+            type: MaterialType.transparency,
+            shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+            clipBehavior: Clip.hardEdge,
+            child: ListTile(
+              title: Focus(
+                onFocusChange: HotkeysHelper.onFocusChanges,
+                child: TextField(
+                  controller: currEditController,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: '艺术家名称',
+                    suffixIcon: IconButton(
+                      tooltip: '添加',
+                      onPressed: _canAddName ? _addName : null,
+                      icon: const Icon(Symbols.done),
+                    ),
                   ),
+                  onSubmitted: (_) {
+                    if (_canAddName) _addName();
+                  },
                 ),
-                onSubmitted: (_) {
-                  if (_canAddName) _addName();
-                },
               ),
             ),
           ),

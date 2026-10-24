@@ -5,7 +5,6 @@ import 'package:pure_music/component/index_progress_view.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:flutter/material.dart';
-import 'package:material_symbols_icons/symbols.dart';
 
 typedef IndexBuilder =
     Stream<IndexActionState> Function({
@@ -32,17 +31,32 @@ class BuildIndexStateView extends StatefulWidget {
 }
 
 class _BuildIndexStateViewState extends State<BuildIndexStateView> {
-  late final Stream<IndexActionState> _buildIndexStream;
+  Stream<IndexActionState>? _buildIndexStream;
   bool _done = false;
   String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    _buildIndexStream = widget.buildIndex(
+    _startBuild();
+  }
+
+  void _startBuild() {
+    final stream = widget.buildIndex(
       folders: widget.folders,
       indexPath: widget.indexPath.path,
     );
+    void apply() {
+      _done = false;
+      _errorMessage = null;
+      _buildIndexStream = stream;
+    }
+
+    if (mounted && _buildIndexStream != null) {
+      setState(apply);
+    } else {
+      apply();
+    }
   }
 
   Future<void> _completeBuild() async {
@@ -61,44 +75,27 @@ class _BuildIndexStateViewState extends State<BuildIndexStateView> {
     }
   }
 
-  Widget _buildError(ColorScheme scheme, String message) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(Symbols.error, color: scheme.error, size: 20.0),
-        const SizedBox(width: 8.0),
-        Flexible(
-          child: Text(
-            message,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: scheme.error),
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return StreamBuilder(
       stream: _buildIndexStream,
-      builder: (context, snapshot) => _buildSnapshot(scheme, snapshot),
+      builder: (context, snapshot) => _buildSnapshot(snapshot),
     );
   }
 
-  Widget _buildSnapshot(
-    ColorScheme scheme,
-    AsyncSnapshot<IndexActionState> snapshot,
-  ) {
+  Widget _buildSnapshot(AsyncSnapshot<IndexActionState> snapshot) {
+    if (snapshot.hasError) {
+      return IndexProgressView(
+        errorMessage: '曲库索引构建失败，请查看日志',
+        onRetry: _startBuild,
+      );
+    }
     final errorMessage = _errorMessage;
     if (errorMessage != null) {
-      return _buildError(scheme, errorMessage);
-    }
-    if (snapshot.hasError) {
-      return _buildError(scheme, '曲库索引构建失败，请查看日志');
+      return IndexProgressView(
+        errorMessage: errorMessage,
+        onRetry: _startBuild,
+      );
     }
     if (snapshot.hasData) {
       log.app.info(
@@ -113,7 +110,6 @@ class _BuildIndexStateViewState extends State<BuildIndexStateView> {
       });
     }
     // 阶段文案、不可读计数与完成态统一走共享扫描视图；
-    // 首次建库失败走页面级错误，不在此处重试。
     return IndexProgressView(state: snapshot.hasData ? snapshot.data : null);
   }
 }

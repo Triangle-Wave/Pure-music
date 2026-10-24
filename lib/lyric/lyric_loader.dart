@@ -15,6 +15,7 @@ import 'package:pure_music/lyric/exclude_data.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart';
 import 'package:pure_music/services/online_lyric/api/krc_decryptor.dart';
+import 'package:pure_music/services/online_lyric/api/krc_extract_decode.dart';
 import 'package:pure_music/services/online_lyric/api/qrc_decryptor.dart';
 import 'package:fl_charset/fl_charset.dart';
 
@@ -306,16 +307,16 @@ Lyric? _parseExternalToPureLyric(
   _ExternalLyricResult result, {
   String? separator = '┃',
 }) {
+  final transContent = result.ext == '.krc'
+      ? result.transContent ?? extractKrcLanguage(result.content)?.translation
+      : result.transContent;
+
   switch (result.ext) {
     case '.yrc':
     case '.qrc':
     case '.krc':
       // YRC/QRC/KRC 使用 KaraOK 解析器（正则健壮、时间戳正确）
-      return parseKaraokToPureLyric(
-        result.ext,
-        result.content,
-        result.transContent,
-      );
+      return parseKaraokToPureLyric(result.ext, result.content, transContent);
     case '.lrc':
       return Lrc.fromLrcTextAuto(
         result.content,

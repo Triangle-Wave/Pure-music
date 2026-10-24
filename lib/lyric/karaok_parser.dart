@@ -19,6 +19,11 @@ final _qrcWordRe = RegExp(r'[^(]*?((?:.(?!\(\d+,))*.)\((\d+),(\d+)\)');
 /// KRC 单词正则：`<start,dur,?>text`
 final _krcWordRe = RegExp(r'<(\d+),(\d+),\d+>[^<]*?((?:.(?!<\d+,))*.)');
 
+/// 翻译时间戳：同时支持 KRC 和标准 LRC 时间戳。
+final _translationTimestampRe = RegExp(
+  r'\[(?:(\d+),\d+|(\d{1,3}):(\d{2}(?:\.\d{1,3})?))\]',
+);
+
 // ──────────────────────────────────────────────
 // 内部模型
 // ──────────────────────────────────────────────
@@ -39,11 +44,11 @@ class _WordConfig {
 }
 
 _WordConfig? _configFor(String ext) => switch (ext) {
-      '.yrc' => _WordConfig(_yrcWordRe, 1, 2, 3),
-      '.qrc' => _WordConfig(_qrcWordRe, 2, 3, 1),
-      '.krc' => _WordConfig(_krcWordRe, 1, 2, 3),
-      _ => null,
-    };
+  '.yrc' => _WordConfig(_yrcWordRe, 1, 2, 3),
+  '.qrc' => _WordConfig(_qrcWordRe, 2, 3, 1),
+  '.krc' => _WordConfig(_krcWordRe, 1, 2, 3),
+  _ => null,
+};
 
 // 合并小单词
 // ──────────────────────────────────────────────
@@ -52,10 +57,10 @@ bool _shouldMerge(_Word curr, _Word last) =>
     ((curr.durationMs <= 60 || last.durationMs <= 60) && last.startMs > 0);
 
 _Word _merge(_Word last, _Word curr) => _Word(
-      last.startMs,
-      last.durationMs + curr.durationMs,
-      last.text + curr.text,
-    );
+  last.startMs,
+  last.durationMs + curr.durationMs,
+  last.text + curr.text,
+);
 
 // ──────────────────────────────────────────────
 // 单行单词解析
@@ -99,11 +104,13 @@ SyncLyricLine _buildLine(
   String? translation,
 ) {
   final syncWords = words
-      .map((w) => SyncLyricWord(
-            Duration(milliseconds: w.startMs),
-            Duration(milliseconds: w.durationMs),
-            w.text,
-          ))
+      .map(
+        (w) => SyncLyricWord(
+          Duration(milliseconds: w.startMs),
+          Duration(milliseconds: w.durationMs),
+          w.text,
+        ),
+      )
       .toList();
 
   return SyncLyricLine(lineStart, lineLength, syncWords, translation);
@@ -147,11 +154,13 @@ Lyric? parseKaraokToPureLyric(
       continue;
     }
 
-    lines.add(_LineData(
-      start: Duration(milliseconds: startMs),
-      length: Duration(milliseconds: durMs),
-      words: words,
-    ));
+    lines.add(
+      _LineData(
+        start: Duration(milliseconds: startMs),
+        length: Duration(milliseconds: durMs),
+        words: words,
+      ),
+    );
   }
 
   if (lines.isEmpty) return null;
@@ -159,13 +168,28 @@ Lyric? parseKaraokToPureLyric(
   // 合并翻译
   final transLines = <_LineData>[];
   if (transContent != null && transContent.isNotEmpty) {
-    for (final m in _karaOkLineRe.allMatches(transContent)) {
-      transLines.add(_LineData(
-        start: Duration(milliseconds: int.parse(m.group(1)!)),
-        length: Duration.zero,
-        words: [],
-        rawText: m.group(3)?.trim(),
-      ));
+    for (final rawLine in transContent.split(RegExp(r'\r?\n'))) {
+      final timestamps = _translationTimestampRe
+          .allMatches(rawLine)
+          .toList(growable: false);
+      final textStart = timestamps.isEmpty ? 0 : timestamps.last.end;
+      for (var i = 0; i < timestamps.length; i++) {
+        final timestamp = timestamps[i];
+        final startMs = timestamp.group(1) != null
+            ? int.parse(timestamp.group(1)!)
+            : (((int.parse(timestamp.group(2)!) * 60) +
+                          double.parse(timestamp.group(3)!)) *
+                      1000)
+                  .round();
+        transLines.add(
+          _LineData(
+            start: Duration(milliseconds: startMs),
+            length: Duration.zero,
+            words: [],
+            rawText: rawLine.substring(textStart).trim(),
+          ),
+        );
+      }
     }
   }
 
@@ -214,10 +238,7 @@ Lyric? parseKaraokToPureLyric(
     final next = resultLines[i];
     final gap = next.start - (curr.start + curr.length);
     if (gap > const Duration(seconds: 5)) {
-      resultLines.insert(
-        i,
-        SyncLyricLine(curr.start + curr.length, gap, []),
-      );
+      resultLines.insert(i, SyncLyricLine(curr.start + curr.length, gap, []));
     }
   }
 

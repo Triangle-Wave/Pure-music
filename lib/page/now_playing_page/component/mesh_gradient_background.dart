@@ -181,7 +181,7 @@ List<Color> _meshShaderColors(List<Color> colors) {
 }
 
 /// 播放页下半区前景色安全档位：和背景主色（调色板第一颗，按主题明暗调整后）
-/// 对比不足时，沿原色相调明度到能读；极端情况才退回黑白。调色板为空原样返回。
+/// 对比不足时，从原色向黑白逐步混合到能读；调色板为空原样返回。
 Color resolvePlayerSafeForeground({
   required Color foreground,
   required List<Color> palette,
@@ -195,25 +195,26 @@ Color resolvePlayerSafeForeground({
       : _kLightMeshScrim;
   final backdrop = Color.alphaBlend(scrim, adjusted);
   if (_contrastRatio(foreground, backdrop) >= target) return foreground;
-  final hsl = HSLColor.fromColor(foreground);
-  for (var step = 1; step <= 16; step++) {
-    final delta = step / 16;
-    final lighter = hsl
-        .withLightness((hsl.lightness + delta).clamp(0.0, 1.0))
-        .toColor();
-    final darker = hsl
-        .withLightness((hsl.lightness - delta).clamp(0.0, 1.0))
-        .toColor();
-    final lighterRatio = _contrastRatio(lighter, backdrop);
+  var best = foreground;
+  var bestRatio = _contrastRatio(foreground, backdrop);
+  for (var step = 1; step <= 32; step++) {
+    final mix = step / 32;
+    final darker = Color.lerp(foreground, Colors.black, mix)!;
+    final lighter = Color.lerp(foreground, Colors.white, mix)!;
     final darkerRatio = _contrastRatio(darker, backdrop);
-    if (lighterRatio >= target || darkerRatio >= target) {
-      return lighterRatio >= darkerRatio ? lighter : darker;
+    final lighterRatio = _contrastRatio(lighter, backdrop);
+    final candidate = darkerRatio >= lighterRatio ? darker : lighter;
+    final candidateRatio =
+        darkerRatio >= lighterRatio ? darkerRatio : lighterRatio;
+    if (candidateRatio > bestRatio) {
+      best = candidate;
+      bestRatio = candidateRatio;
+    }
+    if (darkerRatio >= target || lighterRatio >= target) {
+      return candidate;
     }
   }
-  return _contrastRatio(Colors.white, backdrop) >=
-          _contrastRatio(Colors.black, backdrop)
-      ? Colors.white
-      : Colors.black;
+  return best;
 }
 
 double _contrastRatio(Color a, Color b) {

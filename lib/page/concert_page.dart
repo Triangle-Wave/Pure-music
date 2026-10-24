@@ -798,20 +798,25 @@ class _ConcertPageState extends State<ConcertPage> {
   Widget _recentProgramCard(ConcertProgram program) {
     return SizedBox(
       width: 220,
-      child: InkWell(
-        borderRadius: AppRadius.mdCircular,
-        hoverColor: schemeHover(context),
-        onTap: () => _restoreProgram(program),
-        child: Container(
-          padding: const EdgeInsets.all(Spacing.md),
-          decoration: _recentProgramDecoration(),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _recentProgramTitleRow(program),
-              const Spacer(),
-              _recentProgramMeta(program),
-            ],
+      child: Material(
+        type: MaterialType.transparency,
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.mdCircular),
+        clipBehavior: Clip.hardEdge,
+        child: InkWell(
+          borderRadius: AppRadius.mdCircular,
+          hoverColor: schemeHover(context),
+          onTap: () => _restoreProgram(program),
+          child: Container(
+            padding: const EdgeInsets.all(Spacing.md),
+            decoration: _recentProgramDecoration(),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _recentProgramTitleRow(program),
+                const Spacer(),
+                _recentProgramMeta(program),
+              ],
+            ),
           ),
         ),
       ),
@@ -1085,37 +1090,42 @@ class _ConcertPageState extends State<ConcertPage> {
 
   Widget _sourceEntryTile(_SourceEntry entry, Set<String> selected) {
     final isSelected = selected.contains(entry.key);
-    return InkWell(
-      borderRadius: AppRadius.smCircular,
-      hoverColor: schemeHover(context),
-      onTap: () {
-        isSelected ? selected.remove(entry.key) : selected.add(entry.key);
-        setState(() {});
-      },
-      child: AnimatedContainer(
-        duration: MotionDuration.base,
-        curve: MotionCurve.standard,
-        height: 64.0,
-        padding: const EdgeInsets.symmetric(horizontal: 8.0),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? Theme.of(context).colorScheme.secondaryContainer
-              : Colors.transparent,
-          borderRadius: AppRadius.smCircular,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              entry.icon,
-              size: 24,
-              color: isSelected
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: 16.0),
-            Expanded(child: _sourceEntryTexts(entry)),
-            _sourceCheckIcon(context, isSelected),
-          ],
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: InkWell(
+        borderRadius: AppRadius.smCircular,
+        hoverColor: schemeHover(context),
+        onTap: () {
+          isSelected ? selected.remove(entry.key) : selected.add(entry.key);
+          setState(() {});
+        },
+        child: AnimatedContainer(
+          duration: MotionDuration.base,
+          curve: MotionCurve.standard,
+          height: 64.0,
+          padding: const EdgeInsets.symmetric(horizontal: 8.0),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? Theme.of(context).colorScheme.secondaryContainer
+                : Colors.transparent,
+            borderRadius: AppRadius.smCircular,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                entry.icon,
+                size: 24,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 16.0),
+              Expanded(child: _sourceEntryTexts(entry)),
+              _sourceCheckIcon(context, isSelected),
+            ],
+          ),
         ),
       ),
     );

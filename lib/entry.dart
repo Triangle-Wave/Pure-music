@@ -36,6 +36,7 @@ import 'package:pure_music/component/app_scroll_behavior.dart';
 import 'package:pure_music/core/app_fonts.dart';
 import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/immersive.dart';
+import 'package:pure_music/core/memory_monitor.dart';
 import 'package:pure_music/core/mouse_back_exit.dart';
 import 'package:pure_music/core/matcher.dart';
 import 'package:pure_music/core/preference.dart';
@@ -351,11 +352,14 @@ class _EntryState extends State<Entry>
 
   @override
   void onWindowMinimize() {
+    WindowRenderGate.instance.setWindowMinimized(true);
+    MemoryMonitorService.instance.trimWindowMinimized();
     PlayService.existingPlaybackService?.startSmtcKeepAlive();
   }
 
   @override
   void onWindowRestore() {
+    WindowRenderGate.instance.setWindowMinimized(false);
     PlayService.existingPlaybackService?.stopSmtcKeepAlive();
   }
 

@@ -298,26 +298,34 @@ class _FolderSelectorViewState extends State<FolderSelectorView> {
     if (folders.isEmpty) return const _EmptyFolderState();
     return ListView.builder(
       itemCount: folders.length,
-      itemBuilder: (context, i) => ListTile(
-        title: Text(
-          AppPreference.instance.folderAliases[pendingFolderKey(folders[i])] ??
-              folders[i],
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: TextButton.icon(
-          style: TextButton.styleFrom(
-            foregroundColor: scheme.error,
-            visualDensity: VisualDensity.compact,
+      itemBuilder: (context, i) => Material(
+        type: MaterialType.transparency,
+        shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        clipBehavior: Clip.hardEdge,
+        child: ListTile(
+          title: Text(
+            AppPreference.instance.folderAliases[pendingFolderKey(
+                  folders[i],
+                )] ??
+                folders[i],
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-          onPressed: canRemovePendingFolder(
-                isCommitting: _isCommittingChoice,
-                isPickingFolder: _isPickingFolder,
-              )
-              ? () => _removeFolder(i)
-              : null,
-          icon: const Icon(Symbols.remove_circle, size: 18),
-          label: const Text('移除'),
+          trailing: TextButton.icon(
+            style: TextButton.styleFrom(
+              foregroundColor: scheme.error,
+              visualDensity: VisualDensity.compact,
+            ),
+            onPressed:
+                canRemovePendingFolder(
+                  isCommitting: _isCommittingChoice,
+                  isPickingFolder: _isPickingFolder,
+                )
+                ? () => _removeFolder(i)
+                : null,
+            icon: const Icon(Symbols.remove_circle, size: 18),
+            label: const Text('移除'),
+          ),
         ),
       ),
     );

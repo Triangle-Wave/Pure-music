@@ -14,6 +14,5 @@ pub mod smart_sort;
 pub mod smart_transition;
 pub mod smtc_flutter;
 pub mod system_theme;
-pub mod system_volume;
 pub mod tag_reader;
 pub mod utils;

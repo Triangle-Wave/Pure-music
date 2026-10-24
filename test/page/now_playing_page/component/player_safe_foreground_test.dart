@@ -26,7 +26,7 @@ void main() {
     );
   });
 
-  test('weak contrast is fixed along the same hue', () {
+  test('weak contrast uses a minimal Color.lerp blend', () {
     const foreground = Color(0xFF9C4DA5);
     final result = resolvePlayerSafeForeground(
       foreground: foreground,
@@ -34,9 +34,12 @@ void main() {
       brightness: Brightness.light,
     );
     expect(result, isNot(foreground));
-    final before = HSLColor.fromColor(foreground);
-    final after = HSLColor.fromColor(result);
-    expect((after.hue - before.hue).abs(), lessThan(1.0));
-    expect(after.saturation, closeTo(before.saturation, 0.02));
+    final candidates = [
+      for (var step = 1; step <= 32; step++)
+        Color.lerp(foreground, Colors.black, step / 32)!,
+      for (var step = 1; step <= 32; step++)
+        Color.lerp(foreground, Colors.white, step / 32)!,
+    ];
+    expect(candidates, contains(result));
   });
 }

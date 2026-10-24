@@ -284,6 +284,7 @@ class _LyricsLineWidgetState extends State<LyricsLineWidget>
         )
         ? 1.0
         : 0.0;
+    _liftCache.restoreCursorFromPlayback = widget.distance == 0;
     _liftGateController = AnimationController.unbounded(vsync: this);
     _liftGateController.value = 1.0;
     _bindBackgroundVocalListeners();

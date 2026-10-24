@@ -225,13 +225,18 @@ class _ArtistAliasEditDialogState extends State<_ArtistAliasEditDialog> {
     return ListView(
       children: [
         ...entries.map(
-          (entry) => ListTile(
-            title: Text(entry.key),
-            subtitle: Text('显示为 ${entry.value}'),
-            trailing: IconButton(
-              tooltip: '移除',
-              onPressed: () => setState(() => aliases.remove(entry.key)),
-              icon: const Icon(Symbols.remove_circle),
+          (entry) => Material(
+            type: MaterialType.transparency,
+            shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+            clipBehavior: Clip.hardEdge,
+            child: ListTile(
+              title: Text(entry.key),
+              subtitle: Text('显示为 ${entry.value}'),
+              trailing: IconButton(
+                tooltip: '移除',
+                onPressed: () => setState(() => aliases.remove(entry.key)),
+                icon: const Icon(Symbols.remove_circle),
+              ),
             ),
           ),
         ),

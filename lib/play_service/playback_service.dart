@@ -949,6 +949,9 @@ class PlaybackService extends ChangeNotifier {
 
   Stream<Float32List> get spectrumStream => _player.spectrumStream;
 
+  Stream<Float32List> get spectrumDisplayStream =>
+      _player.spectrumDisplayStream;
+
   Stream<PlayerState> get playerStateStream => _player.playerStateStream;
 
   void _notifyPositionSync() {
@@ -1925,50 +1928,109 @@ class PlaybackService extends ChangeNotifier {
     _rebuildGaplessPreparation();
   }
 
+  @visibleForTesting
+  static ({
+    List<Audio> playlist,
+    List<Audio> backup,
+    int? currentIndex,
+    bool currentRemoved,
+  })
+  filterHiddenQueue({
+    required List<Audio> playlist,
+    required List<Audio> backup,
+    required int? currentIndex,
+    required Set<String> hiddenPaths,
+  }) {
+    if (hiddenPaths.isEmpty || playlist.isEmpty) {
+      return (
+        playlist: List<Audio>.unmodifiable(playlist),
+        backup: List<Audio>.unmodifiable(backup),
+        currentIndex: currentIndex,
+        currentRemoved: false,
+      );
+    }
+
+    final currentIndexInRange =
+        currentIndex != null &&
+            currentIndex >= 0 &&
+            currentIndex < playlist.length
+        ? currentIndex
+        : null;
+    final currentRemoved =
+        currentIndexInRange != null &&
+        hiddenPaths.contains(playlist[currentIndexInRange].path);
+    final removedBefore = currentIndexInRange == null
+        ? 0
+        : playlist
+              .take(currentIndexInRange)
+              .where((audio) => hiddenPaths.contains(audio.path))
+              .length;
+    final kept = playlist
+        .where((audio) => !hiddenPaths.contains(audio.path))
+        .toList(growable: false);
+    final adjustedIndex = kept.isEmpty || currentIndexInRange == null
+        ? null
+        : (currentIndexInRange - removedBefore)
+              .clamp(0, kept.length - 1)
+              .toInt();
+
+    return (
+      playlist: List<Audio>.unmodifiable(kept),
+      backup: List<Audio>.unmodifiable(
+        backup.where((audio) => !hiddenPaths.contains(audio.path)),
+      ),
+      currentIndex: adjustedIndex,
+      currentRemoved: currentRemoved,
+    );
+  }
+
   /// 曲库隐藏操作后，把命中曲目从播放队列移除。
   /// 正在播放的曲子被隐藏时，播移除后的当前位置（原顺序的下一首）；
-  /// 队列清空则停止播放。索引用路径比对，不依赖曲库重建后的对象引用。
+  /// 暂停或停止中的当前曲目被隐藏时，清除当前播放状态但不自动播放下一首。
+  /// 索引用路径比对，不依赖曲库重建后的对象引用。
   void removeHiddenFromQueue(Iterable<String> paths) {
     final hiddenPaths = Set<String>.of(paths);
     if (hiddenPaths.isEmpty || _playlist.value.isEmpty) return;
-    final items = _playlist.value;
-    final currentIndex = _playlistIndex ?? 0;
-    final current = currentIndex < items.length ? items[currentIndex] : null;
-    final kept = items.where((a) => !hiddenPaths.contains(a.path)).toList();
-    final removedBefore = currentIndex < items.length
-        ? items
-              .take(currentIndex)
-              .where((a) => hiddenPaths.contains(a.path))
-              .length
-        : 0;
-    _playlistBackup = List<Audio>.unmodifiable(
-      _playlistBackup.where((a) => !hiddenPaths.contains(a.path)),
+    final result = filterHiddenQueue(
+      playlist: _playlist.value,
+      backup: _playlistBackup,
+      currentIndex: _playlistIndex,
+      hiddenPaths: hiddenPaths,
     );
-    if (kept.isEmpty) {
-      _setPlaylist(const <Audio>[]);
+    _setPlaylist(result.playlist);
+    _playlistBackup = result.backup;
+    if (result.playlist.isEmpty) {
       _playlistIndex = null;
-      _persistCurrentSession();
-      pause();
+      _clearCurrentPlaybackAfterQueueChange();
       return;
     }
-    _setPlaylist(kept);
-    if (current != null && hiddenPaths.contains(current.path)) {
-      final targetIndex = (currentIndex - removedBefore).clamp(
-        0,
-        kept.length - 1,
-      );
-      // 正在播的被隐藏才切到下一首；暂停/停止中只校正索引，不擅自起播。
+    _playlistIndex = result.currentIndex;
+    if (result.currentRemoved) {
+      // 正在播放的被隐藏才切到下一首；暂停/停止中清除当前状态，不擅自起播。
       if (playerState == PlayerState.playing) {
-        playIndexOfPlaylist(targetIndex);
+        playIndexOfPlaylist(result.currentIndex!);
         return;
       }
-      _playlistIndex = targetIndex;
-      _persistCurrentSession();
+      _clearCurrentPlaybackAfterQueueChange();
       return;
     }
-    _playlistIndex = (currentIndex - removedBefore).clamp(0, kept.length - 1);
     _persistCurrentSession();
     _rebuildGaplessPreparation();
+  }
+
+  void _clearCurrentPlaybackAfterQueueChange() {
+    _synchronizeGaplessTransition();
+    _songChangeTasks.begin();
+    _cancelSongChangeTasks();
+    ThemeProvider.instance.cancelPendingAudioTheme();
+    pause();
+    _player.freeFStream();
+    _nowPlaying.value = null;
+    _playerState.value = PlayerState.stopped;
+    _clearPersistedLastSession();
+    unawaited(_clearSmtcDisplay());
+    _notifyPositionSync();
+    notifyListeners();
   }
 
   void reorderPlaylist(int oldIndex, int newIndex) {

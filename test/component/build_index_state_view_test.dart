@@ -35,6 +35,40 @@ void main() {
     expect(find.text('曲库索引构建失败，请查看日志'), findsOneWidget);
   });
 
+  testWidgets('index errors expose a retry action', (tester) async {
+    final controllers = <StreamController<IndexActionState>>[];
+    var buildCount = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BuildIndexStateView(
+            indexPath: Directory.systemTemp,
+            folders: const [],
+            buildIndex: ({required folders, required indexPath}) {
+              buildCount += 1;
+              final controller = StreamController<IndexActionState>();
+              controllers.add(controller);
+              return controller.stream;
+            },
+            whenIndexBuilt: () {},
+          ),
+        ),
+      ),
+    );
+
+    controllers.single.addError(StateError('index failed'));
+    await controllers.single.close();
+    await tester.pump();
+
+    expect(find.text('重试'), findsOneWidget);
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+
+    expect(buildCount, 2);
+    await controllers.last.close();
+  });
+
   testWidgets('load errors after indexing show an error state', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

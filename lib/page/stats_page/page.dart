@@ -32,9 +32,7 @@ class _StatsTab {
 }
 
 class _StatsPageState extends State<StatsPage> {
-  static const _shelfLimit = 12;
   static const _rankedLimit = 100;
-  static const _ranges = [('全部', 0), ('近7天', 7), ('近30天', 30), ('近90天', 90)];
 
   static const _tabs = [
     _StatsTab('概览', Symbols.dashboard),
@@ -44,12 +42,17 @@ class _StatsPageState extends State<StatsPage> {
   ];
 
   int _currentIndex = 0;
-  int _range = 0;
+  StatsPeriod _period = StatsPeriod.current(StatsPeriodMode.week);
+  int? _earliestAt;
   List<rust_library_db.PlayCountEntry>? _topPlayed;
   rust_library_db.PlayHistoryStats? _history;
+  StatsPeriod? _historyPeriod;
   bool _loading = true;
   bool _loadFailed = false;
-  int _loadRequestToken = 0;
+  bool _historyLoading = true;
+  bool _historyFailed = false;
+  int _rankRequestToken = 0;
+  int _historyRequestToken = 0;
   late final ValueListenable<int> _playCountRevision;
 
   @override
@@ -66,22 +69,33 @@ class _StatsPageState extends State<StatsPage> {
     _loadStats();
   }
 
-  /// 时间范围起点（秒）；全部为 null。
-  int? get _historySince {
-    final days = _ranges[_range].$2;
-    if (days == 0) return null;
-    final since = DateTime.now().subtract(Duration(days: days));
-    return since.millisecondsSinceEpoch ~/ 1000;
+  bool get _canGoBack {
+    final earliest = _earliestAt;
+    if (earliest == null || earliest <= 0) return false;
+    return _period.startEpoch > earliest;
   }
 
-  void _setRange(int index) {
-    if (_range == index) return;
-    setState(() => _range = index);
-    _loadStats();
+  bool get _canGoForward => !_period.isCurrent;
+
+  void _setPeriodMode(StatsPeriodMode mode) {
+    if (_period.mode == mode) return;
+    setState(() => _period = StatsPeriod.current(mode));
+    _loadHistory();
+  }
+
+  void _shiftPeriod(int delta) {
+    if (delta > 0 && !_canGoForward) return;
+    if (delta < 0 && !_canGoBack) return;
+    setState(() => _period = _period.shift(delta));
+    _loadHistory();
   }
 
   Future<void> _loadStats() async {
-    final requestToken = ++_loadRequestToken;
+    await Future.wait([_loadRankings(), _loadHistory()]);
+  }
+
+  Future<void> _loadRankings() async {
+    final requestToken = ++_rankRequestToken;
     if (!_loading) {
       setState(() {
         _loading = true;
@@ -94,26 +108,55 @@ class _StatsPageState extends State<StatsPage> {
         indexPath: supportPath,
         limit: -1,
       );
-      final history = await rust_library_db.getPlayHistoryStats(
-        indexPath: supportPath,
-        since: _historySince,
-      );
       final visibleTop = top
           .where(
             (entry) => AudioLibrary.instance.audioByPath(entry.path) != null,
           )
           .toList(growable: false);
-      if (!mounted || requestToken != _loadRequestToken) return;
+      if (!mounted || requestToken != _rankRequestToken) return;
       setState(() {
         _topPlayed = visibleTop;
-        _history = history;
         _loading = false;
       });
     } catch (_) {
-      if (!mounted || requestToken != _loadRequestToken) return;
+      if (!mounted || requestToken != _rankRequestToken) return;
       setState(() {
         _loading = false;
         _loadFailed = true;
+      });
+    }
+  }
+
+  Future<void> _loadHistory() async {
+    final requestToken = ++_historyRequestToken;
+    final period = _period;
+    final periodChanged = _historyPeriod != period;
+    if (!_historyLoading || periodChanged) {
+      setState(() {
+        _historyLoading = true;
+        _historyFailed = false;
+        if (periodChanged) _history = null;
+      });
+    }
+    try {
+      final supportPath = (await getAppDataDir()).path;
+      final history = await rust_library_db.getPlayHistoryStats(
+        indexPath: supportPath,
+        since: period.startEpoch,
+        until: period.endEpoch,
+      );
+      if (!mounted || requestToken != _historyRequestToken) return;
+      setState(() {
+        _history = history;
+        _historyPeriod = period;
+        _earliestAt = history.earliestAt.toInt();
+        _historyLoading = false;
+      });
+    } catch (_) {
+      if (!mounted || requestToken != _historyRequestToken) return;
+      setState(() {
+        _historyLoading = false;
+        _historyFailed = true;
       });
     }
   }
@@ -131,6 +174,8 @@ class _StatsPageState extends State<StatsPage> {
     final library = AudioLibrary.instance;
     final audios = library.audioCollection;
     final data = _topPlayed;
+    final history = _historyPeriod == _period ? _history : null;
+    final hasAnyHistory = (_earliestAt ?? 0) > 0;
     final rankedTracks = (data ?? const <rust_library_db.PlayCountEntry>[])
         .take(_rankedLimit)
         .toList(growable: false);
@@ -141,7 +186,7 @@ class _StatsPageState extends State<StatsPage> {
         IconButton.filledTonal(
           icon: const Icon(Symbols.refresh),
           tooltip: '刷新',
-          onPressed: _loading ? null : _loadStats,
+          onPressed: _loading || _historyLoading ? null : _loadStats,
           style: IconButton.styleFrom(
             shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
           ),
@@ -164,10 +209,7 @@ class _StatsPageState extends State<StatsPage> {
           ),
           if (_currentIndex == 0 || _currentIndex == 3) ...[
             const SizedBox(height: Spacing.md),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: _rangeSelector(scheme),
-            ),
+            _periodBar(scheme),
           ],
           const SizedBox(height: Spacing.lg),
           Expanded(
@@ -185,20 +227,13 @@ class _StatsPageState extends State<StatsPage> {
                   artistCount: library.artistCollection.length,
                   albumCount: library.albumCollection.length,
                   estimatedListen: _estimatedListenSeconds(audios, data),
-                  history: _history,
-                  filtered: _range != 0,
+                  history: history,
+                  hasAnyHistory: hasAnyHistory,
+                  period: _period,
                 ),
                 ArtistsTab(
-                  topArtists: buildTopArtists(
-                    audios,
-                    data,
-                    limit: _shelfLimit,
-                  ),
-                  topAlbums: buildTopAlbums(
-                    audios,
-                    data,
-                    limit: _shelfLimit,
-                  ),
+                  topArtists: buildTopArtists(audios, data),
+                  topAlbums: buildTopAlbums(audios, data),
                   onTapArtist: _openArtist,
                   onTapAlbum: _openAlbum,
                 ),
@@ -208,7 +243,11 @@ class _StatsPageState extends State<StatsPage> {
                   loading: _loading,
                   loadFailed: _loadFailed,
                 ),
-                ReportTab(history: _history, filtered: _range != 0),
+                ReportTab(
+                  history: history,
+                  hasAnyHistory: hasAnyHistory,
+                  period: _period,
+                ),
               ],
             ),
           ),
@@ -247,47 +286,137 @@ class _StatsPageState extends State<StatsPage> {
     );
   }
 
-  Widget _rangeSelector(ColorScheme scheme) {
+  Widget _periodBar(ColorScheme scheme) {
+    return Wrap(
+      spacing: Spacing.md,
+      runSpacing: Spacing.sm,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(
+          '收听时段',
+          style: TextStyle(
+            fontSize: AppType.caption,
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        _modeSelector(scheme),
+        _periodPager(scheme),
+        if (_historyLoading)
+          const SizedBox.square(
+            dimension: Spacing.lg,
+            child: CircularProgressIndicator(strokeWidth: 1.6),
+          )
+        else if (_historyFailed)
+          Tooltip(
+            message: '统计加载失败，点右上角刷新重试',
+            child: Icon(Symbols.error_outline, size: 16, color: scheme.error),
+          ),
+      ],
+    );
+  }
+
+  Widget _modeSelector(ColorScheme scheme) {
     return Container(
       padding: const EdgeInsets.all(2),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        borderRadius: AppRadius.xsCircular,
+        borderRadius: AppRadius.smCircular,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (var i = 0; i < _ranges.length; i++)
-            _rangeButton(i, scheme),
+          _modeButton('日', StatsPeriodMode.day, scheme),
+          _modeButton('周', StatsPeriodMode.week, scheme),
+          _modeButton('月', StatsPeriodMode.month, scheme),
         ],
       ),
     );
   }
 
-  Widget _rangeButton(int index, ColorScheme scheme) {
-    final selected = _range == index;
-    return InkWell(
-      borderRadius: AppRadius.xsCircular,
-      onTap: () => _setRange(index),
-      child: AnimatedContainer(
-        duration: MotionDuration.fast,
-        curve: MotionCurve.standard,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: selected
-            ? BoxDecoration(
-                color: scheme.secondaryContainer,
-                borderRadius: AppRadius.xsCircular,
-              )
-            : null,
-        child: Text(
-          _ranges[index].$1,
-          style: TextStyle(
+  Widget _modeButton(String label, StatsPeriodMode mode, ColorScheme scheme) {
+    final selected = _period.mode == mode;
+    return TextButton(
+      onPressed: () => _setPeriodMode(mode),
+      style: AppButton.pageAction.copyWith(
+        animationDuration: MotionDuration.fast,
+        backgroundColor: WidgetStatePropertyAll(
+          selected ? scheme.secondaryContainer : Colors.transparent,
+        ),
+        foregroundColor: WidgetStatePropertyAll(
+          selected ? scheme.onSecondaryContainer : scheme.onSurfaceVariant,
+        ),
+        textStyle: WidgetStatePropertyAll(
+          TextStyle(
             fontSize: AppType.caption,
-            fontWeight: selected ? AppType.weightSemibold : AppType.weightRegular,
-            color: selected
-                ? scheme.onSecondaryContainer
-                : scheme.onSurfaceVariant,
+            fontWeight: selected
+                ? AppType.weightSemibold
+                : AppType.weightRegular,
           ),
+        ),
+        shape: WidgetStatePropertyAll(
+          RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+        ),
+      ),
+      child: Text(label),
+    );
+  }
+
+  Widget _periodPager(ColorScheme scheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: AppRadius.smCircular,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _pagerButton(
+            Symbols.chevron_left,
+            '上一时段',
+            _canGoBack ? () => _shiftPeriod(-1) : null,
+            scheme,
+          ),
+          SizedBox(
+            width: 176,
+            child: Text(
+              _period.title,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: AppType.caption,
+                fontWeight: AppType.weightSemibold,
+                color: scheme.onSurface,
+              ),
+            ),
+          ),
+          _pagerButton(
+            Symbols.chevron_right,
+            '下一时段',
+            _canGoForward ? () => _shiftPeriod(1) : null,
+            scheme,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pagerButton(
+    IconData icon,
+    String tooltip,
+    VoidCallback? onPressed,
+    ColorScheme scheme,
+  ) {
+    return IconButton(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 18),
+      tooltip: tooltip,
+      style: AppButton.iconSquare.copyWith(
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled)
+              ? scheme.onSurfaceVariant.withValues(alpha: 0.3)
+              : scheme.onSurfaceVariant,
         ),
       ),
     );

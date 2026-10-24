@@ -1,5 +1,8 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/scroll_aware_future_builder.dart';
 import 'package:pure_music/component/stacked_list_view.dart';
 import 'package:pure_music/core/design_tokens.dart';
@@ -44,7 +47,6 @@ class ArtistsTab extends StatelessWidget {
           _shelfSection(
             context,
             title: '常听艺术家',
-            subtitle: '${topArtists.length} 位',
             items: topArtists,
             accent: scheme.tertiary,
             isArtist: true,
@@ -54,7 +56,6 @@ class ArtistsTab extends StatelessWidget {
           _shelfSection(
             context,
             title: '常听专辑',
-            subtitle: '${topAlbums.length} 张',
             items: topAlbums,
             accent: scheme.secondary,
             isArtist: false,
@@ -64,40 +65,65 @@ class ArtistsTab extends StatelessWidget {
     );
   }
 
+  static const _cardWidth = 180.0;
+  static const _shelfRows = 3;
+  static const _minShelfCount = 6;
+  static const _maxShelfCount = 24;
+
   Widget _shelfSection(
     BuildContext context, {
     required String title,
-    required String subtitle,
     required List<NamedPlayStat> items,
     required Color accent,
     required bool isArtist,
     required void Function(String name) onTap,
   }) {
     final maxPlays = items.first.playCount;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        statsSectionTitle(context, title: title, subtitle: subtitle),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
-          child: Wrap(
-            spacing: Spacing.md,
-            runSpacing: Spacing.md,
-            children: [
-              for (var index = 0; index < items.length; index++)
-                _shelfCard(
-                  context,
-                  item: items[index],
-                  rank: index + 1,
-                  maxPlays: maxPlays,
-                  accent: accent,
-                  isArtist: isArtist,
-                  onTap: onTap,
-                ),
-            ],
-          ),
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = SidebarMotionScope.contentWidthOf(
+          context,
+          constraints.maxWidth,
+        );
+        final columns = math.max(
+          1,
+          ((width - Spacing.sm * 2 + Spacing.md) / (_cardWidth + Spacing.md))
+              .floor(),
+        );
+        final limit = (columns * _shelfRows)
+            .clamp(_minShelfCount, _maxShelfCount)
+            .toInt();
+        final visible = items.take(limit).toList(growable: false);
+        final unit = isArtist ? '位' : '张';
+        final subtitle = visible.length < items.length
+            ? '前 ${visible.length} $unit · 共 ${items.length} $unit'
+            : '${items.length} $unit';
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            statsSectionTitle(context, title: title, subtitle: subtitle),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
+              child: Wrap(
+                spacing: Spacing.md,
+                runSpacing: Spacing.md,
+                children: [
+                  for (var index = 0; index < visible.length; index++)
+                    _shelfCard(
+                      context,
+                      item: visible[index],
+                      rank: index + 1,
+                      maxPlays: maxPlays,
+                      accent: accent,
+                      isArtist: isArtist,
+                      onTap: onTap,
+                    ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -114,77 +140,84 @@ class ArtistsTab extends StatelessWidget {
     final fraction = maxPlays > 0 ? item.playCount / maxPlays : 0.0;
     return SizedBox(
       width: 180,
-      height: 112,
-      child: Container(
-        padding: const EdgeInsets.all(Spacing.md),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerLow,
-          borderRadius: AppRadius.smCircular,
-          border: Border.all(
-            color: scheme.outlineVariant.withValues(alpha: 0.45),
-          ),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 112),
+        child: Container(
+          padding: const EdgeInsets.all(Spacing.md),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
             borderRadius: AppRadius.smCircular,
-            hoverColor: scheme.onSurface.withValues(alpha: Alpha.hover),
-            onTap: () => onTap(item.name),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      rank.toString().padLeft(2, '0'),
-                      style: TextStyle(
-                        fontSize: AppType.caption,
-                        fontWeight: AppType.weightSemibold,
-                        color: rank <= 3 ? accent : scheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${formatCount(item.playCount)} 次',
-                      style: TextStyle(
-                        fontSize: AppType.caption,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-                Row(
-                  children: [
-                    _itemCover(context, item, isArtist: isArtist),
-                    const SizedBox(width: Spacing.sm),
-                    Expanded(
-                      child: Text(
-                        item.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: AppRadius.smCircular,
+              hoverColor: scheme.onSurface.withValues(alpha: Alpha.hover),
+              onTap: () => onTap(item.name),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        rank.toString().padLeft(2, '0'),
                         style: TextStyle(
-                          fontSize: AppType.subtitle,
-                          fontWeight: AppType.weightMedium,
-                          color: scheme.onSurface,
+                          fontSize: AppType.caption,
+                          fontWeight: AppType.weightSemibold,
+                          color: rank <= 3 ? accent : scheme.onSurfaceVariant,
                         ),
                       ),
-                    ),
-                  ],
-                ),
-                ClipRRect(
-                  borderRadius: AppRadius.xsCircular,
-                  child: LinearProgressIndicator(
-                    value: fraction,
-                    minHeight: 4,
-                    backgroundColor: scheme.surfaceContainerHighest
-                        .withValues(alpha: 0.5),
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      accent.withValues(alpha: 0.72),
+                      const SizedBox(width: Spacing.sm),
+                      Expanded(
+                        child: Text(
+                          '${formatCount(item.playCount)} 次',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            fontSize: AppType.caption,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      _itemCover(context, item, isArtist: isArtist),
+                      const SizedBox(width: Spacing.sm),
+                      Expanded(
+                        child: Text(
+                          item.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: AppType.subtitle,
+                            fontWeight: AppType.weightMedium,
+                            color: scheme.onSurface,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  ClipRRect(
+                    borderRadius: AppRadius.xsCircular,
+                    child: LinearProgressIndicator(
+                      value: fraction,
+                      minHeight: 4,
+                      backgroundColor: scheme.surfaceContainerHighest
+                          .withValues(alpha: 0.5),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        accent.withValues(alpha: 0.72),
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

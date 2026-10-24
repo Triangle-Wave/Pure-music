@@ -148,34 +148,44 @@ class __ArtistSeparatorEditDialogState
   }
 
   Widget _buildSeparatorTile(String separator) {
-    return ListTile(
-      title: Text(separator),
-      trailing: IconButton(
-        tooltip: '移除',
-        onPressed: () => _removeArtistSeparator(separator),
-        icon: const Icon(Symbols.remove_circle),
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        title: Text(separator),
+        trailing: IconButton(
+          tooltip: '移除',
+          onPressed: () => _removeArtistSeparator(separator),
+          icon: const Icon(Symbols.remove_circle),
+        ),
       ),
     );
   }
 
   Widget _buildEditingTile() {
-    return ListTile(
-      title: Focus(
-        onFocusChange: HotkeysHelper.onFocusChanges,
-        child: TextField(
-          controller: currEditController,
-          autofocus: true,
-          decoration: InputDecoration(
-            labelText: '新的分隔符',
-            suffixIcon: IconButton(
-              tooltip: '添加',
-              onPressed: _canAddArtistSeparator ? _addArtistSeparator : null,
-              icon: const Icon(Symbols.done),
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        title: Focus(
+          onFocusChange: HotkeysHelper.onFocusChanges,
+          child: TextField(
+            controller: currEditController,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: '新的分隔符',
+              suffixIcon: IconButton(
+                tooltip: '添加',
+                onPressed: _canAddArtistSeparator ? _addArtistSeparator : null,
+                icon: const Icon(Symbols.done),
+              ),
             ),
+            onSubmitted: (_) {
+              if (_canAddArtistSeparator) _addArtistSeparator();
+            },
           ),
-          onSubmitted: (_) {
-            if (_canAddArtistSeparator) _addArtistSeparator();
-          },
         ),
       ),
     );

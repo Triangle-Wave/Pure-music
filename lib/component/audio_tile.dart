@@ -66,6 +66,7 @@ class AudioTile extends StatefulWidget {
     this.onRemoveFromPlaylist,
     this.allowHide = false,
     this.allowRestore = false,
+    this.onRestore,
   });
 
   static const double defaultLeadingWidth = 32;
@@ -85,6 +86,8 @@ class AudioTile extends StatefulWidget {
 
   /// 隐藏歌曲管理页里允许恢复单曲。
   final bool allowRestore;
+
+  final FutureOr<void> Function(Audio audio)? onRestore;
 
   @override
   State<AudioTile> createState() => _AudioTileState();
@@ -230,9 +233,17 @@ class _AudioTileState extends State<AudioTile> {
   }
 
   Future<void> _restoreAudio(BuildContext context, Audio audio) async {
-    await setSongsHidden([audio], hidden: false);
-    if (context.mounted) {
-      showTextOnSnackBar('已恢复');
+    try {
+      await setSongsHidden([audio], hidden: false);
+      await widget.onRestore?.call(audio);
+      if (context.mounted) {
+        showTextOnSnackBar('已恢复');
+      }
+    } catch (error, trace) {
+      log.library.error('legacy', '恢复隐藏歌曲失败', error: error, stackTrace: trace);
+      if (context.mounted) {
+        showTextOnSnackBar('恢复失败，请查看日志', variant: ToastVariant.error);
+      }
     }
   }
 
@@ -255,9 +266,16 @@ class _AudioTileState extends State<AudioTile> {
       confirmLabel: '隐藏',
     );
     if (!confirmed) return;
-    await setSongsHidden([audio], hidden: true);
-    if (context.mounted) {
-      showTextOnSnackBar('已隐藏，可在「隐藏歌曲」中恢复');
+    try {
+      await setSongsHidden([audio], hidden: true);
+      if (context.mounted) {
+        showTextOnSnackBar('已隐藏，可在「隐藏歌曲」中恢复');
+      }
+    } catch (error, trace) {
+      log.library.error('legacy', '隐藏歌曲失败', error: error, stackTrace: trace);
+      if (context.mounted) {
+        showTextOnSnackBar('隐藏失败，请查看日志', variant: ToastVariant.error);
+      }
     }
   }
 

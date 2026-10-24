@@ -1,187 +1,268 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/page/stats_page/stats_shared.dart';
 
-/// 竖直柱状图，CustomPainter 手绘。
+/// 带悬停读数和入场动画的竖直柱状图。
 ///
-/// [values] 为各柱数值，[labels] 为底部标签（空串跳过）；
-/// 柱数超过可用宽度时按相邻分桶合并。
-class BarSeriesChart extends StatelessWidget {
+/// [labels] 为底部稀疏标签，空串留白；[tooltips] 为悬停说明。
+class BarSeriesChart extends StatefulWidget {
   const BarSeriesChart({
     super.key,
     required this.values,
     required this.labels,
-    this.height = 168,
-    this.summary,
+    this.tooltips = const [],
+    this.height = defaultHeight,
+    this.emptyHint = '暂无播放记录',
   });
+
+  static const double defaultHeight = 168;
+
+  static double _captionRowHeightOf(BuildContext context) =>
+      MediaQuery.textScalerOf(context).scale(AppType.caption) + Spacing.sm;
+
+  static double totalHeightOf(BuildContext context, double plotHeight) =>
+      plotHeight + _captionRowHeightOf(context) * 2 + Spacing.xs;
 
   final List<int> values;
   final List<String> labels;
+  final List<String> tooltips;
   final double height;
+  final String emptyHint;
 
-  /// 右上角说明文字（如峰值）。
-  final String? summary;
+  @override
+  State<BarSeriesChart> createState() => _BarSeriesChartState();
+}
+
+class _BarSeriesChartState extends State<BarSeriesChart> {
+  int? _hovered;
+
+  @override
+  void didUpdateWidget(BarSeriesChart oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.values.length != widget.values.length ||
+        !listEquals(oldWidget.values, widget.values)) {
+      _hovered = null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // 固定高度，避免 LayoutBuilder 固有高度为 0 时把卡片压塌、柱子画到外面。
+    final values = widget.values;
+    final total = values.fold<int>(0, (sum, value) => sum + value);
+    final maxValue = values.fold<int>(0, math.max);
+    final hovered = _hovered != null && _hovered! < values.length
+        ? _hovered
+        : null;
+    final hoveredValue = hovered == null ? 0 : values[hovered];
+    final hoveredTip = hovered != null && hovered < widget.tooltips.length
+        ? widget.tooltips[hovered]
+        : '';
+    final captionRowHeight = BarSeriesChart._captionRowHeightOf(context);
     return SizedBox(
       width: double.infinity,
-      height: height,
-      child: ClipRect(
-        child: CustomPaint(
-          painter: _BarSeriesPainter(
-            values: values,
-            labels: labels,
-            summary: summary,
-            barColor: scheme.primary,
-            labelColor: scheme.onSurfaceVariant,
-            lineColor: scheme.outlineVariant,
+      height: widget.height + captionRowHeight * 2 + Spacing.xs,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: captionRowHeight,
+            child: Row(
+              children: [
+                if (hovered == null)
+                  Expanded(
+                    child: Text(
+                      total == 0 ? widget.emptyHint : '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.caption,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                else ...[
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: scheme.primary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      hoveredTip,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.caption,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: Spacing.sm),
+                Flexible(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      hovered == null
+                          ? '总计 ${formatCount(total)} 次'
+                          : '${formatCount(hoveredValue)} 次',
+                      style: TextStyle(
+                        fontSize: AppType.caption,
+                        fontWeight: hovered == null
+                            ? AppType.weightRegular
+                            : AppType.weightSemibold,
+                        color: hovered == null
+                            ? scheme.onSurfaceVariant
+                            : scheme.onSurface,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+          const SizedBox(height: Spacing.xs),
+          SizedBox(
+            height: widget.height,
+            child: Column(
+              children: [
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          height: 1,
+                          color: scheme.outlineVariant.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (var i = 0; i < values.length; i++)
+                            Expanded(
+                              child: MouseRegion(
+                                onEnter: (_) => setState(() => _hovered = i),
+                                onExit: (_) => setState(() => _hovered = null),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: hovered == i
+                                        ? scheme.primary.withValues(alpha: 0.06)
+                                        : Colors.transparent,
+                                    borderRadius: AppRadius.xsCircular,
+                                  ),
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: values.length > 20 ? 1 : 2,
+                                  ),
+                                  child: LayoutBuilder(
+                                    builder: (context, constraints) {
+                                      final barWidth = math.min(
+                                        28.0,
+                                        constraints.maxWidth * 0.68,
+                                      );
+                                      final ratio = maxValue <= 0
+                                          ? 0.02
+                                          : math.max(
+                                              values[i] / maxValue,
+                                              0.02,
+                                            );
+                                      final empty = values[i] == 0;
+                                      final color = empty
+                                          ? scheme.primary.withValues(
+                                              alpha: 0.15,
+                                            )
+                                          : hovered == i
+                                          ? scheme.primary
+                                          : values[i] == maxValue
+                                          ? scheme.primary
+                                          : scheme.primary.withValues(
+                                              alpha: 0.45,
+                                            );
+                                      return Align(
+                                        alignment: Alignment.bottomCenter,
+                                        child: TweenAnimationBuilder<double>(
+                                          tween: Tween(
+                                            begin: 0,
+                                            end: constraints.maxHeight * ratio,
+                                          ),
+                                          duration: MotionDuration.medium,
+                                          curve: MotionCurve.entrance,
+                                          builder: (context, barHeight, _) {
+                                            return Container(
+                                              width: barWidth,
+                                              height: barHeight,
+                                              decoration: BoxDecoration(
+                                                color: color,
+                                                borderRadius:
+                                                    const BorderRadius.vertical(
+                                                      top: Radius.circular(3),
+                                                    ),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  height: captionRowHeight,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < values.length; i++)
+                        Expanded(
+                          child: Center(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(
+                                i < widget.labels.length
+                                    ? widget.labels[i]
+                                    : '',
+                                maxLines: 1,
+                                style: TextStyle(
+                                  fontSize: AppType.microlabel,
+                                  fontWeight: hovered == i
+                                      ? AppType.weightSemibold
+                                      : AppType.weightRegular,
+                                  color: hovered == i
+                                      ? scheme.primary
+                                      : scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
-}
-
-class _AggBar {
-  const _AggBar(this.value, this.label);
-
-  final int value;
-  final String label;
-}
-
-class _BarSeriesPainter extends CustomPainter {
-  const _BarSeriesPainter({
-    required this.values,
-    required this.labels,
-    required this.summary,
-    required this.barColor,
-    required this.labelColor,
-    required this.lineColor,
-  });
-
-  final List<int> values;
-  final List<String> labels;
-  final String? summary;
-  final Color barColor;
-  final Color labelColor;
-  final Color lineColor;
-
-  static const _labelRow = 24.0;
-  static const _topPad = 4.0;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (values.isEmpty || size.width <= 0 || size.height <= 0) return;
-    final chartBottom = size.height - _labelRow;
-    final chartHeight = chartBottom - _topPad;
-    if (chartHeight <= 0) return;
-
-    final bars = _aggregate(size.width);
-    var max = 0;
-    for (final bar in bars) {
-      if (bar.value > max) max = bar.value;
-    }
-
-    final baseline = Paint()
-      ..color = lineColor.withValues(alpha: 0.6)
-      ..strokeWidth = 1;
-    canvas.drawLine(Offset(0, chartBottom), Offset(size.width, chartBottom), baseline);
-
-    final slot = size.width / bars.length;
-    // 数据少时槽很宽，柱宽封顶，避免一根柱铺成整块背景。
-    final barWidth = math.min(28.0, math.max(3.0, slot * 0.6));
-    final radius = Radius.circular(math.min(barWidth / 2, 4));
-    for (var i = 0; i < bars.length; i++) {
-      final value = bars[i].value;
-      final height = max > 0 && value > 0 ? value / max * chartHeight : 0.0;
-      final drawHeight = math.max(height, 2.0);
-      final paint = Paint()
-        ..color = height > 0
-            ? (value == max
-                  ? barColor
-                  : barColor.withValues(alpha: 0.45))
-            : barColor.withValues(alpha: 0.15);
-      final rect = Rect.fromLTRB(
-        i * slot + (slot - barWidth) / 2,
-        chartBottom - drawHeight,
-        i * slot + (slot + barWidth) / 2,
-        chartBottom,
-      );
-      canvas.drawRRect(RRect.fromRectAndRadius(rect, radius), paint);
-    }
-
-    if (summary != null) _paintSummary(canvas, size);
-    _paintLabels(canvas, size, bars, slot, chartBottom);
-  }
-
-  /// 柱数超过每槽最小宽度时按相邻分桶求和。
-  List<_AggBar> _aggregate(double width) {
-    final maxBars = math.max(1, (width / 9).floor());
-    final bucket = math.max(1, (values.length / maxBars).ceil());
-    final bars = <_AggBar>[];
-    for (var i = 0; i < values.length; i += bucket) {
-      var sum = 0;
-      var label = '';
-      for (var j = i; j < i + bucket && j < values.length; j++) {
-        sum += values[j];
-        if (label.isEmpty && j < labels.length && labels[j].isNotEmpty) {
-          label = labels[j];
-        }
-      }
-      bars.add(_AggBar(sum, label));
-    }
-    return bars;
-  }
-
-  void _paintSummary(Canvas canvas, Size size) {
-    final painter = TextPainter(
-      text: TextSpan(
-        text: summary,
-        style: TextStyle(fontSize: AppType.caption, color: labelColor),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: size.width);
-    painter.paint(canvas, Offset(size.width - painter.width, 0));
-  }
-
-  void _paintLabels(
-    Canvas canvas,
-    Size size,
-    List<_AggBar> bars,
-    double slot,
-    double chartBottom,
-  ) {
-    if (bars.every((bar) => bar.label.isEmpty)) return;
-    final labelCapacity = math.max(1, (size.width / 56).floor());
-    final step = math.max(1, (bars.length / labelCapacity).ceil());
-    for (var i = 0; i < bars.length; i++) {
-      final label = bars[i].label;
-      if (label.isEmpty) continue;
-      if (i % step != 0 && i != bars.length - 1) continue;
-      final painter = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: TextStyle(fontSize: AppType.microlabel, color: labelColor),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      final x = i * slot + slot / 2 - painter.width / 2;
-      if (x < 0 || x + painter.width > size.width) continue;
-      painter.paint(canvas, Offset(x, chartBottom + 4));
-    }
-  }
-
-  @override
-  bool shouldRepaint(_BarSeriesPainter oldDelegate) =>
-      oldDelegate.values != values ||
-      oldDelegate.labels != labels ||
-      oldDelegate.summary != summary ||
-      oldDelegate.barColor != barColor;
 }
 
 /// 24 小时收听节律柱状图。
@@ -189,28 +270,31 @@ class RhythmChart extends StatelessWidget {
   const RhythmChart({
     super.key,
     required this.hourly,
-    this.summary,
-    this.height = 150,
+    this.height = defaultHeight,
   });
 
+  static const double defaultHeight = 150;
+
   final List<int> hourly;
-
-  /// 右上角说明文字（如高峰时段）。
-  final String? summary;
-
   final double height;
 
   @override
   Widget build(BuildContext context) {
     final labels = <String>[
       for (var hour = 0; hour < hourly.length; hour++)
-        hour % 6 == 0 ? '$hour' : '',
+        hour % 6 == 0 ? hour.toString().padLeft(2, '0') : '',
+    ];
+    final tooltips = <String>[
+      for (var hour = 0; hour < hourly.length; hour++)
+        '${hour.toString().padLeft(2, '0')}:00 – '
+            '${((hour + 1) % 24).toString().padLeft(2, '0')}:00',
     ];
     return BarSeriesChart(
       values: List<int>.of(hourly),
       labels: labels,
+      tooltips: tooltips,
       height: height,
-      summary: summary,
+      emptyHint: '暂无播放记录',
     );
   }
 }
@@ -346,7 +430,10 @@ class _HeatmapPainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout();
     final offset = switch (align) {
-      _HeatmapTextAlign.verticalCenter => Offset(0, anchor.dy - painter.height / 2),
+      _HeatmapTextAlign.verticalCenter => Offset(
+        0,
+        anchor.dy - painter.height / 2,
+      ),
       _HeatmapTextAlign.horizontalCenter => Offset(
         anchor.dx - painter.width / 2,
         anchor.dy - painter.height / 2,
@@ -381,10 +468,12 @@ class WeekdayBars extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: Spacing.sm),
             child: Row(
               children: [
-                SizedBox(
-                  width: 40,
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 40, maxWidth: 64),
                   child: Text(
                     weekdayLabel(weekday),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: AppType.caption,
                       color: scheme.onSurfaceVariant,
@@ -407,10 +496,15 @@ class WeekdayBars extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: Spacing.sm),
-                SizedBox(
-                  width: 60,
+                ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minWidth: 60,
+                    maxWidth: 120,
+                  ),
                   child: Text(
                     '${formatCount(totals[weekday])} 次',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.right,
                     style: TextStyle(
                       fontSize: AppType.caption,

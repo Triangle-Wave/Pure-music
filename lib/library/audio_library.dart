@@ -719,7 +719,30 @@ class AudioLibrary {
         error: err,
         stackTrace: trace,
       );
-      return false;
+      if (!File(p.join(supportPath, 'library.sqlite')).existsSync()) {
+        return false;
+      }
+      try {
+        final hidden = await library_db.readHiddenAudios(
+          indexPath: supportPath,
+        );
+        await _initFromJsonIndex(
+          indexPath: indexPath,
+          pageCachePath: pageCachePath,
+          objectBatchSize: objectBatchSize,
+          totalStopwatch: totalStopwatch,
+          hiddenPaths: hidden.map((audio) => audio.path).toSet(),
+        );
+        return true;
+      } catch (fallbackError, fallbackTrace) {
+        log.library.error(
+          'legacy',
+          'SQLite 曲库读取失败且无法保留隐藏状态',
+          error: fallbackError,
+          stackTrace: fallbackTrace,
+        );
+        rethrow;
+      }
     }
   }
 
@@ -728,6 +751,7 @@ class AudioLibrary {
     required String pageCachePath,
     required int objectBatchSize,
     required Stopwatch totalStopwatch,
+    Set<String> hiddenPaths = const <String>{},
   }) async {
     final jsonReadStopwatch = Stopwatch()..start();
     var indexStr = await File(indexPath).readAsString();
@@ -737,7 +761,10 @@ class AudioLibrary {
     indexStr = '';
     jsonDecodeStopwatch.stop();
     final rssAfterDecode = ProcessInfo.currentRss;
-    final List<dynamic> foldersJson = indexJson['folders'];
+    final List<dynamic> foldersJson = _filterHiddenJsonFolders(
+      indexJson['folders'],
+      hiddenPaths,
+    );
     final converted = await _convertJsonFolders(
       foldersJson,
       objectBatchSize: objectBatchSize,
@@ -759,6 +786,25 @@ class AudioLibrary {
       rssAfterDecode: rssAfterDecode,
     );
     _publishLoadedLibrary();
+  }
+
+  static List<dynamic> _filterHiddenJsonFolders(
+    dynamic foldersValue,
+    Set<String> hiddenPaths,
+  ) {
+    if (hiddenPaths.isEmpty || foldersValue is! List) {
+      return foldersValue as List<dynamic>;
+    }
+    return foldersValue.map((folder) {
+      if (folder is! Map || folder['audios'] is! List) return folder;
+      final filtered = Map<String, dynamic>.from(folder);
+      filtered['audios'] = (folder['audios'] as List)
+          .where(
+            (audio) => audio is! Map || !hiddenPaths.contains(audio['path']),
+          )
+          .toList();
+      return filtered;
+    }).toList();
   }
 
   static void _publishLoadedLibrary() {

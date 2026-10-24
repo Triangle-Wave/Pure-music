@@ -3,7 +3,7 @@ use std::path::Path;
 use id3::TagLike;
 use ndsd_read::{dff_reader::DFFReader, DSDFormat, DSDReader};
 
-use super::{estimated_bitrate, optional_nonempty, read_id3_from_bytes};
+use super::{estimated_bitrate, id3_text, optional_nonempty, read_id3_from_bytes};
 
 #[derive(Clone)]
 pub(super) struct DffMetadata {
@@ -11,6 +11,10 @@ pub(super) struct DffMetadata {
     pub(super) artist: Option<String>,
     pub(super) album: Option<String>,
     pub(super) album_artist: Option<String>,
+    pub(super) genre: Option<String>,
+    pub(super) year: Option<String>,
+    pub(super) composer: Option<String>,
+    pub(super) bpm: Option<String>,
     pub(super) track: Option<u32>,
     pub(super) disc: Option<u32>,
     pub(super) duration: u64,
@@ -46,6 +50,15 @@ pub(super) fn read_dff_metadata(path: &Path) -> Option<DffMetadata> {
         .and_then(|tag| tag.album().map(str::to_string))
         .or_else(|| dsd_metadata.and_then(|metadata| metadata.album.clone()));
     let album_artist = id3_tag.and_then(|tag| tag.album_artist().map(str::to_string));
+    let genre = id3_tag
+        .and_then(|tag| tag.genre().map(str::to_string))
+        .or_else(|| dsd_metadata.and_then(|metadata| metadata.genre.clone()));
+    let year = id3_tag
+        .and_then(|tag| tag.year())
+        .or_else(|| dsd_metadata.and_then(|metadata| metadata.year.map(|year| year as i32)))
+        .map(|value| value.to_string());
+    let composer = id3_tag.and_then(|tag| id3_text(tag, "TCOM"));
+    let bpm = id3_tag.and_then(|tag| id3_text(tag, "TBPM"));
     let picture = id3_tag
         .and_then(|tag| tag.pictures().next().map(|picture| picture.data.clone()))
         .or_else(|| {
@@ -62,19 +75,10 @@ pub(super) fn read_dff_metadata(path: &Path) -> Option<DffMetadata> {
             items.push((key.to_string(), value));
         }
     };
-    push_item(
-        "year",
-        id3_tag
-            .and_then(|tag| tag.year())
-            .or_else(|| dsd_metadata.and_then(|metadata| metadata.year.map(|year| year as i32)))
-            .map(|value| value.to_string()),
-    );
-    push_item(
-        "genre",
-        id3_tag
-            .and_then(|tag| tag.genre().map(str::to_string))
-            .or_else(|| dsd_metadata.and_then(|metadata| metadata.genre.clone())),
-    );
+    push_item("year", year.clone());
+    push_item("genre", genre.clone());
+    push_item("composer", composer.clone());
+    push_item("bpm", bpm.clone());
     push_item("artist", artist.clone());
     push_item("album_artist", album_artist.clone());
     push_item(
@@ -95,6 +99,10 @@ pub(super) fn read_dff_metadata(path: &Path) -> Option<DffMetadata> {
         artist,
         album,
         album_artist,
+        genre,
+        year,
+        composer,
+        bpm,
         track: id3_tag.and_then(|tag| tag.track()),
         disc: id3_tag.and_then(|tag| tag.disc()),
         duration,

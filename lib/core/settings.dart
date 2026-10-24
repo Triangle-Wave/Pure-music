@@ -280,6 +280,9 @@ class AppSettings {
   bool keepPitch = true;
   bool lastFmEnabled = false;
   Set<NowPlayingMode> wavyBarEnabledModes = defaultWavyBarEnabledModes();
+  bool showSpectrumBar = false;
+  bool useMaterialYouForSpectrumBar = false;
+  bool circlePlaybackCover = false;
   TopBarLyricAnimation topBarLyricAnimation = TopBarLyricAnimation.slideUp;
   bool enableCoverColorExtraction = true;
   ThemeColorSource themeColorSource = ThemeColorSource.cover;
@@ -501,6 +504,10 @@ class AppSettings {
       settingsMap['AlwaysShowNowPlayingTransport'],
       defaultValue: false,
     );
+    _instance.circlePlaybackCover = normalizedBoolSetting(
+      settingsMap['CirclePlaybackCover'],
+      defaultValue: false,
+    );
     _instance.globalHotkeysEnabled = normalizedBoolSetting(
       settingsMap['GlobalHotkeysEnabled'],
       defaultValue: false,
@@ -675,6 +682,22 @@ class AppSettings {
     if (umypb != null) {
       _instance.useMaterialYouForProgressBar = normalizedBoolSetting(
         umypb,
+        defaultValue: false,
+      );
+    }
+
+    final ssb = settingsMap['ShowSpectrumBar'];
+    if (ssb != null) {
+      _instance.showSpectrumBar = normalizedBoolSetting(
+        ssb,
+        defaultValue: false,
+      );
+    }
+
+    final umysb = settingsMap['UseMaterialYouForSpectrumBar'];
+    if (umysb != null) {
+      _instance.useMaterialYouForSpectrumBar = normalizedBoolSetting(
+        umysb,
         defaultValue: false,
       );
     }
@@ -1170,6 +1193,7 @@ class AppSettings {
     'EnableDataTransitionMotion': enableDataTransitionMotion,
     'AlwaysShowNowPlayingControls': alwaysShowNowPlayingControls,
     'AlwaysShowNowPlayingTransport': alwaysShowNowPlayingTransport,
+    'CirclePlaybackCover': circlePlaybackCover,
     ...encodeHotkeySettings(
       globalEnabled: globalHotkeysEnabled,
       inApp: inAppHotkeys,
@@ -1239,6 +1263,8 @@ class AppSettings {
     'KeepPitch': keepPitch,
     'LastFmEnabled': lastFmEnabled,
     'WavyBarEnabledModes': NowPlayingMode.toList(wavyBarEnabledModes),
+    'ShowSpectrumBar': showSpectrumBar,
+    'UseMaterialYouForSpectrumBar': useMaterialYouForSpectrumBar,
     'TopBarLyricAnimation': topBarLyricAnimation.name,
     'EnableCoverColorExtraction': enableCoverColorExtraction,
     'ThemeColorSource': themeColorSource.name,
