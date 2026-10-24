@@ -202,10 +202,10 @@ jobs:
       - name: Check Rust build
         run: cargo build --manifest-path rust/Cargo.toml --release
 
-      - name: Build release
+      - name: Build release (portable)
         run: flutter build windows --release
 
-      - name: Verify build output
+      - name: Verify portable build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -236,10 +236,64 @@ jobs:
           }
           "Build output verified."
 
-      - name: Upload artifact
+      # 安装版以 PORTABLE_BUILD=false 编译，数据根落在 <exe>\user_data。
+      # 发布作业缺少 Flutter 与 FFmpeg 工具链，只复用这里的产物制作安装器。
+      - name: Stage portable build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = "build/windows/x64/runner/Release"
+          $target = "build/portable/Release"
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          robocopy $source $target /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+          if ($LASTEXITCODE -gt 7) { throw "robocopy failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath "$target/pure_music.exe" -PathType Leaf)) {
+            throw "Portable staging is incomplete: $target"
+          }
+
+      - name: Build release (installer)
+        run: flutter build windows --release --no-pub --dart-define=PORTABLE_BUILD=false
+
+      - name: Verify installer build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/windows/x64/runner/Release"
+          $required = @(
+            "pure_music.exe",
+            "data/app.so",
+            "dll/rust_lib_pure_music.dll",
+            "dll/BASS/bass_ffmpeg.dll",
+            "desktop_lyric/desktop_lyric.exe"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath "$out/$_" -PathType Leaf) })
+          if ($missing.Count -gt 0) { throw "Installer build output missing: $($missing -join ', ')" }
+          "Installer build output verified."
+
+      # 两版必须来自各自的编译：app.so 相同说明 PORTABLE_BUILD=false 没有进入 Dart 构建。
+      - name: Verify installer build differs from portable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portable = (Get-FileHash -LiteralPath "build/portable/Release/data/app.so" -Algorithm SHA256).Hash
+          $installer = (Get-FileHash -LiteralPath "build/windows/x64/runner/Release/data/app.so" -Algorithm SHA256).Hash
+          "portable app.so:  $portable"
+          "installer app.so: $installer"
+          if ($portable -eq $installer) {
+            throw "Installer build reused the portable app.so; PORTABLE_BUILD=false did not reach the Dart build."
+          }
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pure-music-windows-x64
+          name: pure-music-windows-x64-portable
+          path: build/portable/Release/
+          if-no-files-found: error
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-music-windows-x64-installer
           path: build/windows/x64/runner/Release/
           if-no-files-found: error
 
@@ -260,10 +314,10 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Download build artifact
+      - name: Download portable artifact
         uses: actions/download-artifact@v4
         with:
-          name: pure-music-windows-x64
+          name: pure-music-windows-x64-portable
           path: build/windows/x64/runner/Release
 
       # 打包脚本从仓库根读取 desktop_lyric；CI 不提交该目录，用构建产物恢复。
@@ -342,15 +396,30 @@ jobs:
             throw "Portable packaging failed with exit code $LASTEXITCODE"
           }
 
+      # 安装器改用与便携版不同的编译产物（PORTABLE_BUILD=false），先清空再取安装版。
+      - name: Reset build output for installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/windows/x64/runner/Release"
+          if (Test-Path -LiteralPath $out) {
+            Remove-Item -LiteralPath $out -Recurse -Force
+          }
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pure-music-windows-x64-installer
+          path: build/windows/x64/runner/Release
+
       - name: Package installer
         shell: pwsh
         env:
           PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
         run: |
           $ErrorActionPreference = "Stop"
-          # 安装版必须以 PORTABLE_BUILD=false 编译，数据根才会落在 <exe>\user_data；
-          # Mode 3 由脚本重新编译并制作安装器，便携版产物已在上一阶段打包。
-          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 3 -NonInteractive
+          # Mode 5 跳过编译，直接使用上面下载的安装版产物制作安装器。
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 5 -NonInteractive
           if ($LASTEXITCODE -ne 0) {
             throw "Installer packaging failed with exit code $LASTEXITCODE"
           }

@@ -333,10 +333,13 @@ function Update-BuildVersionFiles([string]$version) {
     Update-RunnerRcVersion $version
 }
 
+function Assert-FlutterAvailable() {
+    if (Get-Command "flutter" -ErrorAction SilentlyContinue) { return }
+    throw "flutter command not found in PATH. Compile modes 1/2/3 require Flutter; package-only modes 4/5 reuse an existing build and do not."
+}
+
 function Invoke-Build([string]$version, [bool]$isPortable) {
-    if (-not (Get-Command "flutter" -ErrorAction SilentlyContinue)) {
-        throw "flutter command not found in PATH."
-    }
+    Assert-FlutterAvailable
 
     Invoke-Step "pub get" {
         $needPubGet = $true
@@ -938,6 +941,14 @@ else {
     if ([string]::IsNullOrWhiteSpace($version)) { $version = $defaultVersion }
 }
 $version = Test-Version $version
+
+# 只有编译模式需要 Flutter；模式 4/5 复用已有构建产物，仅做拷贝与打包。
+if ($selectedMode -in @(1, 2, 3)) {
+    Assert-FlutterAvailable
+}
+else {
+    Write-Host ("Mode {0}: packaging existing build output; Flutter is not required." -f $selectedMode) -ForegroundColor Gray
+}
 
 switch ($selectedMode) {
     1 { New-PortablePackage $version $true $false }
