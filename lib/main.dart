@@ -15,6 +15,7 @@ import 'package:pure_music/core/memory_monitor.dart';
 import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/now_playing_perf_auto.dart';
 import 'package:pure_music/core/sidebar_perf_auto.dart';
+import 'package:pure_music/native/rust/api/app_env.dart' as rust_app_env;
 import 'package:pure_music/native/rust/api/logger.dart';
 import 'package:pure_music/native/rust/frb_generated.dart';
 import 'package:pure_music/core/app_fonts.dart';
@@ -200,9 +201,9 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await applicationLogOutput.init();
   _installGlobalErrorLogging();
-  await _prepareAppDataDirectories();
+  final tempDir = await _prepareAppDataDirectories();
   try {
-    await _runApplication();
+    await _runApplication(tempDir);
   } catch (error, stackTrace) {
     applicationLogOutput.recordUnhandledSync(
       source: 'startup',
@@ -220,9 +221,9 @@ Future<void> main() async {
   }
 }
 
-Future<void> _prepareAppDataDirectories() async {
+Future<Directory?> _prepareAppDataDirectories() async {
   try {
-    await getTempDir();
+    return await getTempDir();
   } catch (error, stackTrace) {
     log.app.warn(
       'legacy',
@@ -230,10 +231,11 @@ Future<void> _prepareAppDataDirectories() async {
       error: error,
       stackTrace: stackTrace,
     );
+    return null;
   }
 }
 
-Future<void> _runApplication() async {
+Future<void> _runApplication(Directory? tempDir) async {
   PaintingBinding.instance.imageCache.maximumSize = 96;
   PaintingBinding.instance.imageCache.maximumSizeBytes = 32 << 20;
   final singleInstance = FlutterSingleInstance();
@@ -247,6 +249,7 @@ Future<void> _runApplication() async {
     log.app.error('legacy', 'RustLib.init failed: $e\n$s');
     rethrow;
   }
+  await _applyProcessTempDir(tempDir);
   _listenRustLogger();
   await HotkeysHelper.unregisterAll();
   final welcome = await _loadSettingsAndCaches();
@@ -256,6 +259,23 @@ Future<void> _runApplication() async {
   runApp(Entry(welcome: welcome));
   NowPlayingPerfAuto.schedule();
   SidebarPerfAuto.schedule();
+}
+
+/// 把进程临时目录指向数据根下的 `temp`，供之后启动的子进程继承。
+///
+/// 必须在 `RustLib.init` 之后、任何子进程启动之前调用。
+Future<void> _applyProcessTempDir(Directory? tempDir) async {
+  if (tempDir == null) return;
+  try {
+    await rust_app_env.setProcessTempDir(path: tempDir.path);
+  } catch (error, stackTrace) {
+    log.app.warn(
+      'legacy',
+      '[startup] 设置进程临时目录失败，继续使用系统临时目录: ${tempDir.path}',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
 }
 
 void _listenRustLogger() {
