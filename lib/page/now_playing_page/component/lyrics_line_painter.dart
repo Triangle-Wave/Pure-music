@@ -1205,6 +1205,11 @@ class LyricsLinePainter extends CustomPainter {
     final postTracks = _postOriginalTracks(activeTracks);
 
     // ── Paint pre-original sub-tracks (before main text) ─────────────────────
+    final currentTimeMs = _highlightTimeMs(
+      syncLine,
+      syncLine.words,
+      _effectiveCurrentTimeMs,
+    );
     double preCursorY = padding.top;
     if (preTracks.isNotEmpty) {
       final blockTextAlign = switch (_effectiveTextAlign) {
@@ -1239,20 +1244,21 @@ class LyricsLinePainter extends CustomPainter {
           recycleTextPainter(tp);
         } else if (track == LyricLineTrack.romanization &&
             syncLine.romanLyric != null) {
-          final romanText = ZhConverter.convert(syncLine.romanLyric!, zhMode);
-          final tp = _buildTextPainter(
-            romanText,
-            secondaryColor,
-            romanFontSize,
-            romanWeight,
-            letterSpace,
-            isTranslation: true,
+          preCursorY += _paintRomanTrack(
+            canvas,
+            romanText: syncLine.romanLyric!,
+            romanWords: syncLine.romanWords,
+            origin: Offset(padding.left, preCursorY),
+            maxWidth: maxWidth,
+            fontSize: romanFontSize,
+            fontWeight: romanWeight,
+            letterSpacing: letterSpace,
+            unplayedColor: secondaryColor,
+            playedColor: playedColor,
             textAlign: blockTextAlign,
+            highlightActive: isHighlightActive && isMainVocalActive,
+            currentTimeMs: currentTimeMs,
           );
-          tp.layout(minWidth: maxWidth, maxWidth: maxWidth);
-          tp.paint(canvas, Offset(padding.left, preCursorY));
-          preCursorY += tp.height;
-          recycleTextPainter(tp);
         }
       }
     }
@@ -1279,11 +1285,6 @@ class LyricsLinePainter extends CustomPainter {
       x: padding.left,
       y: preTracks.isNotEmpty ? preCursorY : padding.top,
       firstOnLine: true,
-    );
-    final currentTimeMs = _highlightTimeMs(
-      syncLine,
-      syncLine.words,
-      _effectiveCurrentTimeMs,
     );
     for (int wordIndex = 0; wordIndex < syncLine.words.length; wordIndex++) {
       final word = syncLine.words[wordIndex];
@@ -1969,20 +1970,21 @@ class LyricsLinePainter extends CustomPainter {
           recycleTextPainter(tp);
         } else if (track == LyricLineTrack.romanization &&
             syncLine.romanLyric != null) {
-          final romanText = ZhConverter.convert(syncLine.romanLyric!, zhMode);
-          final tp = _buildTextPainter(
-            romanText,
-            secondaryColor,
-            romanFontSize,
-            romanWeight,
-            letterSpace,
-            isTranslation: true,
+          cursorY += _paintRomanTrack(
+            canvas,
+            romanText: syncLine.romanLyric!,
+            romanWords: syncLine.romanWords,
+            origin: Offset(padding.left, cursorY),
+            maxWidth: maxWidth,
+            fontSize: romanFontSize,
+            fontWeight: romanWeight,
+            letterSpacing: letterSpace,
+            unplayedColor: secondaryColor,
+            playedColor: playedColor,
             textAlign: blockTextAlign,
+            highlightActive: isHighlightActive && isMainVocalActive,
+            currentTimeMs: currentTimeMs,
           );
-          tp.layout(minWidth: maxWidth, maxWidth: maxWidth);
-          tp.paint(canvas, Offset(padding.left, cursorY));
-          cursorY += tp.height;
-          recycleTextPainter(tp);
         }
       }
     }
@@ -2550,20 +2552,21 @@ class LyricsLinePainter extends CustomPainter {
         preY += tTp.height;
         recycleTextPainter(tTp);
       } else if (track == LyricLineTrack.romanization && hasRoman) {
-        final romanText = ZhConverter.convert(syncLine.romanLyric!, zhMode);
-        final rTp = _buildTextPainter(
-          romanText,
-          secondaryColor,
-          romanFontSize,
-          romanWeight,
-          letterSpace,
-          isTranslation: true,
+        preY += _paintRomanTrack(
+          canvas,
+          romanText: syncLine.romanLyric!,
+          romanWords: syncLine.romanWords,
+          origin: Offset(padding.left, preY),
+          maxWidth: maxWidth,
+          fontSize: romanFontSize,
+          fontWeight: romanWeight,
+          letterSpacing: letterSpace,
+          unplayedColor: secondaryColor,
+          playedColor: playedColor,
           textAlign: blockTextAlign,
+          highlightActive: isHighlightActive,
+          currentTimeMs: _effectiveCurrentTimeMs,
         );
-        rTp.layout(minWidth: maxWidth, maxWidth: maxWidth);
-        rTp.paint(canvas, Offset(padding.left, preY));
-        preY += rTp.height;
-        recycleTextPainter(rTp);
       }
     }
 
@@ -2601,26 +2604,158 @@ class LyricsLinePainter extends CustomPainter {
           cursorY += tTp.height;
           recycleTextPainter(tTp);
         } else if (track == LyricLineTrack.romanization && hasRoman) {
-          final romanText = ZhConverter.convert(syncLine.romanLyric!, zhMode);
-          final rTp = _buildTextPainter(
-            romanText,
-            secondaryColor,
-            romanFontSize,
-            romanWeight,
-            letterSpace,
-            isTranslation: true,
+          cursorY += _paintRomanTrack(
+            canvas,
+            romanText: syncLine.romanLyric!,
+            romanWords: syncLine.romanWords,
+            origin: Offset(padding.left, cursorY),
+            maxWidth: maxWidth,
+            fontSize: romanFontSize,
+            fontWeight: romanWeight,
+            letterSpacing: letterSpace,
+            unplayedColor: secondaryColor,
+            playedColor: playedColor,
             textAlign: blockTextAlign,
+            highlightActive: isHighlightActive,
+            currentTimeMs: _effectiveCurrentTimeMs,
           );
-          rTp.layout(minWidth: maxWidth, maxWidth: maxWidth);
-          rTp.paint(canvas, Offset(padding.left, cursorY));
-          cursorY += rTp.height;
-          recycleTextPainter(rTp);
         }
       }
     }
 
     recycleTextPainter(mainTp);
     canvas.restore();
+  }
+
+  /// 绘制罗马音轨道。
+  ///
+  /// 有逐词时间且当前行处于高亮状态时，按字符进度在未唱色与已唱色之间插值；
+  /// 其余情况保持整行单色，与既有行为一致。
+  double _paintRomanTrack(
+    Canvas canvas, {
+    required String romanText,
+    required List<SyncLyricWord>? romanWords,
+    required Offset origin,
+    required double maxWidth,
+    required double fontSize,
+    required FontWeight fontWeight,
+    required double letterSpacing,
+    required Color unplayedColor,
+    required Color playedColor,
+    required TextAlign textAlign,
+    required bool highlightActive,
+    required double currentTimeMs,
+  }) {
+    final layoutText = ZhConverter.convert(
+      romanText,
+      LyricViewController.instance.zhConversionMode,
+    );
+    final tp = _buildTextPainter(
+      layoutText,
+      unplayedColor,
+      fontSize,
+      fontWeight,
+      letterSpacing,
+      isTranslation: true,
+      textAlign: textAlign,
+    );
+    tp.layout(minWidth: maxWidth, maxWidth: maxWidth);
+    final height = tp.height;
+
+    final words = romanWords;
+    if (words == null || words.isEmpty || !highlightActive) {
+      tp.paint(canvas, origin);
+      recycleTextPainter(tp);
+      return height;
+    }
+
+    final spans = _locateRomanWordSpans(layoutText, words);
+    if (spans == null) {
+      tp.paint(canvas, origin);
+      recycleTextPainter(tp);
+      return height;
+    }
+
+    final glyphTp = obtainTextPainter();
+    final lineHeight = config.translationLineHeight(config.fontWeight);
+    for (final span in spans) {
+      final word = span.word;
+      final wordStartMs = word.start.inMilliseconds.toDouble();
+      final wordEndMs =
+          wordStartMs + word.length.inMilliseconds.toDouble();
+      final wordProgress = lyricWordProgress(
+        nowMs: currentTimeMs,
+        wordStartMs: wordStartMs,
+        wordEndMs: wordEndMs,
+      );
+      final tokenText = layoutText.substring(span.start, span.end);
+      final charCount = tokenText.runes.length;
+      var localOffset = 0;
+      var charIndex = 0;
+      for (final rune in tokenText.runes) {
+        final runeLength = rune > 0xFFFF ? 2 : 1;
+        if (rune == 0x20 || rune == 0x09 || rune == 0x0A || rune == 0x0D) {
+          localOffset += runeLength;
+          charIndex++;
+          continue;
+        }
+        final charProgress = lyricCharWaveProgress(
+          wordProgress: wordProgress,
+          charIndex: charIndex,
+          charCount: charCount,
+        );
+        final color = Color.lerp(
+          unplayedColor,
+          playedColor,
+          charProgress,
+        )!;
+        final caret = tp.getOffsetForCaret(
+          TextPosition(offset: span.start + localOffset),
+          Rect.zero,
+        );
+        _paintStableGlyph(
+          canvas: canvas,
+          tp: glyphTp,
+          char: tokenText.substring(
+            localOffset,
+            localOffset + runeLength,
+          ),
+          style: _textStyle(
+            fontSize: fontSize,
+            color: color,
+            fontWeight: fontWeight,
+            letterSpacing: 0,
+            height: lineHeight,
+          ),
+          offset: Offset(origin.dx + caret.dx, origin.dy + caret.dy),
+        );
+        localOffset += runeLength;
+        charIndex++;
+      }
+    }
+    recycleTextPainter(glyphTp);
+    recycleTextPainter(tp);
+    return height;
+  }
+
+  /// 在整行布局文本中定位每个罗马音 token 的 UTF-16 区间。
+  /// 任一个 token 无法按顺序匹配时返回 null，调用方回退到整行绘制。
+  List<({int start, int end, SyncLyricWord word})>? _locateRomanWordSpans(
+    String layoutText,
+    List<SyncLyricWord> words,
+  ) {
+    final zhMode = LyricViewController.instance.zhConversionMode;
+    final spans = <({int start, int end, SyncLyricWord word})>[];
+    var searchOffset = 0;
+    for (final word in words) {
+      final token = ZhConverter.convert(word.content, zhMode);
+      if (token.isEmpty) continue;
+      final start = layoutText.indexOf(token, searchOffset);
+      if (start < 0) return null;
+      spans.add((start: start, end: start + token.length, word: word));
+      searchOffset = start + token.length;
+    }
+    return spans.isEmpty ? null : spans;
   }
 
   double _calcWordProgress(

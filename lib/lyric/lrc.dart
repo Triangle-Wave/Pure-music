@@ -8,6 +8,7 @@ import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/ttml.dart';
 import 'package:pure_music/lyric/lyric_format.dart';
 import 'package:pure_music/lyric/metadata_detector.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart';
 
 /// 智能清理空白行：
@@ -250,6 +251,12 @@ class Lrc extends Lyric {
       final otherText = _stripTags(other.content);
       if (!_hasAsianChars(otherText)) {
         original.romanLyric = otherText;
+        original.romanWords = mapRomanWords(
+          romanText: otherText,
+          words: null,
+          lineStart: original.start,
+          lineLength: original.length,
+        );
         return original;
       }
     }
@@ -262,6 +269,12 @@ class Lrc extends Lyric {
     if (!aIsRoman && bIsRoman) {
       // a 是 CJK 原文，b 是拉丁罗马音
       a.romanLyric = _stripTags(b.content);
+      a.romanWords = mapRomanWords(
+        romanText: a.romanLyric!,
+        words: null,
+        lineStart: a.start,
+        lineLength: a.length,
+      );
       return a;
     } else if (aIsRoman && !bIsRoman) {
       // a 是拉丁原文（如英文歌），b 是 CJK 翻译
@@ -354,6 +367,12 @@ class Lrc extends Lyric {
     // 设置罗马音
     if (romanParts.isNotEmpty) {
       primary.romanLyric = romanParts.join(' ');
+      primary.romanWords = mapRomanWords(
+        romanText: primary.romanLyric!,
+        words: null,
+        lineStart: primary.start,
+        lineLength: primary.length,
+      );
     }
 
     // 设置翻译
@@ -934,6 +953,12 @@ class Lrc extends Lyric {
           }
           if (romanParts.isNotEmpty) {
             pri.romanLyric = romanParts.join(' ');
+            pri.romanWords = mapRomanWords(
+              romanText: pri.romanLyric!,
+              words: pri.words,
+              lineStart: pri.start,
+              lineLength: pri.length,
+            );
           }
           if (transParts.isNotEmpty) {
             pri.translation = transParts.join(separator ?? '\u2503');
@@ -2269,15 +2294,22 @@ class Lrc extends Lyric {
         continue;
       }
 
-      parsedLines.add(
-        EnhancedLrcLine(
-          start,
-          Duration.zero,
-          words,
-          translationText?.isEmpty == true ? null : translationText,
-          romanText?.isEmpty == true ? null : romanText,
-        ),
+      final enhancedLine = EnhancedLrcLine(
+        start,
+        Duration.zero,
+        words,
+        translationText?.isEmpty == true ? null : translationText,
+        romanText?.isEmpty == true ? null : romanText,
       );
+      if (enhancedLine.romanLyric != null) {
+        enhancedLine.romanWords = mapRomanWords(
+          romanText: enhancedLine.romanLyric!,
+          words: enhancedLine.words,
+          lineStart: enhancedLine.start,
+          lineLength: enhancedLine.length,
+        );
+      }
+      parsedLines.add(enhancedLine);
 
       Duration? meaningfulWordStart;
       for (final word in words) {

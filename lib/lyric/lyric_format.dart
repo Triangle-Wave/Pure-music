@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:pure_music/lyric/lyric.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 
 // ── 格式类型 ──
 
@@ -262,6 +263,14 @@ List<SyncLyricLine> _parseBasicLrc(String content) {
       textEvents.length > 1 ? textEvents[1].text : null,
       textEvents.length > 2 ? textEvents[2].text : null,
     );
+    if (mainLine.romanLyric != null) {
+      mainLine.romanWords = mapRomanWords(
+        romanText: mainLine.romanLyric!,
+        words: mainLine.words,
+        lineStart: mainLine.start,
+        lineLength: mainLine.length,
+      );
+    }
 
     result.add(mainLine);
   }
@@ -278,11 +287,11 @@ List<SyncLyricLine> alignLyrics(
   bool isTranslation,
 ) {
   if (mainLines.isEmpty || otherLines.isEmpty) {
-    return mainLines.map((l) => SyncLyricLine(l.start, l.length, List.from(l.words), l.translation, l.romanLyric)).toList();
+    return mainLines.map((l) => SyncLyricLine(l.start, l.length, List.from(l.words), l.translation, l.romanLyric, l.romanWords)).toList();
   }
 
   final result = mainLines.map((l) =>
-    SyncLyricLine(l.start, l.length, List.from(l.words), l.translation, l.romanLyric)
+    SyncLyricLine(l.start, l.length, List.from(l.words), l.translation, l.romanLyric, l.romanWords)
   ).toList();
 
   var mi = 0, oi = 0;
@@ -295,6 +304,12 @@ List<SyncLyricLine> alignLyrics(
         result[mi].translation = text;
       } else {
         result[mi].romanLyric = text;
+        result[mi].romanWords = mapRomanWords(
+          romanText: text,
+          words: result[mi].words,
+          lineStart: result[mi].start,
+          lineLength: result[mi].length,
+        );
       }
       mi++;
       oi++;
@@ -336,14 +351,22 @@ List<SyncLyricLine> alignLyricLines(
   }
 
   return groups.map((g) {
-    final base = SyncLyricLine(g[0].start, g[0].length, List.from(g[0].words), null, null);
+    final base = SyncLyricLine(g[0].start, g[0].length, List.from(g[0].words), null, null, g[0].romanWords);
     if (g.length > 1) {
       final tranText = toText(g[1]);
       if (tranText.isNotEmpty) base.translation = tranText;
     }
     if (g.length > 2) {
       final romaText = toText(g[2]);
-      if (romaText.isNotEmpty) base.romanLyric = romaText;
+      if (romaText.isNotEmpty) {
+        base.romanLyric = romaText;
+        base.romanWords = mapRomanWords(
+          romanText: romaText,
+          words: base.words,
+          lineStart: base.start,
+          lineLength: base.length,
+        );
+      }
     }
     return base;
   }).toList();
@@ -468,6 +491,7 @@ List<SyncLyricLine> applyBracketReplacement(List<SyncLyricLine> lines,
       line.start, line.length, newWords,
       line.translation != null ? _processString(line.translation!, cfg) : null,
       line.romanLyric != null ? _processString(line.romanLyric!, cfg) : null,
+      line.romanWords,
     );
 
     return newLine;

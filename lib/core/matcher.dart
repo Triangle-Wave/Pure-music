@@ -1739,7 +1739,8 @@ Future<Lyric?> _getKugouSyncLyric(
           final length = entry.nextTime - entry.start;
           syncLines.add(
             SyncLyricLine(entry.start, length, words, entry.translation)
-              ..romanLyric = entry.romanization,
+              ..romanLyric = entry.romanization
+              ..romanWords = _romanWordsOfEntry(entry),
           );
         } else {
           final length = entry.nextTime - entry.start;
@@ -1749,7 +1750,9 @@ Future<Lyric?> _getKugouSyncLyric(
             syncLines.add(
               SyncLyricLine(entry.start, length, [
                 SyncLyricWord(entry.start, length, entry.content),
-              ], entry.translation)..romanLyric = entry.romanization,
+              ], entry.translation)
+                ..romanLyric = entry.romanization
+                ..romanWords = _romanWordsOfEntry(entry),
             );
           }
         }
@@ -1838,6 +1841,15 @@ Future<Lyric?> getAmllLyric(String id) async {
   return getOnlineLyric(amllTtmlFile: id);
 }
 
+List<SyncLyricWord>? _romanWordsOfEntry(LyricEntry entry) {
+  final romanWords = entry.romanWords;
+  if (romanWords == null || romanWords.isEmpty) return null;
+  return [
+    for (final word in romanWords)
+      SyncLyricWord(word.start, word.length, word.content),
+  ];
+}
+
 Lyric? _parsedToLyric(ParsedLyricResult parsed, {String? rawText}) {
   log.onlineLyric.info(
     'legacy',
@@ -1859,7 +1871,8 @@ Lyric? _parsedToLyric(ParsedLyricResult parsed, {String? rawText}) {
         final length = entry.nextTime - entry.start;
         syncLines.add(
           SyncLyricLine(entry.start, length, words, entry.translation)
-            ..romanLyric = entry.romanization,
+            ..romanLyric = entry.romanization
+            ..romanWords = _romanWordsOfEntry(entry),
         );
       } else {
         final length = entry.nextTime - entry.start;
@@ -1870,7 +1883,9 @@ Lyric? _parsedToLyric(ParsedLyricResult parsed, {String? rawText}) {
           syncLines.add(
             SyncLyricLine(entry.start, length, [
               SyncLyricWord(entry.start, length, entry.content),
-            ], entry.translation)..romanLyric = entry.romanization,
+            ], entry.translation)
+              ..romanLyric = entry.romanization
+              ..romanWords = _romanWordsOfEntry(entry),
           );
         }
       }
@@ -1893,7 +1908,8 @@ Lyric? _parsedToLyric(ParsedLyricResult parsed, {String? rawText}) {
       entry.content,
       requiredIsBlank: entry.content.isEmpty,
       translation: entry.translation,
-    )..romanLyric = entry.romanization;
+    )..romanLyric = entry.romanization
+     ..romanWords = _romanWordsOfEntry(entry);
     // 设置歌词行时长：前奏/间奏空白行需要正确的 length 才能被 UI 显示
     if (entry.content.isEmpty) {
       line.length = entry.nextTime - entry.start;

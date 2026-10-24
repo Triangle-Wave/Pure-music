@@ -36,8 +36,11 @@ class LyricLine {
   Duration length;
   String? translation;
   String? romanLyric;
+  List<SyncLyricWord>? romanWords;
 
-  LyricLine(this.start, this.length, [this.translation]) : romanLyric = null;
+  LyricLine(this.start, this.length, [this.translation])
+    : romanLyric = null,
+      romanWords = null;
 }
 
 class BackgroundVocal {
@@ -74,8 +77,10 @@ class SyncLyricLine extends LyricLine {
     this.words, [
     super.translation,
     String? romanLyric,
+    List<SyncLyricWord>? romanWords,
   ]) {
     this.romanLyric = romanLyric;
+    this.romanWords = romanWords;
   }
 
   String get content => words.map((w) => w.content).join();

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/metadata_detector.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 import 'package:pure_music/core/settings.dart';
 import 'dart:math';
 
@@ -69,6 +70,7 @@ class Krc extends Lyric {
           json.decode(utf8.decode(base64.decode(languageFrame)));
       List<String> trans = [];
       List<String> romas = [];
+      final List<List<String>> romaTokenLines = [];
       for (var item in languageMap['content']) {
         if (item['type'] == 1) {
           final List<dynamic> transContent = item['lyricContent'];
@@ -80,10 +82,15 @@ class Krc extends Lyric {
             }
           }
         } else if (item['type'] == 0) {
-          // type=0 是注音（罗马音），使用 join 合并数组中的单个字符
+          // type=0 是注音（罗马音），数组内每个元素对应一个主词的读音。
           final List<dynamic> romaContent = item['lyricContent'];
           for (final List<dynamic> romaLine in romaContent) {
-            romas.add(romaLine.join());
+            final tokens = romaLine
+                .map((token) => token?.toString().trim() ?? '')
+                .where((token) => token.isNotEmpty)
+                .toList();
+            romaTokenLines.add(tokens);
+            romas.add(tokens.join());
           }
         }
       }
@@ -104,6 +111,15 @@ class Krc extends Lyric {
         if (lines[i].words.isEmpty) continue;
         if (romaIt < romas.length) {
           lines[i].romanLyric = romas[romaIt];
+          final tokens = romaTokenLines[romaIt];
+          if (tokens.isNotEmpty) {
+            lines[i].romanWords = mapRomanWords(
+              romanText: tokens.join(' '),
+              words: lines[i].words,
+              lineStart: lines[i].start,
+              lineLength: lines[i].length,
+            );
+          }
           romaIt++;
         }
       }

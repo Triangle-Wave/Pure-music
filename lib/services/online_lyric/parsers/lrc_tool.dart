@@ -1,7 +1,9 @@
 import 'dart:isolate';
 
 import 'package:pure_music/services/online_lyric/models/lyric_entry.dart';
+import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/metadata_detector.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 
 /// 统一歌词解析工具
 /// 综合 lrc/yrc/qrc/krc 解析器
@@ -323,6 +325,32 @@ class LrcTool {
     }
   }
 
+  /// 将罗马音文本映射到主行的逐词时间；主行没有逐词时间时按行时长分配。
+  static List<WordEntry>? _mapRomanWords(LyricEntry line, String romanText) {
+    final sourceWords = line.words
+        ?.map((word) => SyncLyricWord(word.start, word.length, word.content))
+        .toList();
+    final lineLength = line.nextTime > line.start
+        ? line.nextTime - line.start
+        : Duration.zero;
+    final mapped = mapRomanWords(
+      romanText: romanText,
+      words: sourceWords,
+      lineStart: line.start,
+      lineLength: lineLength,
+    );
+    if (mapped == null) return null;
+    return [
+      for (final word in mapped)
+        WordEntry(
+          start: word.start,
+          length: word.length,
+          content: word.content,
+          nextTime: word.start + word.length,
+        ),
+    ];
+  }
+
   /// 时间窗口对齐：翻译行 → 原文行（标准 LRC 格式；KRC/QRC/YRC 走 _mergeTimedSubtitle）。
   static ParsedLyricResult _mergeTranslationText(
       ParsedLyricResult main, String? transText) {
@@ -434,6 +462,7 @@ class LrcTool {
       for (final line in mainGroups[mainStarts[candidate.mainIndex]]!) {
         if (isRomanization) {
           line.romanization = _addRomajiPunctuationSpacing(matched);
+          line.romanWords = _mapRomanWords(line, line.romanization!);
         } else {
           line.translation = matched;
         }
@@ -463,6 +492,7 @@ class LrcTool {
       if (t.isNotEmpty) {
         if (isRomanization) {
           main.lines[i].romanization = t;
+          main.lines[i].romanWords = _mapRomanWords(main.lines[i], t);
         } else {
           main.lines[i].translation = t;
         }
