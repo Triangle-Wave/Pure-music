@@ -21,6 +21,7 @@ AppContact=qingyueyin
 AppComments=Windows 本地音乐播放器
 AppCopyright=Copyright (C) 2026 qingyueyin
 DefaultDirName={localappdata}\Programs\{#AppName}
+UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -77,6 +78,11 @@ Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:Add
 
 [InstallDelete]
 Type: filesandordirs; Name: "{autoprograms}\{#AppName}"
+; 覆盖安装前清空运行时目录，避免旧版插件 DLL、Flutter 资源与桌面歌词混入新版本。
+; 用户数据在 {localappdata}\pure_music，不在此清理范围内。
+Type: filesandordirs; Name: "{app}\data"
+Type: filesandordirs; Name: "{app}\dll"
+Type: filesandordirs; Name: "{app}\desktop_lyric"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"

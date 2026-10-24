@@ -401,6 +401,19 @@ function New-AppPackage([string]$artifactRoot, [string]$version) {
         Invoke-RoboCopy $desktopLyricSrc $desktopLyricDest
     }
 
+    # 安装版应用内更新依赖该助手等待主程序退出，再启动安装程序。
+    Invoke-Step "copy installer update helper" {
+        $helperSource = Join-Path $PSScriptRoot "tool\apply_installer_update.ps1"
+        if (-not (Test-Path -LiteralPath $helperSource -PathType Leaf)) {
+            throw "Installer update helper not found: $helperSource"
+        }
+        $helperDir = Join-Path $finalAppDir "tool"
+        New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
+        Copy-Item -LiteralPath $helperSource -Destination (
+            Join-Path $helperDir "apply_installer_update.ps1"
+        ) -Force
+    }
+
     Invoke-Step "strip unused icon fonts" {
         Optimize-FlutterIconFonts $finalAppDir
     }
@@ -418,6 +431,7 @@ function Test-KeyFiles([string]$appDir) {
         "dll\BASS\basswasapi.dll",
         "dll\BASS\bass_fx.dll",
         "dll\BASS\bassmix.dll",
+        "tool\apply_installer_update.ps1",
         "desktop_lyric\desktop_lyric.exe"
     )
     $missing = @()

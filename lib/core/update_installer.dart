@@ -429,6 +429,9 @@ class UpdateInstaller {
   UpdateInstaller._();
 
   static const _portableSupportDirectory = '.update';
+  static const _installerHelperDirectory = 'tool';
+  static const _installerHelperFileName = 'apply_installer_update.ps1';
+  static const _installerUpdateLogFileName = 'installer_update.log';
 
   static Future<UpdateInstallOutcome> run({
     required UpdateInfo info,
@@ -537,15 +540,74 @@ class UpdateInstaller {
     if (portableBuild) {
       return _startPortableUpdate(archivePath: savePath, onPhase: onPhase);
     }
+    return _startInstallerUpdate(installerPath: savePath, onPhase: onPhase);
+  }
+
+  /// 安装版更新：助手等当前进程退出后再启动安装程序，保留交互式安装向导。
+  /// 安装完成后由安装程序的 Run 段启动新版，这里不额外重启。
+  static Future<UpdateInstallOutcome> _startInstallerUpdate({
+    required String installerPath,
+    required UpdatePhaseCallback onPhase,
+  }) async {
+    final appDir = p.dirname(Platform.resolvedExecutable);
+    final helperSource = File(
+      p.join(appDir, _installerHelperDirectory, _installerHelperFileName),
+    );
+    if (!await helperSource.exists()) {
+      throw UpdateInstallException('更新组件缺失，请手动运行已下载的安装包');
+    }
+
+    var logPath = '';
+    try {
+      final logDirectory = Directory(
+        p.join((await getAppDataDir()).path, updateDownloadDirectoryName),
+      );
+      await logDirectory.create(recursive: true);
+      logPath = p.join(logDirectory.path, _installerUpdateLogFileName);
+    } catch (error) {
+      log.update.warn('legacy', '创建更新日志目录失败：$error');
+    }
 
     onPhase('正在启动安装程序');
-    final process = await Process.start(
-      savePath,
-      const [],
-      workingDirectory: p.dirname(savePath),
-      mode: ProcessStartMode.detached,
+    final helperPath = p.join(
+      Directory.systemTemp.path,
+      'pure_music_apply_installer_${DateTime.now().microsecondsSinceEpoch}.ps1',
     );
+    try {
+      await helperSource.copy(helperPath);
+    } catch (_) {
+      throw UpdateInstallException('准备安装程序失败');
+    }
+
+    Process process;
+    try {
+      process = await Process.start(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          helperPath,
+          '-InstallerPath',
+          installerPath,
+          '-TargetProcessId',
+          '$pid',
+          '-AppExe',
+          Platform.resolvedExecutable,
+          '-LogPath',
+          logPath,
+        ],
+        workingDirectory: Directory.systemTemp.path,
+        mode: ProcessStartMode.detached,
+      );
+    } catch (_) {
+      await _deleteQuietly(helperPath);
+      throw UpdateInstallException('启动安装程序失败');
+    }
     if (process.pid <= 0) {
+      await _deleteQuietly(helperPath);
       throw UpdateInstallException('启动安装程序失败');
     }
     await WindowLifecycleService.instance.exitApp();

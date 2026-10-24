@@ -47,8 +47,9 @@ jobs:
         run: flutter doctor -v
 
       # 仓库没有提交 desktop_lyric/，但 CMake 的 install 阶段会复制它。
-      # 从官方最新 portable 包里恢复完整目录，保证桌面歌词可用。
-      - name: Restore desktop_lyric from latest release
+      # 这里只把上游 release 的 portable 包当作构建缓存的二进制来源，与应用更新源无关；
+      # 应用内更新检查与下载使用 Triangle-Wave/Pure-music 的 update/version.json。
+      - name: Restore desktop_lyric from upstream release
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
