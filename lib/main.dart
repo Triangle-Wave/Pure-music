@@ -200,6 +200,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await applicationLogOutput.init();
   _installGlobalErrorLogging();
+  await _prepareAppDataDirectories();
   try {
     await _runApplication();
   } catch (error, stackTrace) {
@@ -216,6 +217,19 @@ Future<void> main() async {
     );
     await applicationLogOutput.flush();
     rethrow;
+  }
+}
+
+Future<void> _prepareAppDataDirectories() async {
+  try {
+    await getTempDir();
+  } catch (error, stackTrace) {
+    log.app.warn(
+      'legacy',
+      '[startup] 创建临时目录失败，继续使用系统临时目录',
+      error: error,
+      stackTrace: stackTrace,
+    );
   }
 }
 

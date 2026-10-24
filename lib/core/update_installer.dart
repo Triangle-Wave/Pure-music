@@ -557,25 +557,34 @@ class UpdateInstaller {
       throw UpdateInstallException('更新组件缺失，请手动运行已下载的安装包');
     }
 
-    var logPath = '';
+    Directory updateDirectory;
     try {
-      final logDirectory = Directory(
-        p.join((await getAppDataDir()).path, updateDownloadDirectoryName),
+      updateDirectory = await _updateSupportDirectory();
+    } catch (error, stackTrace) {
+      log.update.warn(
+        'legacy',
+        '创建更新目录失败：$error',
+        error: error,
+        stackTrace: stackTrace,
       );
-      await logDirectory.create(recursive: true);
-      logPath = p.join(logDirectory.path, _installerUpdateLogFileName);
-    } catch (error) {
-      log.update.warn('legacy', '创建更新日志目录失败：$error');
+      throw UpdateInstallException('准备安装程序失败');
     }
+    final logPath = p.join(updateDirectory.path, _installerUpdateLogFileName);
 
     onPhase('正在启动安装程序');
     final helperPath = p.join(
-      Directory.systemTemp.path,
+      updateDirectory.path,
       'pure_music_apply_installer_${DateTime.now().microsecondsSinceEpoch}.ps1',
     );
     try {
       await helperSource.copy(helperPath);
-    } catch (_) {
+    } catch (error, stackTrace) {
+      log.update.warn(
+        'legacy',
+        '复制安装助手失败：$error',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw UpdateInstallException('准备安装程序失败');
     }
 
@@ -599,7 +608,7 @@ class UpdateInstaller {
           '-LogPath',
           logPath,
         ],
-        workingDirectory: Directory.systemTemp.path,
+        workingDirectory: updateDirectory.path,
         mode: ProcessStartMode.detached,
       );
     } catch (_) {
@@ -655,8 +664,9 @@ class UpdateInstaller {
         throw UpdateInstallException('便携版更新包不完整');
       }
 
+      final updateDirectory = await _updateSupportDirectory();
       helperPath = p.join(
-        Directory.systemTemp.path,
+        updateDirectory.path,
         'pure_music_apply_update_${DateTime.now().microsecondsSinceEpoch}.ps1',
       );
       await applyScript.copy(helperPath);
@@ -678,7 +688,7 @@ class UpdateInstaller {
           '-ProcessId',
           '$pid',
         ],
-        workingDirectory: Directory.systemTemp.path,
+        workingDirectory: updateDirectory.path,
         mode: ProcessStartMode.detached,
       );
       if (process.pid <= 0) {
@@ -688,14 +698,36 @@ class UpdateInstaller {
       await _discardDownloadedUpdate(archivePath);
       await WindowLifecycleService.instance.exitApp();
       return UpdateInstallOutcome.portableStarted;
-    } catch (error) {
+    } catch (error, stackTrace) {
       if (!helperStarted) {
         await _deleteDirectoryQuietly(newAppDir.path);
         if (helperPath != null) await _deleteQuietly(helperPath);
       }
-      if (error is UpdateInstallException) rethrow;
+      if (error is UpdateInstallException) {
+        log.update.warn(
+          'legacy',
+          '便携版更新准备失败：${error.message}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        rethrow;
+      }
+      log.update.warn(
+        'legacy',
+        '便携版更新准备失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw UpdateInstallException('准备便携版更新失败');
     }
+  }
+
+  /// 更新助手脚本所在目录：`<数据根>\updates`，与更新包下载目录一致。
+  static Future<Directory> _updateSupportDirectory() async {
+    final root = await getAppDataDir();
+    return Directory(
+      p.join(root.path, updateDownloadDirectoryName),
+    ).create(recursive: true);
   }
 
   static Future<Directory> _createPortableUpdateDirectory(

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:pure_music/core/app_data_paths.dart';
 import 'package:pure_music/core/hotkey_binding.dart';
 import 'package:pure_music/core/artist_name_splitter.dart';
 import 'package:pure_music/core/setting_action_state.dart';
@@ -19,68 +20,11 @@ import 'package:github/github.dart';
 import 'package:path/path.dart' as path;
 import 'package:window_manager/window_manager.dart';
 
+export 'app_data_paths.dart';
 export 'settings/settings_decoder.dart';
 export 'settings/settings_types.dart';
 
-const bool portableBuild = bool.fromEnvironment(
-  'PORTABLE_BUILD',
-  defaultValue: true,
-);
-
 const bool enableOnlineLyricWriting = true;
-
-String resolveAppDataPath({
-  required bool usePortableData,
-  required String executablePath,
-  required Map<String, String> environment,
-}) {
-  final exeBase = path.basename(executablePath).toLowerCase();
-  if (usePortableData &&
-      exeBase != 'dart.exe' &&
-      exeBase != 'flutter_tester.exe') {
-    return path.join(path.dirname(executablePath), 'data');
-  }
-
-  final localAppData = environment['LOCALAPPDATA'];
-  if (localAppData != null && localAppData.trim().isNotEmpty) {
-    return path.join(localAppData, 'pure_music');
-  }
-
-  final userProfile = environment['USERPROFILE'];
-  if (userProfile != null && userProfile.trim().isNotEmpty) {
-    return path.join(userProfile, 'AppData', 'Local', 'pure_music');
-  }
-
-  final appData = environment['APPDATA'];
-  if (appData != null && appData.trim().isNotEmpty) {
-    return path.join(appData, 'pure_music');
-  }
-
-  throw StateError('Unable to determine app data directory');
-}
-
-List<String> appDataPathCandidates({
-  required bool usePortableData,
-  required String executablePath,
-  required Map<String, String> environment,
-}) {
-  final preferred = resolveAppDataPath(
-    usePortableData: usePortableData,
-    executablePath: executablePath,
-    environment: environment,
-  );
-  final fallback = resolveAppDataPath(
-    usePortableData: false,
-    executablePath: executablePath,
-    environment: environment,
-  );
-  return [
-    preferred,
-    if (path.normalize(preferred).toLowerCase() !=
-        path.normalize(fallback).toLowerCase())
-      fallback,
-  ];
-}
 
 Future<Directory>? _appDataDirectoryFuture;
 
@@ -88,21 +32,56 @@ Future<Directory> getAppDataDir() {
   return _appDataDirectoryFuture ??= _resolveAppDataDir();
 }
 
-Future<Directory> _resolveAppDataDir() async {
-  final executable = Platform.resolvedExecutable;
-  final candidates = appDataPathCandidates(
+Future<Directory> _resolveAppDataDir() {
+  return resolveAppDataDirectory(
     usePortableData: portableBuild,
-    executablePath: executable,
+    executablePath: Platform.resolvedExecutable,
     environment: Platform.environment,
+    onWarn: (message, error) =>
+        log.app.warn('legacy', message, error: error),
   );
+}
+
+Future<Directory> resolveAppDataDirectory({
+  required bool usePortableData,
+  required String executablePath,
+  required Map<String, String> environment,
+  void Function(String message, Object? error)? onWarn,
+}) async {
+  final rawCustom = environment[appDataDirEnvironmentKey];
+  final custom = customAppDataPath(environment);
+  if (rawCustom != null && rawCustom.trim().isNotEmpty && custom == null) {
+    onWarn?.call(
+      '$appDataDirEnvironmentKey 不是绝对路径，已忽略：$rawCustom',
+      null,
+    );
+  }
+
+  final candidates = appDataPathCandidates(
+    usePortableData: usePortableData,
+    executablePath: executablePath,
+    environment: environment,
+  );
+  final customKey = custom == null
+      ? null
+      : path.windows.normalize(custom).toLowerCase();
   Object? lastError;
   for (final candidate in candidates) {
+    final isCustom =
+        customKey != null &&
+        path.windows.normalize(candidate).toLowerCase() == customKey;
     try {
       final directory = await Directory(candidate).create(recursive: true);
       await _verifyWritableDirectory(directory);
       return directory;
     } catch (error) {
       lastError = error;
+      if (isCustom) {
+        onWarn?.call(
+          '$appDataDirEnvironmentKey 指定的目录不可写，已回退默认位置：$candidate',
+          error,
+        );
+      }
     }
   }
   throw StateError('Unable to create writable app data directory: $lastError');
@@ -195,6 +174,11 @@ Future<Directory> getCacheDir() async {
 Future<Directory> getDbDir() async {
   final root = await getAppDataDir();
   return Directory(path.join(root.path, 'db')).create(recursive: true);
+}
+
+Future<Directory> getTempDir() async {
+  final root = await getAppDataDir();
+  return Directory(path.join(root.path, 'temp')).create(recursive: true);
 }
 
 class RebuildNotifier extends ChangeNotifier {
