@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:pure_music/component/adaptive_action_layout.dart';
@@ -65,6 +66,8 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.locateButtonsController,
     this.heroTag,
     this.primaryPicSeed,
+    this.headerTrailing,
+    this.headerCoverOverlay,
   });
 
   final PagePreference pref;
@@ -119,6 +122,13 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
 
   /// 列表上已经在显示的封面。飞行动画落地时先画它，避免头图重新加载闪一下。
   final ImageProvider? primaryPicSeed;
+
+  /// 头部附加内容，例如专辑的在线信息面板。宽屏在右侧，中等宽度移到标题下方，
+  /// 窄屏不展示。
+  final Widget? headerTrailing;
+
+  /// 叠加在头图上的控件，例如在线封面切换器。
+  final Widget? headerCoverOverlay;
 
   @override
   State<UniDetailPage<P, S, T>> createState() => _UniDetailPageState<P, S, T>();
@@ -501,6 +511,8 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           collapseProgress: collapseProgress,
           heroTag: widget.heroTag,
           initialPic: widget.primaryPicSeed,
+          headerTrailing: widget.headerTrailing,
+          headerCoverOverlay: widget.headerCoverOverlay,
         );
         if (!_enableHeaderCollapse(context)) {
           return buildHeader(0);
@@ -1252,6 +1264,8 @@ class _UniDetailPageHeader extends StatelessWidget {
     this.collapseProgress = 0,
     this.heroTag,
     this.initialPic,
+    this.headerTrailing,
+    this.headerCoverOverlay,
   });
 
   final Future<ImageProvider?> pic;
@@ -1270,6 +1284,8 @@ class _UniDetailPageHeader extends StatelessWidget {
   final double collapseProgress;
   final String? heroTag;
   final ImageProvider? initialPic;
+  final Widget? headerTrailing;
+  final Widget? headerCoverOverlay;
 
   @override
   Widget build(BuildContext context) {
@@ -1293,8 +1309,16 @@ class _UniDetailPageHeader extends StatelessWidget {
     BoxConstraints constraints,
   ) {
     final scheme = theme.colorScheme;
-    final compact =
-        SidebarMotionScope.layoutWidthOf(context, constraints.maxWidth) < 560;
+    final layoutWidth = SidebarMotionScope.layoutWidthOf(
+      context,
+      constraints.maxWidth,
+    );
+    final compact = layoutWidth < 560;
+    final showTrailing = !compact && headerTrailing != null;
+    final stackTrailing = showTrailing && layoutWidth < 760;
+    final trailingWidth = showTrailing && !stackTrailing
+        ? math.min(340.0, math.max(220.0, layoutWidth * 0.30))
+        : 0.0;
     final expandedCoverSize = compact ? 156.0 : 200.0;
     // Scroll-scrubbed layout stays 1:1 with pixels. Easing the scrub
     // front-loads the collapse (easeOutCubic(0.5) ≈ 0.875) so the first
@@ -1323,7 +1347,14 @@ class _UniDetailPageHeader extends StatelessWidget {
           Expanded(
             child: ConstrainedBox(
               constraints: BoxConstraints(minHeight: coverSize),
-              child: _headerInfo(scheme, titleSize, expandedContentOpacity),
+              child: _headerInfo(
+                scheme,
+                titleSize,
+                expandedContentOpacity,
+                showTrailing ? headerTrailing : null,
+                trailingWidth,
+                stackTrailing,
+              ),
             ),
           ),
         ],
@@ -1362,16 +1393,23 @@ class _UniDetailPageHeader extends StatelessWidget {
       ),
       child: image,
     );
-    if (heroTag == null) return framed;
-    return Hero(tag: heroTag!, child: framed);
+    final base = heroTag == null ? framed : Hero(tag: heroTag!, child: framed);
+    final overlay = headerCoverOverlay;
+    if (overlay == null || size < 150) return base;
+    return Stack(
+      children: [base, Positioned.fill(child: overlay)],
+    );
   }
 
   Widget _headerInfo(
     ColorScheme scheme,
     double titleSize,
     double expandedContentOpacity,
+    Widget? trailing,
+    double trailingWidth,
+    bool stackTrailing,
   ) {
-    return Column(
+    final info = Column(
       mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.end,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1411,6 +1449,62 @@ class _UniDetailPageHeader extends StatelessWidget {
           searchQuery: searchQuery,
           onSearchChanged: onSearchChanged,
           scheme: scheme,
+        ),
+      ],
+    );
+    if (trailing == null) return info;
+    if (stackTrailing) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          info,
+          ClipRect(
+            child: Align(
+              alignment: Alignment.topLeft,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    top: 8.0 * expandedContentOpacity,
+                  ),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: trailing,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(child: info),
+        SizedBox(width: 12.0 * expandedContentOpacity),
+        ClipRect(
+          child: Align(
+            alignment: Alignment.bottomRight,
+            heightFactor: expandedContentOpacity,
+            child: Opacity(
+              opacity: expandedContentOpacity,
+              child: SizedBox(
+                width: trailingWidth * expandedContentOpacity,
+                child: ClipRect(
+                  child: OverflowBox(
+                    alignment: Alignment.centerRight,
+                    minWidth: trailingWidth,
+                    maxWidth: trailingWidth,
+                    child: SizedBox(width: trailingWidth, child: trailing),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
       ],
     );

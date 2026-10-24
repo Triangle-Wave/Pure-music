@@ -279,6 +279,7 @@ class AppSettings {
   bool useMaterialYouForControls = false;
   bool keepPitch = true;
   bool lastFmEnabled = false;
+  bool onlineAlbumInfoEnabled = true;
   Set<NowPlayingMode> wavyBarEnabledModes = defaultWavyBarEnabledModes();
   bool showSpectrumBar = false;
   bool useMaterialYouForSpectrumBar = false;
@@ -1165,6 +1166,10 @@ class AppSettings {
     _instance.proxyBypass =
         normalizedStringSetting(settingsMap['ProxyBypass']) ??
         defaultProxyBypass;
+    _instance.onlineAlbumInfoEnabled = normalizedBoolSetting(
+      settingsMap['OnlineAlbumInfoEnabled'],
+      defaultValue: true,
+    );
   }
 
   static Future<void> readFromJson() async {
@@ -1300,6 +1305,7 @@ class AppSettings {
     'ProxyUser': proxyUser,
     'ProxyPass': proxyPass,
     'ProxyBypass': proxyBypass,
+    'OnlineAlbumInfoEnabled': onlineAlbumInfoEnabled,
   };
 
   Future<void> _writeSettingsFile(

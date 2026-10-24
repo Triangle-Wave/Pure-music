@@ -29,6 +29,8 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
   ProxyMode _mode = ProxyMode.system;
   bool _saving = false;
   bool _obscurePassword = true;
+  bool _onlineAlbumEnabled = true;
+  bool _savingOnlineAlbum = false;
 
   @override
   void initState() {
@@ -44,6 +46,7 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
     _userController.text = settings.proxyUser;
     _passController.text = settings.proxyPass;
     _bypassController.text = settings.proxyBypass;
+    _onlineAlbumEnabled = settings.onlineAlbumInfoEnabled;
   }
 
   @override
@@ -125,6 +128,29 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _setOnlineAlbumEnabled(bool value) async {
+    if (_savingOnlineAlbum) return;
+    final settings = AppSettings.instance;
+    final previous = settings.onlineAlbumInfoEnabled;
+    setState(() {
+      _onlineAlbumEnabled = value;
+      _savingOnlineAlbum = true;
+    });
+    settings.onlineAlbumInfoEnabled = value;
+    final saved = await settings.saveSettings();
+    if (!mounted) return;
+    if (!saved) {
+      settings.onlineAlbumInfoEnabled = previous;
+      setState(() {
+        _onlineAlbumEnabled = previous;
+        _savingOnlineAlbum = false;
+      });
+      showTextOnSnackBar('设置保存失败', variant: ToastVariant.error);
+      return;
+    }
+    setState(() => _savingOnlineAlbum = false);
   }
 
   String _modeSubtitle() {
@@ -219,6 +245,17 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
             onPressed: _saving ? null : _save,
             icon: const Icon(Symbols.save, size: 18),
             label: Text(_saving ? '保存中' : '保存代理设置'),
+          ),
+        ),
+        const SizedBox(height: 24.0),
+        const SettingsSectionHeader('在线内容'),
+        const SizedBox(height: 4.0),
+        SettingsTile(
+          description: '在线专辑信息',
+          subtitle: '从 MusicBrainz 获取年份、厂牌与风格，并从 Cover Art Archive 读取封面、封底和内页',
+          action: Switch(
+            value: _onlineAlbumEnabled,
+            onChanged: _savingOnlineAlbum ? null : _setOnlineAlbumEnabled,
           ),
         ),
         const SizedBox(height: 24.0),
