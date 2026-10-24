@@ -3,6 +3,7 @@
 //
 
 pub mod amll_ttml;
+pub mod app_env;
 pub mod color_extraction;
 pub mod installed_font;
 pub mod library_db;
