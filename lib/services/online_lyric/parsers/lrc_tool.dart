@@ -1,7 +1,7 @@
 import 'dart:isolate';
 
 import 'package:pure_music/services/online_lyric/models/lyric_entry.dart';
-import 'package:pure_music/lyric/lyric.dart';
+import 'package:pure_music/lyric/lyric.dart' hide LyricFormat;
 import 'package:pure_music/lyric/metadata_detector.dart';
 import 'package:pure_music/lyric/roman_word_mapper.dart';
 
