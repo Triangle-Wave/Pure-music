@@ -116,3 +116,10 @@ skills-lock.json
 # Local diagnostics, not shipped
 tool/local/
 
+# FFmpeg runtime bundle (prepared at build time; see tool/ffmpeg/README.md)
+/tool/ffmpeg/*
+!/tool/ffmpeg/README.md
+!/tool/ffmpeg/fetch_ffmpeg.ps1
+!/tool/ffmpeg/build_minimal_ffmpeg.sh
+!/tool/ffmpeg/verify_bundle.ps1
+

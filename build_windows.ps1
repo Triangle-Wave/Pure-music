@@ -133,6 +133,90 @@ function Get-BandizipCliPath() {
     return $null
 }
 
+$script:BassFfmpegRuntimeDlls = @(
+    "bass_ffmpeg.dll",
+    "avcodec-62.dll",
+    "avformat-62.dll",
+    "avutil-60.dll",
+    "swresample-6.dll"
+)
+
+function Get-BassFfmpegRuntimeDir() {
+    $runtimeDir = Join-Path $PSScriptRoot "tool\ffmpeg\runtime"
+    if (-not [string]::IsNullOrWhiteSpace($env:PURE_MUSIC_FFMPEG_DIR)) {
+        $runtimeDir = $env:PURE_MUSIC_FFMPEG_DIR
+    }
+
+    $missing = @($script:BassFfmpegRuntimeDlls | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $runtimeDir $_) -PathType Leaf)
+    })
+    if ($missing.Count -gt 0) {
+        $fetcher = Join-Path $PSScriptRoot "tool\ffmpeg\fetch_ffmpeg.ps1"
+        if (-not (Test-Path -LiteralPath $fetcher -PathType Leaf)) {
+            throw "BASS_FFMPEG runtime missing ($($missing -join ', ')) and fetch script not found: $fetcher"
+        }
+        Write-Host ("BASS_FFMPEG runtime missing ({0}); preparing it." -f ($missing -join ', ')) -ForegroundColor Yellow
+        & $fetcher
+    }
+
+    $stillMissing = @($script:BassFfmpegRuntimeDlls | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $runtimeDir $_) -PathType Leaf)
+    })
+    if ($stillMissing.Count -gt 0) {
+        throw "BASS_FFMPEG runtime is incomplete after preparation: $($stillMissing -join ', ') in $runtimeDir"
+    }
+
+    $verifier = Join-Path $PSScriptRoot "tool\ffmpeg\verify_bundle.ps1"
+    if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
+        throw "BASS_FFMPEG verifier not found: $verifier"
+    }
+    & $verifier -BundleDir $runtimeDir
+    return $runtimeDir
+}
+
+function Test-BassFfmpegSizeBudget([string]$bassDir) {
+    $ffmpegBytes = 0
+    foreach ($name in $script:BassFfmpegRuntimeDlls | Where-Object { $_ -ne "bass_ffmpeg.dll" }) {
+        $path = Join-Path $bassDir $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "BASS_FFMPEG runtime is missing $name in $bassDir"
+        }
+        $ffmpegBytes += (Get-Item -LiteralPath $path).Length
+    }
+    $ffmpegMiB = $ffmpegBytes / 1MB
+    Write-Host ("Bundled FFmpeg DLLs: {0:N2} MiB" -f $ffmpegMiB) -ForegroundColor Gray
+    if ($ffmpegMiB -gt 80 -and $env:PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG -ne "1") {
+        throw ("FFmpeg DLLs exceed the 80 MiB budget ({0:N2} MiB). Use the trimmed shared build from tool/ffmpeg/build_minimal_ffmpeg.sh." -f $ffmpegMiB)
+    }
+    if ($ffmpegMiB -gt 80) {
+        Write-Warning ("FFmpeg DLLs exceed the 80 MiB budget ({0:N2} MiB) but PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG=1 is set." -f $ffmpegMiB)
+    }
+}
+
+function Copy-BassFfmpegRuntime([string]$sourceDir, [string]$appDir) {
+    $bassDestDir = Join-Path $appDir "dll\BASS"
+    New-Item -ItemType Directory -Force -Path $bassDestDir | Out-Null
+    foreach ($name in $script:BassFfmpegRuntimeDlls) {
+        $source = Join-Path $sourceDir $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "BASS_FFMPEG runtime is missing $name in $sourceDir"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $bassDestDir $name) -Force
+    }
+
+    $docDestDir = Join-Path $appDir "ffmpeg"
+    New-Item -ItemType Directory -Force -Path $docDestDir | Out-Null
+    foreach ($name in @("LICENSE", "README-ffmpeg.txt", "THIRD-PARTY-NOTICES.txt")) {
+        $source = Join-Path $sourceDir $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "BASS_FFMPEG runtime is missing $name in $sourceDir"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $docDestDir $name) -Force
+    }
+
+    Test-BassFfmpegSizeBudget $bassDestDir
+}
+
 function Set-CompileParallelism() {
     $logical = [Environment]::ProcessorCount
     if ($logical -lt 1) { $logical = 4 }
@@ -295,6 +379,11 @@ function Invoke-Build([string]$version, [bool]$isPortable) {
 
     Set-CompileParallelism
 
+    # CMake 的 install 阶段会把 BASS_FFMPEG 运行时复制进产物。
+    Invoke-Step "prepare BASS_FFMPEG runtime" {
+        Get-BassFfmpegRuntimeDir | Out-Null
+    }
+
     Invoke-Step "flutter build windows" {
         if ($Clean) {
             Write-Host "Clean build requested; removing previous Windows build cache." -ForegroundColor Yellow
@@ -401,6 +490,30 @@ function New-AppPackage([string]$artifactRoot, [string]$version) {
         Invoke-RoboCopy $desktopLyricSrc $desktopLyricDest
     }
 
+    # TAK 原生解码依赖随包携带的 BASS_FFMPEG 插件与 FFmpeg 共享库。
+    # 编译产物已由 CMake install 放入 dll/BASS 与 ffmpeg；打包作业没有准备目录时直接复用。
+    Invoke-Step "verify BASS_FFMPEG runtime" {
+        $missing = @()
+        foreach ($name in $script:BassFfmpegRuntimeDlls) {
+            if (-not (Test-Path -LiteralPath (Join-Path $finalAppDir "dll\BASS\$name") -PathType Leaf)) {
+                $missing += "dll\BASS\$name"
+            }
+        }
+        foreach ($name in @("LICENSE", "README-ffmpeg.txt", "THIRD-PARTY-NOTICES.txt")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $finalAppDir "ffmpeg\$name") -PathType Leaf)) {
+                $missing += "ffmpeg\$name"
+            }
+        }
+        if ($missing.Count -gt 0) {
+            Write-Host ("Build output lacks BASS_FFMPEG files ({0}); copying from the prepared runtime." -f ($missing -join ', ')) -ForegroundColor Yellow
+            $ffmpegSrc = Get-BassFfmpegRuntimeDir
+            Copy-BassFfmpegRuntime $ffmpegSrc $finalAppDir
+        }
+        else {
+            Test-BassFfmpegSizeBudget (Join-Path $finalAppDir "dll\BASS")
+        }
+    }
+
     # 安装版应用内更新依赖该助手等待主程序退出，再启动安装程序。
     Invoke-Step "copy installer update helper" {
         $helperSource = Join-Path $PSScriptRoot "tool\apply_installer_update.ps1"
@@ -431,6 +544,14 @@ function Test-KeyFiles([string]$appDir) {
         "dll\BASS\basswasapi.dll",
         "dll\BASS\bass_fx.dll",
         "dll\BASS\bassmix.dll",
+        "dll\BASS\bass_ffmpeg.dll",
+        "dll\BASS\avcodec-62.dll",
+        "dll\BASS\avformat-62.dll",
+        "dll\BASS\avutil-60.dll",
+        "dll\BASS\swresample-6.dll",
+        "ffmpeg\LICENSE",
+        "ffmpeg\README-ffmpeg.txt",
+        "ffmpeg\THIRD-PARTY-NOTICES.txt",
         "tool\apply_installer_update.ps1",
         "desktop_lyric\desktop_lyric.exe"
     )

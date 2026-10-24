@@ -15,6 +15,14 @@ on:
         required: false
         type: boolean
         default: false
+      ffmpeg_variant:
+        description: 'BASS_FFMPEG 运行时来源（shared CI 构建裁剪版 FFmpeg；bundled 官方发布包，体积超预算）'
+        required: false
+        type: choice
+        options:
+          - shared
+          - bundled
+        default: shared
 
 permissions:
   contents: read
@@ -39,6 +47,62 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache BASS_FFMPEG runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            tool/ffmpeg/.cache
+            tool/ffmpeg/.build/ffmpeg-8.1.2.tar.xz
+            tool/ffmpeg/runtime
+          key: bass-ffmpeg-${{ inputs.ffmpeg_variant || 'shared' }}-8.1.2-${{ hashFiles('tool/ffmpeg/fetch_ffmpeg.ps1', 'tool/ffmpeg/build_minimal_ffmpeg.sh', 'tool/ffmpeg/verify_bundle.ps1') }}
+
+      - name: Prepare BASS_FFMPEG runtime
+        shell: pwsh
+        env:
+          FFMPEG_VARIANT: ${{ inputs.ffmpeg_variant || 'shared' }}
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $variant = if ($env:FFMPEG_VARIANT -eq "bundled") { "bundled" } else { "auto" }
+          # shared 流程先用完整包取得插件与许可，随后由裁剪构建覆盖 FFmpeg DLL；
+          # 体积上限在 Build trimmed FFmpeg shared libraries 之后的校验中强制执行。
+          $fetchArgs = @{ Variant = $variant }
+          if ($env:FFMPEG_VARIANT -ne "bundled") { $fetchArgs["SkipSizeCheck"] = $true }
+          ./tool/ffmpeg/fetch_ffmpeg.ps1 @fetchArgs
+
+      - name: Setup MSYS2 for shared FFmpeg
+        if: ${{ inputs.ffmpeg_variant != 'bundled' }}
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-nasm
+            make
+            diffutils
+            tar
+            xz
+            curl
+          cache: true
+
+      - name: Build trimmed FFmpeg shared libraries
+        if: ${{ inputs.ffmpeg_variant != 'bundled' }}
+        shell: msys2 {0}
+        run: bash tool/ffmpeg/build_minimal_ffmpeg.sh
+
+      - name: Verify BASS_FFMPEG runtime
+        shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./tool/ffmpeg/verify_bundle.ps1 -BundleDir tool/ffmpeg/runtime
+          $bytes = (Get-ChildItem "tool/ffmpeg/runtime" -File -Filter "av*.dll" |
+            Measure-Object -Property Length -Sum).Sum
+          "FFmpeg runtime: {0:N2} MiB" -f ($bytes / 1MB)
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
@@ -153,11 +217,22 @@ jobs:
             "$out/dll/BASS/basswasapi.dll",
             "$out/dll/BASS/bass_fx.dll",
             "$out/dll/BASS/bassmix.dll",
+            "$out/dll/BASS/bass_ffmpeg.dll",
+            "$out/dll/BASS/avcodec-62.dll",
+            "$out/dll/BASS/avformat-62.dll",
+            "$out/dll/BASS/avutil-60.dll",
+            "$out/dll/BASS/swresample-6.dll",
+            "$out/ffmpeg/LICENSE",
+            "$out/ffmpeg/README-ffmpeg.txt",
+            "$out/ffmpeg/THIRD-PARTY-NOTICES.txt",
             "$out/desktop_lyric/desktop_lyric.exe"
           )
           $missing = @($required | Where-Object { -not (Test-Path $_) })
           if ($missing.Count -gt 0) {
             throw "Missing build output: $($missing -join ', ')"
+          }
+          if (Test-Path -LiteralPath "$out/ffmpeg/ffmpeg.exe") {
+            throw "Static ffmpeg.exe must not be shipped; TAK decodes through bass_ffmpeg.dll"
           }
           "Build output verified."
 
@@ -258,6 +333,8 @@ jobs:
 
       - name: Package portable
         shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
         run: |
           $ErrorActionPreference = "Stop"
           .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 4 -NonInteractive
@@ -267,6 +344,8 @@ jobs:
 
       - name: Package installer
         shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
         run: |
           $ErrorActionPreference = "Stop"
           .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 5 -NonInteractive
@@ -295,6 +374,32 @@ jobs:
             if ($text -notmatch '^[0-9a-fA-F]{64}\s+\*?\S+$') {
               throw "Invalid checksum content in $shaPath"
             }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $portableZip = "output/pure_music_${env:VERSION}_release_portable.zip"
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $portableZip).Path)
+          try {
+            $entries = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+            foreach ($entry in @(
+              "dll/BASS/bass_ffmpeg.dll",
+              "dll/BASS/avcodec-62.dll",
+              "dll/BASS/avformat-62.dll",
+              "dll/BASS/avutil-60.dll",
+              "dll/BASS/swresample-6.dll",
+              "ffmpeg/LICENSE",
+              "ffmpeg/README-ffmpeg.txt",
+              "ffmpeg/THIRD-PARTY-NOTICES.txt"
+            )) {
+              if ($entries -notcontains $entry) {
+                throw "Portable archive missing $entry"
+              }
+            }
+            if ($entries -contains "ffmpeg/ffmpeg.exe") {
+              throw "Portable archive must not contain ffmpeg/ffmpeg.exe"
+            }
+          }
+          finally {
+            $zip.Dispose()
           }
           Get-ChildItem output -File | Select-Object Name, Length
 

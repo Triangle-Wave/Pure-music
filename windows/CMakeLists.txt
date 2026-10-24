@@ -125,3 +125,40 @@ install(FILES ${BASS_PLUGINS}
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/../desktop_lyric/"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/desktop_lyric"
     COMPONENT Runtime)
+
+# Install BASS_FFMPEG plugin and its FFmpeg shared libraries (TAK native decoding).
+# The bundle is prepared by tool/ffmpeg/fetch_ffmpeg.ps1 (official plugin release)
+# and optionally tool/ffmpeg/build_minimal_ffmpeg.sh (trimmed FFmpeg shared build).
+# DLLs live next to bass.dll so the Windows loader resolves their imports in place.
+set(BASS_FFMPEG_BUNDLE_DIR "${CMAKE_SOURCE_DIR}/../tool/ffmpeg/runtime")
+set(BASS_FFMPEG_RUNTIME_DLLS
+    bass_ffmpeg.dll
+    avcodec-62.dll
+    avformat-62.dll
+    avutil-60.dll
+    swresample-6.dll)
+set(BASS_FFMPEG_MISSING "")
+set(BASS_FFMPEG_RUNTIME_PATHS "")
+foreach(FFMPEG_DLL IN LISTS BASS_FFMPEG_RUNTIME_DLLS)
+  set(FFMPEG_DLL_PATH "${BASS_FFMPEG_BUNDLE_DIR}/${FFMPEG_DLL}")
+  if(NOT EXISTS "${FFMPEG_DLL_PATH}")
+    list(APPEND BASS_FFMPEG_MISSING "${FFMPEG_DLL}")
+  else()
+    list(APPEND BASS_FFMPEG_RUNTIME_PATHS "${FFMPEG_DLL_PATH}")
+  endif()
+endforeach()
+if(BASS_FFMPEG_MISSING)
+  message(FATAL_ERROR
+    "BASS_FFMPEG runtime is incomplete in ${BASS_FFMPEG_BUNDLE_DIR}: ${BASS_FFMPEG_MISSING}. "
+    "Run tool/ffmpeg/fetch_ffmpeg.ps1 (bundled) or tool/ffmpeg/build_minimal_ffmpeg.sh (trimmed) before building.")
+endif()
+install(FILES ${BASS_FFMPEG_RUNTIME_PATHS}
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/dll/BASS"
+    COMPONENT Runtime)
+foreach(FFMPEG_DOC LICENSE README-ffmpeg.txt THIRD-PARTY-NOTICES.txt)
+  if(EXISTS "${BASS_FFMPEG_BUNDLE_DIR}/${FFMPEG_DOC}")
+    install(FILES "${BASS_FFMPEG_BUNDLE_DIR}/${FFMPEG_DOC}"
+        DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/ffmpeg"
+        COMPONENT Runtime)
+  endif()
+endforeach()
