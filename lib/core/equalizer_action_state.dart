@@ -207,6 +207,29 @@ double computeEqAutoGainDb({
   return (-requiredHeadroomDb).clamp(eqAutoGainMinDb, 0.0).toDouble();
 }
 
+/// 峰值估算的对数采样点数。10 段 EQ 的带宽约 1 octave，
+/// 96 点覆盖每个频段的峰谷，配合预先算好的 biquad 系数完成响应评估。
+const int eqPeakEstimateSampleCount = 96;
+
+/// 单个 EQ 频段的 biquad 系数，与待评估频率无关，可在频率循环外预计算。
+final class _EqBandBiquad {
+  const _EqBandBiquad({
+    required this.b0,
+    required this.b1,
+    required this.b2,
+    required this.a0,
+    required this.a1,
+    required this.a2,
+  });
+
+  final double b0;
+  final double b1;
+  final double b2;
+  final double a0;
+  final double a1;
+  final double a2;
+}
+
 double estimateEqPeakGainDb(
   Iterable<double> gains, {
   double sampleRate = 48000.0,
@@ -219,28 +242,33 @@ double estimateEqPeakGainDb(
       : 48000.0;
   final maximumFrequency = math.min(20000.0, normalizedSampleRate * 0.5 * 0.98);
   if (maximumFrequency <= 20.0) return 0.0;
-  for (var i = 0; i < 512; i++) {
-    final ratio = i / 511.0;
+  final bands = _buildEqBandBiquads(
+    normalizedGains,
+    sampleRate: normalizedSampleRate,
+    useDx8Fallback: useDx8Fallback,
+  );
+  if (bands.isEmpty) return 0.0;
+  final sampleCount = eqPeakEstimateSampleCount;
+  for (var i = 0; i < sampleCount; i++) {
+    final ratio = i / (sampleCount - 1);
     final frequency =
         20.0 * math.pow(maximumFrequency / 20.0, ratio).toDouble();
     peakDb = math.max(
       peakDb,
-      _eqResponseDb(
+      _eqBandsResponseDb(
         frequency,
-        normalizedGains,
+        bands,
         sampleRate: normalizedSampleRate,
-        useDx8Fallback: useDx8Fallback,
       ),
     );
   }
   for (var i = 0; i < eqBandCount; i++) {
     peakDb = math.max(
       peakDb,
-      _eqResponseDb(
+      _eqBandsResponseDb(
         eqBandFrequenciesHz[i],
-        normalizedGains,
+        bands,
         sampleRate: normalizedSampleRate,
-        useDx8Fallback: useDx8Fallback,
       ),
     );
   }
@@ -268,20 +296,16 @@ double _interpolateLogFrequencyGain(
   return 0.0;
 }
 
-double _eqResponseDb(
-  double frequency,
+List<_EqBandBiquad> _buildEqBandBiquads(
   List<double> gains, {
   required double sampleRate,
   required bool useDx8Fallback,
 }) {
-  final nyquist = sampleRate * 0.5;
-  if (frequency <= 0.0 || frequency >= nyquist * 0.98) return 0.0;
-  final omega = 2.0 * math.pi * frequency / sampleRate;
   final bandwidthOctaves = useDx8Fallback
       ? eqDx8BandwidthSemitonesFromQ(eqBandQ) / 12.0
       : eqBandBandwidthOctaves;
   final q = eqQFromBandwidthOctaves(bandwidthOctaves);
-  var totalDb = 0.0;
+  final bands = <_EqBandBiquad>[];
   for (var i = 0; i < eqBandCount; i++) {
     final gain = gains[i];
     if (gain.abs() < 1e-6) continue;
@@ -292,20 +316,40 @@ double _eqResponseDb(
     final alpha = math.sin(w0) / (2.0 * q);
     final cosine = math.cos(w0);
     final amplitude = math.pow(10.0, gain / 40.0).toDouble();
-    final b0 = 1.0 + alpha * amplitude;
-    final b1 = -2.0 * cosine;
-    final b2 = 1.0 - alpha * amplitude;
-    final a0 = 1.0 + alpha / amplitude;
-    final a1 = -2.0 * cosine;
-    final a2 = 1.0 - alpha / amplitude;
-    final cosOmega = math.cos(omega);
-    final sinOmega = math.sin(omega);
-    final cosDoubleOmega = math.cos(2.0 * omega);
-    final sinDoubleOmega = math.sin(2.0 * omega);
-    final numeratorReal = b0 + b1 * cosOmega + b2 * cosDoubleOmega;
-    final numeratorImag = -b1 * sinOmega - b2 * sinDoubleOmega;
-    final denominatorReal = a0 + a1 * cosOmega + a2 * cosDoubleOmega;
-    final denominatorImag = -a1 * sinOmega - a2 * sinDoubleOmega;
+    bands.add(
+      _EqBandBiquad(
+        b0: 1.0 + alpha * amplitude,
+        b1: -2.0 * cosine,
+        b2: 1.0 - alpha * amplitude,
+        a0: 1.0 + alpha / amplitude,
+        a1: -2.0 * cosine,
+        a2: 1.0 - alpha / amplitude,
+      ),
+    );
+  }
+  return bands;
+}
+
+double _eqBandsResponseDb(
+  double frequency,
+  List<_EqBandBiquad> bands, {
+  required double sampleRate,
+}) {
+  final nyquist = sampleRate * 0.5;
+  if (frequency <= 0.0 || frequency >= nyquist * 0.98) return 0.0;
+  final omega = 2.0 * math.pi * frequency / sampleRate;
+  final cosOmega = math.cos(omega);
+  final sinOmega = math.sin(omega);
+  final cosDoubleOmega = 2.0 * cosOmega * cosOmega - 1.0;
+  final sinDoubleOmega = 2.0 * sinOmega * cosOmega;
+  var totalDb = 0.0;
+  for (final band in bands) {
+    final numeratorReal =
+        band.b0 + band.b1 * cosOmega + band.b2 * cosDoubleOmega;
+    final numeratorImag = -band.b1 * sinOmega - band.b2 * sinDoubleOmega;
+    final denominatorReal =
+        band.a0 + band.a1 * cosOmega + band.a2 * cosDoubleOmega;
+    final denominatorImag = -band.a1 * sinOmega - band.a2 * sinDoubleOmega;
     final denominatorMagnitude = math.sqrt(
       denominatorReal * denominatorReal + denominatorImag * denominatorImag,
     );

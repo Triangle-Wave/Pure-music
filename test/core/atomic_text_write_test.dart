@@ -27,6 +27,26 @@ void main() {
   });
 
   test(
+    'merges a burst of writes into one snapshot without temp files',
+    () async {
+      final target = File('${root.path}${Platform.pathSeparator}pending.json');
+      final pending = <Future<void>>[];
+      for (var i = 0; i < 8; i++) {
+        pending.add(writeTextFileAtomically(target.path, '{"value":$i}'));
+      }
+      await Future.wait(pending);
+
+      expect(await target.readAsString(), '{"value":7}');
+      final leftovers = root
+          .listSync()
+          .whereType<File>()
+          .where((file) => file.path.contains('.tmp.'))
+          .toList();
+      expect(leftovers, isEmpty);
+    },
+  );
+
+  test(
     'a failed write does not block a later write to the same path',
     () async {
       final parent = File('${root.path}${Platform.pathSeparator}settings');

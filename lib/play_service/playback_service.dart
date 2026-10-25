@@ -961,15 +961,30 @@ class PlaybackService extends ChangeNotifier {
 
   double get volumeDsp => _pref.volumeDsp;
 
-  /// 修改解码时的音量（不影响 Windows 系统音量）
-  void setVolumeDsp(double volume) {
-    log.playback.info('legacy', '[action] setVolumeDsp=$volume');
-    AudioEchoLogRecorder.instance.mark(
-      'setVolumeDsp',
-      extra: {'value': volume},
-    );
+  int _lastVolumeDspDragLogMs = 0;
+
+  /// 修改解码时的音量（不影响 Windows 系统音量）。
+  ///
+  /// [persist] 为 false 时只更新内存与 BASS 输出音量，供滑杆拖动过程调用；
+  /// 拖动结束后以默认参数调用一次，落盘并通知监听者。
+  void setVolumeDsp(double volume, {bool persist = true}) {
+    if (persist) {
+      log.playback.info('legacy', '[action] setVolumeDsp=$volume');
+      AudioEchoLogRecorder.instance.mark(
+        'setVolumeDsp',
+        extra: {'value': volume},
+      );
+    } else {
+      // 拖动期间的日志按 250ms 节流，避免逐帧写日志与污染诊断缓冲。
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastVolumeDspDragLogMs >= 250) {
+        _lastVolumeDspDragLogMs = nowMs;
+        log.playback.debug('legacy', '[action] setVolumeDsp(drag)=$volume');
+      }
+    }
     _pref.volumeDsp = volume;
     _eq.reapplyOutputGain();
+    if (!persist) return;
     _savePlaybackOnly();
     notifyListeners();
   }

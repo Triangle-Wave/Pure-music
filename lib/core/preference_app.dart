@@ -343,7 +343,54 @@ class AppPreference {
     }
   }
 
-  Future<bool> savePlaybackOnly() async {
+  /// 播放偏好的写盘合并窗口：窗口内的多次调用只写一次最新快照。
+  static const playbackSaveDelay = Duration(milliseconds: 260);
+
+  Timer? _playbackSaveTimer;
+  Completer<bool>? _playbackSaveCompleter;
+
+  /// 保存播放偏好。拖动等高频场景的连续调用会合并成一次写盘。
+  Future<bool> savePlaybackOnly() {
+    final pending = _playbackSaveCompleter;
+    if (pending != null) return pending.future;
+    final completer = Completer<bool>();
+    _playbackSaveCompleter = completer;
+    _playbackSaveTimer = Timer(playbackSaveDelay, () {
+      _playbackSaveTimer = null;
+      _playbackSaveCompleter = null;
+      unawaited(
+        _writePlaybackPref().then(
+          (saved) {
+            if (!completer.isCompleted) completer.complete(saved);
+          },
+          onError: (Object error, StackTrace trace) {
+            log.settings.error(
+              'legacy',
+              '播放偏好保存失败: $error',
+              stackTrace: trace,
+            );
+            if (!completer.isCompleted) completer.complete(false);
+          },
+        ),
+      );
+    });
+    return completer.future;
+  }
+
+  /// 立即写出待保存的播放偏好，供退出流程调用。
+  Future<bool> flushPlaybackSave() {
+    final completer = _playbackSaveCompleter;
+    if (completer == null) return Future<bool>.value(true);
+    _playbackSaveTimer?.cancel();
+    _playbackSaveTimer = null;
+    _playbackSaveCompleter = null;
+    return _writePlaybackPref().then((saved) {
+      if (!completer.isCompleted) completer.complete(saved);
+      return saved;
+    });
+  }
+
+  Future<bool> _writePlaybackPref() async {
     try {
       final settingsDir = await getSettingsDir();
       final playbackPrefPath = path.join(

@@ -1203,6 +1203,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   void _triggerIndicator() {
+    // 气泡已显示时不再 setState、也不再重建 Timer，避免拖动期间逐帧重建。
+    if (_showCustomIndicator) return;
     setState(() => _showCustomIndicator = true);
     _indicatorTimer?.cancel();
     _indicatorTimer = Timer(const Duration(milliseconds: 1000), () {
@@ -1385,7 +1387,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   Widget _appVolumeSlider(ColorScheme scheme) {
     final useMonet = AppSettings.instance.useMaterialYouForControls;
     return ListenableBuilder(
-      listenable: Listenable.merge([dragVolDsp, playbackService]),
+      listenable: dragVolDsp,
       builder: (context, _) {
         final currentValue = isDragging
             ? dragVolDsp.value
@@ -1400,18 +1402,19 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
           onChangeStart: (value) {
             isDragging = true;
             dragVolDsp.value = value;
-            playbackService.setVolumeDsp(value);
+            playbackService.setVolumeDsp(value, persist: false);
             _triggerIndicator();
           },
           onChanged: (value) {
             dragVolDsp.value = value;
-            playbackService.setVolumeDsp(value);
+            playbackService.setVolumeDsp(value, persist: false);
             if (isDragging) _triggerIndicator();
           },
           onChangeEnd: (value) {
             isDragging = false;
             dragVolDsp.value = value;
             playbackService.setVolumeDsp(value);
+            _triggerIndicator();
           },
         );
       },

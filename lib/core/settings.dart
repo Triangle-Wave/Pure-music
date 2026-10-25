@@ -108,7 +108,19 @@ Future<Directory> getSettingsDir() async {
   return Directory(path.join(root.path, 'settings')).create(recursive: true);
 }
 
-final Map<String, Future<void>> _atomicWriteQueues = <String, Future<void>>{};
+final class _AtomicWriteState {
+  _AtomicWriteState(this.filePath);
+
+  final String filePath;
+
+  /// 待写内容，始终保存最新一次调用的完整快照。
+  String? pendingContent;
+
+  Future<void>? active;
+}
+
+final Map<String, _AtomicWriteState> _atomicWriteStates =
+    <String, _AtomicWriteState>{};
 
 Future<void> _writeTextFileAtomicallyNow(
   String filePath,
@@ -129,40 +141,46 @@ Future<void> _writeTextFileAtomicallyNow(
   }
 }
 
+/// 原子写入同一文件时只保留最新内容：写入期间到达的新内容覆盖待写快照，
+/// 当前一轮结束后再写一次最新值，避免调用方排队堆积。
 Future<void> writeTextFileAtomically(String filePath, String content) {
   final queueKey = path.normalize(path.absolute(filePath)).toLowerCase();
-  final previous = _atomicWriteQueues[queueKey];
-  late Future<void> current;
-  current = _writeQueuedTextFile(
-    previous: previous,
-    filePath: filePath,
-    content: content,
-    queueKey: queueKey,
-    current: () => current,
+  final state = _atomicWriteStates.putIfAbsent(
+    queueKey,
+    () => _AtomicWriteState(filePath),
   );
-  _atomicWriteQueues[queueKey] = current;
-  return current;
+  state.pendingContent = content;
+  final active = state.active;
+  if (active != null) return active;
+  final started = _drainAtomicWrite(queueKey, state);
+  state.active = started;
+  return started;
 }
 
-Future<void> _writeQueuedTextFile({
-  required Future<void>? previous,
-  required String filePath,
-  required String content,
-  required String queueKey,
-  required Future<void> Function() current,
-}) async {
+Future<void> _drainAtomicWrite(
+  String queueKey,
+  _AtomicWriteState state,
+) async {
+  Object? failure;
+  StackTrace? failureTrace;
   try {
-    if (previous != null) {
+    while (true) {
+      final content = state.pendingContent;
+      state.pendingContent = null;
+      if (content == null) break;
       try {
-        await previous;
-      } catch (_) {}
+        await _writeTextFileAtomicallyNow(state.filePath, content);
+      } catch (error, trace) {
+        failure = error;
+        failureTrace = trace;
+      }
     }
-    await _writeTextFileAtomicallyNow(filePath, content);
   } finally {
-    if (identical(_atomicWriteQueues[queueKey], current())) {
-      final removed = _atomicWriteQueues.remove(queueKey);
-      if (removed != null) unawaited(removed);
-    }
+    state.active = null;
+    _atomicWriteStates.remove(queueKey);
+  }
+  if (failure != null) {
+    Error.throwWithStackTrace(failure, failureTrace ?? StackTrace.current);
   }
 }
 
