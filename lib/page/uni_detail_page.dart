@@ -572,6 +572,9 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
     required int currentTabIndex,
   }) {
     return Stack(
+      // 头部异常变高时正文可能只剩极小高度；裁剪掉浮层溢出，避免按钮
+      // 绘制到头部或侧栏区域。
+      clipBehavior: Clip.hardEdge,
       children: [
         Positioned.fill(
           child: _buildResultContentRow(
@@ -1530,25 +1533,23 @@ class UniDetailPageHeader extends StatelessWidget {
         Flexible(
           flex: 0,
           fit: FlexFit.loose,
-          child: ClipRect(
-            child: Align(
-              alignment: Alignment.bottomRight,
-              heightFactor: expandedContentOpacity,
-              child: Opacity(
-                opacity: expandedContentOpacity,
-                child: SizedBox(
-                  width: trailingWidth * expandedContentOpacity,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.centerRight,
-                      minWidth: trailingWidth,
-                      maxWidth: trailingWidth,
-                      child: SizedBox(
-                        width: trailingWidth,
-                        child: KeyedSubtree(
-                          key: const ValueKey('detail-header-trailing'),
-                          child: trailing,
-                        ),
+          child: SizedBox(
+            width: trailingWidth * expandedContentOpacity,
+            child: ClipRect(
+              child: Align(
+                alignment: Alignment.bottomRight,
+                heightFactor: expandedContentOpacity,
+                child: Opacity(
+                  opacity: expandedContentOpacity,
+                  child: OverflowBox(
+                    alignment: Alignment.centerRight,
+                    minWidth: trailingWidth,
+                    maxWidth: trailingWidth,
+                    child: SizedBox(
+                      width: trailingWidth,
+                      child: KeyedSubtree(
+                        key: const ValueKey('detail-header-trailing'),
+                        child: trailing,
                       ),
                     ),
                   ),

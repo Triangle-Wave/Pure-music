@@ -13,6 +13,7 @@ import 'package:pure_music/component/artist_tile.dart';
 import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/online_candidate_dialog.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
+import 'package:pure_music/page/uni_detail_header_layout.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
@@ -472,6 +473,9 @@ class _AlbumDetailScaffold extends StatelessWidget {
       heroTag: 'album:${album.primaryPath}',
       primaryPicSeed: album.cachedDetailCover,
       headerTrailing: headerTrailing,
+      // 在线专辑面板比在线头像面板内容多，右侧摆放需要更宽的空间；977 宽
+      // 内容区下改放到标题下方，避免挤压标题、操作区与正文高度。
+      headerTrailingSideMinWidth: 1100,
       headerCoverOverlay: headerCoverOverlay,
       secondaryContent: secondaryContent,
       secondaryContentBuilder: (context, audio, i, ctl, view) =>
@@ -565,124 +569,120 @@ class OnlineAlbumPanel extends StatelessWidget {
   final VoidCallback? onChoose;
   final VoidCallback? onClose;
 
+  /// 面板最大宽度，与头部 stacked 摆放的可用宽度一致。
+  static const double _maxWidth = 460.0;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final current = info;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
-        borderRadius: AppRadius.mdCircular,
+    final summary = current?.summary;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(
+        maxWidth: _maxWidth,
+        maxHeight: UniDetailHeaderLayout.stackedMaxTrailingHeight,
       ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 6, 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Symbols.language,
-                  size: 15,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    current?.sourceLabel ??
-                        (disabled ? '在线专辑（已隐藏）' : '在线专辑'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: AppType.caption,
-                      fontWeight: AppType.weightSemibold,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-                if (loading) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.6,
-                      color: scheme.primary,
-                    ),
-                  ),
-                ],
-                _panelButton(
-                  scheme,
-                  Symbols.tune,
-                  '选择来源',
-                  loading ? null : onChoose,
-                ),
-                _panelButton(
-                  scheme,
-                  Symbols.refresh,
-                  '刷新在线信息',
-                  loading ? null : onRefresh,
-                ),
-                _panelButton(scheme, Symbols.close, '隐藏在线信息', onClose),
-              ],
-            ),
-            const SizedBox(height: 6),
-            if (disabled)
-              Text(
-                '在线信息已隐藏，封面使用本地图片；可通过“选择来源”恢复。',
-                style: TextStyle(
-                  fontSize: AppType.caption,
-                  color: scheme.onSurfaceVariant,
-                ),
-              )
-            else if (loading && current == null)
-              Text(
-                '正在读取专辑信息…',
-                style: TextStyle(
-                  fontSize: AppType.caption,
-                  color: scheme.onSurfaceVariant,
-                ),
-              )
-            else if (current == null)
-              Text(
-                '暂无在线信息',
-                style: TextStyle(
-                  fontSize: AppType.caption,
-                  color: scheme.onSurfaceVariant,
-                ),
-              )
-            else ...[
-              if (current.year != null ||
-                  current.label != null ||
-                  current.genre != null)
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    if (current.year != null)
-                      _metaChip(scheme, '${current.year}'),
-                    if (current.label != null)
-                      _metaChip(scheme, current.label!),
-                    if (current.genre != null)
-                      _metaChip(scheme, current.genre!),
-                  ],
-                ),
-              if (current.summary != null) ...[
-                const SizedBox(height: 6),
-                _ExpandableSummary(text: current.summary!),
-              ],
-              const SizedBox(height: 6),
-              Text(
-                '来源 ${current.sourceLabel}',
-                style: TextStyle(
-                  fontSize: AppType.caption,
-                  color: scheme.onSurfaceVariant.withValues(alpha: 0.78),
-                ),
-              ),
-            ],
-          ],
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+          borderRadius: AppRadius.mdCircular,
         ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 6, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Symbols.language,
+                    size: 15,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      current?.sourceLabel ??
+                          (disabled ? '在线专辑（已隐藏）' : '在线专辑'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.caption,
+                        fontWeight: AppType.weightSemibold,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  if (loading) ...[
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.6,
+                        color: scheme.primary,
+                      ),
+                    ),
+                  ],
+                  _panelButton(
+                    scheme,
+                    Symbols.tune,
+                    '选择来源',
+                    loading ? null : onChoose,
+                  ),
+                  _panelButton(
+                    scheme,
+                    Symbols.refresh,
+                    '刷新在线信息',
+                    loading ? null : onRefresh,
+                  ),
+                  _panelButton(scheme, Symbols.close, '隐藏在线信息', onClose),
+                ],
+              ),
+              const SizedBox(height: 4),
+              _captionLine(scheme, _statusText(current)),
+              if (summary != null && !disabled) ...[
+                const SizedBox(height: 2),
+                Tooltip(
+                  message: summary,
+                  child: _captionLine(scheme, summary),
+                ),
+              ],
+              if (current != null && !disabled) ...[
+                const SizedBox(height: 2),
+                _captionLine(scheme, '来源 ${current.sourceLabel}'),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 面板正文固定为单行，避免长文案把头部高度撑开。
+  String _statusText(OnlineAlbumInfo? current) {
+    if (disabled) return '在线信息已隐藏，封面使用本地图片；可通过“选择来源”恢复。';
+    if (current == null) {
+      return loading ? '正在读取专辑信息…' : '暂无在线信息';
+    }
+    final parts = <String>[
+      if (current.year != null) '${current.year}',
+      if (current.label != null) current.label!,
+      if (current.genre != null) current.genre!,
+      if (current.trackCount != null) '${current.trackCount} 首',
+    ];
+    return parts.isEmpty ? '来源 ${current.sourceLabel}' : parts.join(' · ');
+  }
+
+  Widget _captionLine(ColorScheme scheme, String text) {
+    return Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: AppType.caption,
+        color: scheme.onSurfaceVariant,
       ),
     );
   }
@@ -701,98 +701,6 @@ class OnlineAlbumPanel extends StatelessWidget {
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
       constraints: const BoxConstraints.tightFor(width: 26, height: 26),
-    );
-  }
-
-  Widget _metaChip(ColorScheme scheme, String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(
-        color: scheme.surface.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        text,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: AppType.caption,
-          color: scheme.onSurfaceVariant,
-        ),
-      ),
-    );
-  }
-}
-
-class _ExpandableSummary extends StatefulWidget {
-  const _ExpandableSummary({required this.text});
-
-  final String text;
-
-  @override
-  State<_ExpandableSummary> createState() => _ExpandableSummaryState();
-}
-
-class _ExpandableSummaryState extends State<_ExpandableSummary> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final style = TextStyle(
-      fontSize: AppType.caption,
-      height: 1.35,
-      color: scheme.onSurfaceVariant,
-    );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final painter = TextPainter(
-          text: TextSpan(text: widget.text, style: style),
-          maxLines: 2,
-          textDirection: Directionality.of(context),
-        )..layout(maxWidth: constraints.maxWidth);
-        final overflows = painter.didExceedMaxLines;
-        painter.dispose();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.text,
-              style: style,
-              maxLines: _expanded ? null : 2,
-              overflow: _expanded
-                  ? TextOverflow.visible
-                  : TextOverflow.ellipsis,
-            ),
-            if (overflows || _expanded)
-              GestureDetector(
-                onTap: () => setState(() => _expanded = !_expanded),
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _expanded ? '收起' : '展开',
-                        style: TextStyle(
-                          fontSize: AppType.caption,
-                          color: scheme.primary,
-                        ),
-                      ),
-                      Icon(
-                        _expanded
-                            ? Symbols.expand_less
-                            : Symbols.expand_more,
-                        size: 14,
-                        color: scheme.primary,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
     );
   }
 }

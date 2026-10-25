@@ -222,9 +222,13 @@ class _ListLocateButtonsState extends State<ListLocateButtons> {
 
   @override
   Widget build(BuildContext context) {
-    // 内部按钮用 Positioned 布局，外层撑满约束确保定位基准正确。
+    // 内部按钮用 Positioned 布局，外层撑满约束确保定位基准正确；显式裁剪
+    // 保证正文可用高度不足时按钮不会绘制到头部或侧栏区域。
     return SizedBox.expand(
-      child: Stack(children: [_scrollToTopButton(), _locateNowPlayingButton()]),
+      child: Stack(
+        clipBehavior: Clip.hardEdge,
+        children: [_scrollToTopButton(), _locateNowPlayingButton()],
+      ),
     );
   }
 }

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pure_music/page/album_detail_page.dart';
 import 'package:pure_music/page/uni_detail_header_layout.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
+import 'package:pure_music/services/online_album/online_album_models.dart';
 
 Widget _headerHarness({required Widget child}) {
   return MaterialApp(
@@ -123,6 +125,181 @@ void main() {
     expect(
       panelRect.width,
       lessThanOrEqualTo(UniDetailHeaderLayout.stackedMaxTrailingWidth),
+    );
+  });
+
+  testWidgets('977 宽专辑头部把在线专辑面板放到标题下方且正文仍有空间', (tester) async {
+    tester.view.physicalSize = const Size(977, 756);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const albumTitle = 'AQUAPLUS VOCAL COLLECTION';
+    const summary = '收录多首游戏与动画主题曲的精选专辑，在线信息摘要用于验证面板不会把头部高度撑开。';
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 977,
+            height: 756,
+            child: Column(
+              children: [
+                UniDetailPageHeader(
+                  pic: Future<ImageProvider?>.value(null),
+                  picShape: PicShape.rrect,
+                  title: albumTitle,
+                  subtitle: '14 首作品',
+                  actions: const [
+                    SizedBox(
+                      key: ValueKey('play-action'),
+                      width: 96,
+                      height: 40,
+                    ),
+                  ],
+                  trailingSideMinWidth: 1100,
+                  headerTrailing: const OnlineAlbumPanel(
+                    info: OnlineAlbumInfo(
+                      releaseGroupId: 'release-group',
+                      title: albumTitle,
+                      year: 2013,
+                      label: 'F.I.X. RECORDS',
+                      genre: 'Soundtrack',
+                      summary: summary,
+                      trackCount: 14,
+                      source: 'MusicBrainz',
+                    ),
+                    loading: false,
+                  ),
+                ),
+                const Expanded(
+                  child: SizedBox(key: ValueKey('detail-body')),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+
+    final titleFinder = find.text(albumTitle);
+    final title = tester.renderObject<RenderParagraph>(titleFinder);
+    expect(title.didExceedMaxLines, isFalse);
+
+    final panelRect = tester.getRect(find.byType(OnlineAlbumPanel));
+    expect(
+      panelRect.top,
+      greaterThanOrEqualTo(tester.getRect(titleFinder).bottom),
+    );
+    expect(
+      panelRect.width,
+      lessThanOrEqualTo(UniDetailHeaderLayout.stackedMaxTrailingWidth),
+    );
+    expect(
+      panelRect.height,
+      lessThanOrEqualTo(UniDetailHeaderLayout.stackedMaxTrailingHeight),
+    );
+
+    // 头部只占一小部分高度，tab 栏与曲目列表所在的正文区仍然可见。
+    final bodyRect = tester.getRect(find.byKey(const ValueKey('detail-body')));
+    expect(bodyRect.height, greaterThan(300));
+  });
+
+  testWidgets('1280 宽专辑头部把在线面板放在标题右侧且正文仍有空间', (tester) async {
+    tester.view.physicalSize = const Size(1280, 756);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const albumTitle = 'AQUAPLUS VOCAL COLLECTION';
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 1280,
+            height: 756,
+            child: Column(
+              children: [
+                UniDetailPageHeader(
+                  pic: Future<ImageProvider?>.value(null),
+                  picShape: PicShape.rrect,
+                  title: albumTitle,
+                  subtitle: '14 首作品',
+                  actions: const [
+                    SizedBox(width: 96, height: 40),
+                  ],
+                  trailingSideMinWidth: 1100,
+                  headerTrailing: const SizedBox(
+                    key: ValueKey('online-panel'),
+                    width: 200,
+                    height: 72,
+                  ),
+                ),
+                const Expanded(
+                  child: SizedBox(key: ValueKey('detail-body')),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+
+    final titleFinder = find.text(albumTitle);
+    final titleRect = tester.getRect(titleFinder);
+    // 标题区没有被右侧面板吞掉宽度。
+    expect(titleRect.width, greaterThan(300));
+
+    final panelRect = tester.getRect(find.byKey(const ValueKey('online-panel')));
+    expect(panelRect.left, greaterThan(titleRect.right));
+    expect(
+      tester.getRect(find.byKey(const ValueKey('detail-body'))).height,
+      greaterThan(300),
+    );
+  });
+
+  testWidgets('200 宽侧栏内在线专辑面板保持限高且不溢出', (tester) async {
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 200,
+              child: OnlineAlbumPanel(
+                info: OnlineAlbumInfo(
+                  releaseGroupId: 'release-group',
+                  title: 'AQUAPLUS VOCAL COLLECTION',
+                  year: 2013,
+                  label: 'F.I.X. RECORDS',
+                  genre: 'Soundtrack',
+                  summary:
+                      '收录多首游戏与动画主题曲的精选专辑，在线信息摘要用于验证面板不会把头部高度撑开。',
+                  trackCount: 14,
+                  source: 'MusicBrainz',
+                ),
+                loading: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getRect(find.byType(OnlineAlbumPanel)).height,
+      lessThanOrEqualTo(UniDetailHeaderLayout.stackedMaxTrailingHeight),
     );
   });
 }
