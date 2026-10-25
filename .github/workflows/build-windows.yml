@@ -253,8 +253,56 @@ jobs:
             throw "Portable staging is incomplete: $target"
           }
 
+          # 安装版构建只重新生成 data/app.so，与 dart-define 无关的运行时文件沿用上次输出；
+          # 先复制到独立目录，补齐安装版输出时不依赖 build/portable 是否仍然存在。
+          $runtime = "build/installer-runtime"
+          if (Test-Path -LiteralPath $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          foreach ($name in @("dll", "desktop_lyric", "ffmpeg")) {
+            $src = Join-Path $target $name
+            if (-not (Test-Path -LiteralPath $src -PathType Container)) {
+              throw "Portable staging lacks ${name}: $src"
+            }
+            robocopy $src (Join-Path $runtime $name) /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+            if ($LASTEXITCODE -gt 7) { throw "robocopy failed for $name with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0
+          }
+
+          # Cargokit 的 cdylib 在原始构建输出中位于根目录，发布布局要求放在 dll/。
+          if (-not (Test-Path -LiteralPath "$runtime/dll/rust_lib_pure_music.dll" -PathType Leaf)) {
+            $rustDll = Join-Path $target "rust_lib_pure_music.dll"
+            if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+              throw "rust_lib_pure_music.dll not found in portable staging: $target"
+            }
+            Copy-Item -LiteralPath $rustDll -Destination "$runtime/dll/rust_lib_pure_music.dll" -Force
+          }
+
       - name: Build release (installer)
         run: flutter build windows --release --no-pub --dart-define=PORTABLE_BUILD=false
+
+      # 第二次构建只更新 data/app.so；CMake install 对未变化的 DLL 不再复制，
+      # 这里补齐与 dart-define 无关的运行时目录，data/app.so 保留安装版自己的产物。
+      - name: Restore installer runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $runtime = "build/installer-runtime"
+          $out = "build/windows/x64/runner/Release"
+          if (-not (Test-Path -LiteralPath "$runtime/dll/rust_lib_pure_music.dll" -PathType Leaf)) {
+            throw "Installer runtime staging is incomplete: $runtime"
+          }
+          foreach ($name in @("dll", "desktop_lyric", "ffmpeg")) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $out $name) | Out-Null
+            robocopy (Join-Path $runtime $name) (Join-Path $out $name) /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+            if ($LASTEXITCODE -gt 7) { throw "robocopy failed for $name with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0
+          }
+          foreach ($required in @("$out/data/app.so", "$out/dll/rust_lib_pure_music.dll")) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Installer runtime file missing: $required"
+            }
+          }
+          "Installer runtime files restored."
 
       - name: Verify installer build output
         shell: pwsh
