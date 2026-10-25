@@ -57,6 +57,19 @@ jobs:
           # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
           ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
 
+      # 版本号取自 pubspec.yaml，两个 flutter build 都以 APP_VERSION 传入 Dart。
+      - name: Resolve app version
+        id: app-version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pubspec = Get-Content -LiteralPath "pubspec.yaml" -Raw
+          $match = [regex]::Match($pubspec, '(?m)^\s*version\s*:\s*([0-9]+\.[0-9]+\.[0-9]+)')
+          if (-not $match.Success) { throw "version not found in pubspec.yaml" }
+          $version = $match.Groups[1].Value
+          "App version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -222,7 +235,7 @@ jobs:
         run: cargo build --manifest-path rust/Cargo.toml --release
 
       - name: Build release (portable)
-        run: flutter build windows --release
+        run: flutter build windows --release --dart-define=APP_VERSION=${{ steps.app-version.outputs.version }}
 
       - name: Verify portable build output
         shell: pwsh
@@ -297,7 +310,7 @@ jobs:
           }
 
       - name: Build release (installer)
-        run: flutter build windows --release --no-pub --dart-define=PORTABLE_BUILD=false
+        run: flutter build windows --release --no-pub --dart-define=PORTABLE_BUILD=false --dart-define=APP_VERSION=${{ steps.app-version.outputs.version }}
 
       # 第二次构建只更新 data/app.so；CMake install 对未变化的 DLL 不再复制，
       # 这里补齐与 dart-define 无关的运行时目录，data/app.so 保留安装版自己的产物。
