@@ -18,6 +18,7 @@ import 'package:pure_music/lyric/lyric_stripper.dart';
 import 'package:pure_music/lyric/exclude_data.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/lyric_match_scoring.dart';
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 enum ResultSource { qq, kugou, ne, amll }
 
@@ -40,6 +41,7 @@ final List<String> _lyricCacheAccessOrder = [];
 int _lyricCacheGeneration = 0;
 
 void clearOnlineLyricCache() {
+  LyricRequestScheduler.instance.cancelInteractive();
   _lyricCacheGeneration++;
   _lyricFetchCache.clear();
   _lyricResultCache.clear();

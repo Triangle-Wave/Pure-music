@@ -219,6 +219,7 @@ Lyric? parseKaraokToPureLyric(
 
   // 构建最终的 SyncLyricLine 列表（两指针法匹配翻译与罗马音）
   final resultLines = <SyncLyricLine>[];
+  final metadataResultLines = <SyncLyricLine>{};
   const toleranceMs = 300;
   int transIdx = 0;
   int romanIdx = 0;
@@ -271,6 +272,9 @@ Lyric? parseKaraokToPureLyric(
       romanization: romanization,
     );
     resultLines.add(line);
+    if (LrcLine.isLyricMetadataLine(l.words.map((word) => word.text).join())) {
+      metadataResultLines.add(line);
+    }
   }
 
   // 添加前奏空白行
@@ -286,6 +290,8 @@ Lyric? parseKaraokToPureLyric(
   for (int i = resultLines.length - 1; i >= 1; i--) {
     final curr = resultLines[i - 1];
     final next = resultLines[i];
+    // 元数据行后的空档属于前奏，不应显示成额外的间奏行。
+    if (metadataResultLines.contains(curr)) continue;
     final gap = next.start - (curr.start + curr.length);
     if (gap > const Duration(seconds: 5)) {
       resultLines.insert(i, SyncLyricLine(curr.start + curr.length, gap, []));

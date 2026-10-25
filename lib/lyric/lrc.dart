@@ -424,10 +424,26 @@ class Lrc extends Lyric {
   static bool _isAnnotationTrack(String primaryText, String text) {
     if (RegExp(r'[a-zA-Z]+[1-6]').hasMatch(text)) return true;
     if (_hasHangul(primaryText) && !_hasAsianChars(text)) return true;
+    if (_hasKana(primaryText) && _looksLikeShortRomanization(text)) {
+      return true;
+    }
     if (!_hasAsianChars(primaryText) && !_hasCyrillic(primaryText)) {
       return false;
     }
     return _isRomanizationStatic(text);
+  }
+
+  static bool _looksLikeShortRomanization(String text) {
+    final stripped = text.replaceAll(RegExp(r'<[^>]*>'), '').trim();
+    if (stripped.isEmpty || _hasAsianChars(stripped)) return false;
+
+    final words = stripped.split(RegExp(r'\s+'));
+    if (words.length < 4) return false;
+
+    return words.every((word) {
+      final clean = word.replaceAll(RegExp(r'[^a-zA-Z]'), '');
+      return clean == word && clean.isNotEmpty && clean.length <= 3;
+    });
   }
 
   /// 在同一时间戳的歌词行组中，智能选择最佳的主歌词行（原文）。
@@ -994,7 +1010,10 @@ class Lrc extends Lyric {
     );
     if (!hasWordTags) {
       if (_isWordTimedParenFormat(lrc)) {
-        log.lyric.debug('lyric.line', '[lrc] fromLrcTextAuto: word-timed paren format');
+        log.lyric.debug(
+          'lyric.line',
+          '[lrc] fromLrcTextAuto: word-timed paren format',
+        );
         final parsed = _parseWordTimedParenLrc(
           lrc,
           source,
@@ -1483,20 +1502,25 @@ class Lrc extends Lyric {
       parsedLines.add(line);
     }
 
+    final metadataLineSet = <LyricLine>{};
     for (final metadata in metadataLines) {
       final content = metadata.content
           .replaceAll(RegExp(r'<[^>]*>'), '')
           .trim();
       if (content.isEmpty) continue;
-      parsedLines.add(
-        EnhancedLrcLine(metadata.start, const Duration(milliseconds: 500), [
+      final metadataLine = EnhancedLrcLine(
+        metadata.start,
+        const Duration(milliseconds: 500),
+        [
           EnhancedLrcWord(
             metadata.start,
             const Duration(milliseconds: 500),
             content,
           ),
-        ]),
+        ],
       );
+      parsedLines.add(metadataLine);
+      metadataLineSet.add(metadataLine);
     }
 
     if (parsedLines.isEmpty) return null;
@@ -1545,6 +1569,8 @@ class Lrc extends Lyric {
       finalLines.add(line);
 
       if (i >= parsedLines.length - 1) continue;
+      // 元数据行只有占位时长，其后的间隙属于前奏，不当作间奏显示。
+      if (metadataLineSet.contains(line)) continue;
       final nextStart = parsedLines[i + 1].start;
       // 间奏起点 = 本行最后一个字的实际结束时间（而非占满到下一行的 length），
       // 否则 gapStart 恒等于 nextStart、gapLen 恒为 0，中间间奏永远插不进来。
@@ -2332,20 +2358,25 @@ class Lrc extends Lyric {
       }
     }
 
+    final metadataLineSet = <LyricLine>{};
     for (final metadata in metadataLines) {
       final content = metadata.content
           .replaceAll(RegExp(r'<[^>]*>'), '')
           .trim();
       if (content.isEmpty) continue;
-      parsedLines.add(
-        EnhancedLrcLine(metadata.start, const Duration(milliseconds: 500), [
+      final metadataLine = EnhancedLrcLine(
+        metadata.start,
+        const Duration(milliseconds: 500),
+        [
           EnhancedLrcWord(
             metadata.start,
             const Duration(milliseconds: 500),
             content,
           ),
-        ]),
+        ],
       );
+      parsedLines.add(metadataLine);
+      metadataLineSet.add(metadataLine);
     }
 
     if (parsedLines.isEmpty) return null;
@@ -2395,6 +2426,8 @@ class Lrc extends Lyric {
 
       if (i >= parsedLines.length - 1) continue;
       final nextStart = parsedLines[i + 1].start;
+      // 元数据行只有占位时长，其后的间隙属于前奏，不当作间奏显示。
+      if (metadataLineSet.contains(line)) continue;
       // 间奏起点 = 本行最后一个字的实际结束时间（而非占满到下一行的 length），
       // 否则 gapStart 恒等于 nextStart、gapLen 恒为 0，中间间奏永远插不进来。
       // 对齐在线源 lrc_tool 的 _actualLineEndMs 算法。
@@ -2430,8 +2463,14 @@ class Lrc extends Lyric {
           firstLine is SyncLyricLine &&
           firstLine.words.isEmpty &&
           firstLineStart == introStart;
+      final hasLeadingMetadata =
+          keepMetadata &&
+          metadataLines.isNotEmpty &&
+          firstLine.start == introStart;
 
-      if (firstLineStart > introStart && !firstLineIsIntroBlank) {
+      if (firstLineStart > introStart &&
+          !firstLineIsIntroBlank &&
+          !hasLeadingMetadata) {
         log.lyric.debug(
           'lyric.line',
           '[lrc] _parseEnhancedLrcText: inserting intro blank line from ${introStart.inMilliseconds}ms to ${firstLineStart.inMilliseconds}ms',

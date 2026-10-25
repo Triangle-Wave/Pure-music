@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 const _kgSearchUrl = 'https://mobilecdn.kugou.com/api/v3/search/song';
 const _kgSearchFallbackUrl = 'https://songsearch.kugou.com/song_search_v2';
@@ -32,6 +34,7 @@ const _kgApiHeaders = {
 };
 
 final _networkRequestScopeKey = Object();
+const int _maxNetworkResponseBytes = 8 * 1024 * 1024;
 
 class _NetworkRequestScope {
   final _clients = <HttpClient>{};
@@ -65,6 +68,13 @@ Future<T> _runCancelable<T>(
 }) {
   if (timeout <= Duration.zero) return Future<T>.value(timeoutValue);
   final scope = _NetworkRequestScope();
+  final cancellation = currentLyricRequestToken;
+  if (cancellation?.isCancelled == true) {
+    return Future<T>.value(timeoutValue);
+  }
+  final removeCancellationListener = cancellation?.addCancelListener(
+    scope.close,
+  );
   return runZoned<Future<T>>(() async {
     try {
       return await operation().timeout(
@@ -77,6 +87,7 @@ Future<T> _runCancelable<T>(
     } finally {
       // 首个镜像命中后，主动停止仍在跑的并行请求。
       scope.close();
+      removeCancellationListener?.call();
     }
   }, zoneValues: {_networkRequestScopeKey: scope});
 }
@@ -164,7 +175,7 @@ Future<String?> _httpPost(
     request.write(body);
     final response = await request.close();
     if (response.statusCode != 200) return null;
-    return await response.transform(utf8.decoder).join();
+    return await _readResponseText(response);
   } catch (_) {
     return null;
   } finally {
@@ -415,13 +426,22 @@ Future<String?> _httpGet(
     }
     final response = await request.close();
     if (response.statusCode != 200) return null;
-    return await response.transform(utf8.decoder).join();
+    return await _readResponseText(response);
   } catch (_) {
     return null;
   } finally {
     if (client != null) scope?.remove(client);
     client?.close(force: true);
   }
+}
+
+Future<String?> _readResponseText(HttpClientResponse response) async {
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk in response) {
+    builder.add(chunk);
+    if (builder.length > _maxNetworkResponseBytes) return null;
+  }
+  return utf8.decode(builder.takeBytes());
 }
 
 Future<List<dynamic>> kgSearchIsolate({
@@ -653,7 +673,7 @@ Future<String?> _qqDesktopSearchRequestBody(
       },
     }),
     {
-            ..._qmBrowserHeaders,
+      ..._qmBrowserHeaders,
       'Origin': 'https://y.qq.com',
       'Cookie': 'tmeLoginType=-1',
       'Content-Type': 'application/json',
@@ -705,7 +725,7 @@ Future<String?> _qqSearchRequestBody(Map<String, dynamic> params) async {
         },
       },
     }),
-    {      ..._qmBrowserHeaders, 'Content-Type': 'text/plain; charset=utf-8'},
+    {..._qmBrowserHeaders, 'Content-Type': 'text/plain; charset=utf-8'},
   );
   return body;
 }
@@ -849,7 +869,7 @@ Future<Map<String, String?>?> _qqLyricFromPlayLyric({
     },
   });
   final headers = {
-          ..._qmBrowserHeaders,
+    ..._qmBrowserHeaders,
     'Origin': 'https://y.qq.com',
     'Cookie': 'tmeLoginType=-1',
     'Content-Type': 'application/json',

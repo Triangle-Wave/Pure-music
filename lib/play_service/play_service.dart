@@ -11,6 +11,7 @@ import 'package:pure_music/play_service/audio_echo_log_recorder.dart';
 import 'package:pure_music/play_service/desktop_lyric_service.dart';
 import 'package:pure_music/play_service/lyric_service.dart';
 import 'package:pure_music/play_service/playback_service.dart';
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 export 'package:pure_music/play_service/playback_service.dart';
 
@@ -48,6 +49,7 @@ class PlayService {
     await _stopEchoLog();
     LyricViewController.disposeIfInitialized();
     _disposeLyricService();
+    LyricRequestScheduler.instance.close();
     await SystemVolumeService.instance.dispose();
     await _closePlayback();
     ThemeProvider.instance.dispose();

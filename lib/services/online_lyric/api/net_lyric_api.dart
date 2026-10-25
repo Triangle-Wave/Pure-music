@@ -12,6 +12,7 @@ import 'package:pure_music/services/online_lyric/api/qrc_decryptor.dart';
 import 'package:pure_music/services/online_lyric/api/krc_extract_decode.dart';
 import 'package:pure_music/services/online_lyric/api/isolate_helpers.dart'
     as iso;
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 // ──────────────────────────────────────────────
 // 搜索结果模型
@@ -96,13 +97,29 @@ class NetLyricResult {
 
   Future<ParsedLyricResult?> toParsedLyric() async {
     if (!hasContent) return null;
-    return Isolate.run(() {
+    final byteLength =
+        mainLyric!.length +
+        (transLyric?.length ?? 0) +
+        (romaLyric?.length ?? 0);
+    if (shouldRunLyricWorkInline(byteLength)) {
       return LrcTool.parse(
         mainLyric!,
         transText: transLyric,
         romanizationText: romaLyric,
       );
-    });
+    }
+    return LyricRequestScheduler.instance
+        .runLyricCompute((token) async {
+          if (token.isCancelled) return null;
+          return Isolate.run(() {
+            return LrcTool.parse(
+              mainLyric!,
+              transText: transLyric,
+              romanizationText: romaLyric,
+            );
+          });
+        })
+        .timeout(const Duration(seconds: 5), onTimeout: () => null);
   }
 }
 

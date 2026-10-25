@@ -194,7 +194,7 @@ Future<String?> _safeReadFile(String filePath) async {
       if (!asText.trimLeft().startsWith('[ti:') &&
           !asText.trimLeft().contains(']\u003C0') &&
           !asText.trimLeft().startsWith('[')) {
-        final decrypted = await compute(krcDecrypt, asText);
+        final decrypted = await krcDecryptSingle(asText);
         if (decrypted != null) return decrypted;
       }
       return asText;

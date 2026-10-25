@@ -179,4 +179,27 @@ void main() {
     expect(line.romanWords, hasLength(2));
     expect(line.translation, '你的');
   });
+
+  test('does not add an interlude after kept KRC metadata', () {
+    final lyric = parseKaraokToPureLyric(
+      '.krc',
+      '[0,2030]<0,2030,0>作词 : GunkeyP\n'
+          '[6100,2030]<0,2030,0>作曲 : GunkeyP\n'
+          '[12190,2040]<0,2040,0>编曲 : GunkeyP/Soda纯白\n'
+          '[21850,5520]<0,5520,0>不经意被钟提醒未读的讯息\n'
+          '[72810,4590]<0,4590,0>到永远一瞬间都消失不见\n'
+          '[100390,5600]<0,5600,0>关于爱迷失的虔诚信徒献上崇拜',
+      keepMetadata: true,
+    );
+
+    expect(lyric, isNotNull);
+    final blankStarts = lyric!.lines
+        .whereType<SyncLyricLine>()
+        .where((line) => line.words.isEmpty)
+        .map((line) => line.start.inMilliseconds)
+        .toList();
+
+    expect(blankStarts, isNot(contains(14230)));
+    expect(blankStarts, contains(77400));
+  });
 }
