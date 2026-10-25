@@ -1,11 +1,13 @@
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/scroll_aware_future_builder.dart';
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/menu_styles.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
@@ -35,7 +37,9 @@ class ArtistTile extends StatefulWidget {
 }
 
 class _ArtistTileState extends State<ArtistTile> {
-  String get _currentCoverIdentity => '${widget.artist.primaryPath}|48';
+  String get _currentCoverIdentity =>
+      '${widget.artist.primaryPath}|48|'
+      '${AppSettings.instance.onlineArtistImageEnabled}';
 
   @override
   Widget build(BuildContext context) {
@@ -216,9 +220,7 @@ class _ArtistTileState extends State<ArtistTile> {
     return ScrollAwareFutureBuilder<ImageProvider?>(
       identity: _currentCoverIdentity,
       initialData: cachedCover,
-      future: () => hasWorks
-          ? widget.artist.thumbnailPicture(size: 48)
-          : Future<ImageProvider?>.value(null),
+      future: () => _picture(hasWorks),
       builder: (context, snapshot) {
         if (snapshot.data == null) {
           return snapshot.connectionState == ConnectionState.done
@@ -242,6 +244,33 @@ class _ArtistTileState extends State<ArtistTile> {
         );
       },
     );
+  }
+
+  Future<ImageProvider?> _picture(bool hasWorks) async {
+    if (!hasWorks) return null;
+    try {
+      final local = await widget.artist.thumbnailPicture(size: 48);
+      if (local != null) return local;
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_local_picture_failed',
+        '艺术家本地封面读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    try {
+      final online = await OnlineArtistImageService.instance.imageFor(
+        widget.artist.name,
+      );
+      return online;
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_online_picture_failed',
+        '艺术家在线头像读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
   }
 
 

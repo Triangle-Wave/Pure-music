@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -14,11 +13,12 @@ import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/services/online_album/album_match.dart';
+import 'package:pure_music/services/online_album/cn_music_client.dart';
 import 'package:pure_music/services/online_album/cover_art_client.dart';
 import 'package:pure_music/services/online_album/musicbrainz_client.dart';
 
-/// 达到该分数才认为找到了可信的在线专辑，避免把同名合辑当成目标专辑。
-const double minimumOnlineAlbumScore = 60;
+export 'package:pure_music/services/online_album/album_match.dart';
 
 const Duration onlineAlbumCacheTtl = Duration(days: 7);
 
@@ -49,6 +49,7 @@ class OnlineAlbumInfo {
     this.primaryType,
     this.secondaryTypes = const [],
     this.covers = CoverArtSet.empty,
+    this.source,
   });
 
   final String releaseGroupId;
@@ -62,6 +63,14 @@ class OnlineAlbumInfo {
   final String? primaryType;
   final List<String> secondaryTypes;
   final CoverArtSet covers;
+
+  /// 数据来源显示名，例如“网易云音乐”“MusicBrainz”。
+  final String? source;
+
+  String get sourceLabel {
+    final value = source?.trim();
+    return value == null || value.isEmpty ? 'MusicBrainz' : value;
+  }
 
   List<OnlineAlbumArtwork> get artworks {
     final result = <OnlineAlbumArtwork>[];
@@ -99,6 +108,7 @@ class OnlineAlbumInfo {
     'primaryType': primaryType,
     'secondaryTypes': secondaryTypes,
     'covers': covers.toJson(),
+    'source': source,
   };
 
   static OnlineAlbumInfo? fromJson(Object? data) {
@@ -118,6 +128,7 @@ class OnlineAlbumInfo {
       primaryType: _text(data['primaryType']),
       secondaryTypes: _textList(data['secondaryTypes']),
       covers: CoverArtSet.fromJson(data['covers']),
+      source: _text(data['source']),
     );
   }
 }
@@ -131,11 +142,13 @@ class OnlineAlbumService {
   OnlineAlbumService._({
     MusicBrainzClient? musicBrainz,
     CoverArtClient? coverArt,
+    CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
     this.cacheTtl = onlineAlbumCacheTtl,
   }) : _musicBrainz = musicBrainz ?? MusicBrainzClient(),
        _coverArt = coverArt ?? CoverArtClient(),
+       _cnMusic = cnMusic ?? CnMusicClient(),
        _appDataDirectory = appDataDirectory ?? getAppDataDir,
        _clock = clock ?? DateTime.now;
 
@@ -145,6 +158,7 @@ class OnlineAlbumService {
   static OnlineAlbumService createForTest({
     MusicBrainzClient? musicBrainz,
     CoverArtClient? coverArt,
+    CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
     Duration cacheTtl = onlineAlbumCacheTtl,
@@ -152,6 +166,7 @@ class OnlineAlbumService {
     return OnlineAlbumService._(
       musicBrainz: musicBrainz,
       coverArt: coverArt,
+      cnMusic: cnMusic,
       appDataDirectory: appDataDirectory,
       clock: clock,
       cacheTtl: cacheTtl,
@@ -160,6 +175,7 @@ class OnlineAlbumService {
 
   final MusicBrainzClient _musicBrainz;
   final CoverArtClient _coverArt;
+  final CnMusicClient _cnMusic;
   final Future<Directory> Function() _appDataDirectory;
   final DateTime Function() _clock;
   final Duration cacheTtl;
@@ -242,7 +258,69 @@ class OnlineAlbumService {
     }
   }
 
+  /// 国内源优先：命中可信候选就直接返回，失败时交给 MusicBrainz 回退。
+  Future<OnlineAlbumInfo?> _fetchCnInfo(Album album) async {
+    final title = album.name.trim();
+    if (title.isEmpty || album.works.isEmpty) return null;
+    final artist = albumArtistFor(album);
+    final trackCount = album.works.length;
+    final yearHint = extractAlbumYearHint(album);
+    List<CnAlbumCandidate> candidates;
+    try {
+      candidates = await _cnMusic.searchAlbums(
+        title: title,
+        artist: artist,
+      );
+    } catch (error) {
+      log.library.debug(
+        'online_album_cn_search_failed',
+        '国内音乐源搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+    if (candidates.isEmpty) return null;
+    final best = pickBestCnAlbumCandidate(
+      albumTitle: title,
+      artist: artist,
+      trackCount: trackCount,
+      yearHint: yearHint,
+      candidates: candidates,
+      aliases: AppSettings.instance.artistAliases,
+    );
+    if (best == null) return null;
+    final coverUrl = best.coverUrl;
+    return OnlineAlbumInfo(
+      releaseGroupId: 'cn:${best.source.name}:${best.id}',
+      title: best.title,
+      artist: best.artist.trim().isEmpty ? artist : best.artist,
+      year: best.year ?? yearHint,
+      summary: buildOnlineAlbumSummary(
+        primaryType: 'Album',
+        secondaryTypes: const [],
+        releaseDate: null,
+        trackCount: best.trackCount,
+      ),
+      trackCount: best.trackCount,
+      source: best.source.label,
+      covers: coverUrl == null || coverUrl.isEmpty
+          ? CoverArtSet.empty
+          : CoverArtSet(
+              front: CoverArtImage(
+                url: coverUrl,
+                largeUrl: null,
+                front: true,
+                back: false,
+                types: const ['front'],
+              ),
+            ),
+    );
+  }
+
   Future<OnlineAlbumInfo?> _fetchInfo(Album album) async {
+    final cnInfo = await _fetchCnInfo(album);
+    if (cnInfo != null) return cnInfo;
+
     final title = album.name.trim();
     if (title.isEmpty || album.works.isEmpty) return null;
     final artist = albumArtistFor(album);
@@ -365,6 +443,7 @@ class OnlineAlbumService {
       primaryType: best.group.primaryType,
       secondaryTypes: best.group.secondaryTypes,
       covers: covers ?? CoverArtSet.empty,
+      source: 'MusicBrainz',
     );
   }
 
@@ -500,10 +579,7 @@ class OnlineAlbumService {
       final response = await AppHttp.instance.dio.get<List<int>>(
         url,
         options: Options(
-          headers: const {
-            'User-Agent': musicBrainzUserAgent,
-            'Accept': 'image/*',
-          },
+          headers: _artworkHeaders(url),
           responseType: ResponseType.bytes,
           sendTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
@@ -522,6 +598,23 @@ class OnlineAlbumService {
       );
       return null;
     }
+  }
+
+  /// 国内图片源对 Referer 有校验；按域名补齐，避免封面被 403。
+  Map<String, String> _artworkHeaders(String url) {
+    final headers = <String, String>{
+      'User-Agent': musicBrainzUserAgent,
+      'Accept': 'image/*',
+    };
+    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+    if (host.endsWith('music.126.net') || host.endsWith('music.163.com')) {
+      headers['Referer'] = 'https://music.163.com/';
+    } else if (host.endsWith('gtimg.cn') || host.endsWith('qq.com')) {
+      headers['Referer'] = 'https://y.qq.com/';
+    } else if (host.endsWith('kugou.com')) {
+      headers['Referer'] = 'https://www.kugou.com/';
+    }
+    return headers;
   }
 
   Future<void> _writeBytesAtomically(File file, Uint8List bytes) async {
@@ -570,41 +663,6 @@ String albumArtistFor(Album album) {
   }
   if (album.works.isNotEmpty) return album.works.first.artist;
   return '';
-}
-
-String normalizeForMatch(String value) {
-  var text = value.toLowerCase();
-  text = text.replaceAll(RegExp(r'\([^)]*\)|\[[^\]]*\]'), ' ');
-  text = text.replaceAll(
-    RegExp('[^a-z0-9\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af]+'),
-    ' ',
-  );
-  return text.trim().replaceAll(RegExp(r'\s+'), ' ');
-}
-
-double albumTitleSimilarity(String left, String right) {
-  final a = normalizeForMatch(left);
-  final b = normalizeForMatch(right);
-  if (a.isEmpty || b.isEmpty) return 0;
-  if (a == b) return 1;
-  final shorter = a.length <= b.length ? a : b;
-  final longer = a.length <= b.length ? b : a;
-  if (shorter.length >= 4 && longer.contains(shorter)) {
-    return 0.82 + 0.18 * (shorter.length / longer.length);
-  }
-  final distance = _levenshtein(a, b);
-  final maxLength = a.length >= b.length ? a.length : b.length;
-  return (1 - distance / maxLength).clamp(0.0, 1.0).toDouble();
-}
-
-double albumArtistSimilarity(String artist, List<String> candidates) {
-  if (normalizeForMatch(artist).isEmpty) return 0;
-  var best = 0.0;
-  for (final candidate in candidates) {
-    final score = albumTitleSimilarity(artist, candidate);
-    if (score > best) best = score;
-  }
-  return best;
 }
 
 /// 从专辑名、首曲路径与首曲标题中提取 4 位年份，作为候选打分的辅助信号。
@@ -724,30 +782,6 @@ String? buildOnlineAlbumSummary({
   }
   if (trackCount != null && trackCount > 0) parts.add('$trackCount 首');
   return parts.isEmpty ? null : parts.join(' · ');
-}
-
-int _levenshtein(String a, String b) {
-  if (a == b) return 0;
-  if (a.isEmpty) return b.length;
-  if (b.isEmpty) return a.length;
-  var previous = List<int>.generate(b.length + 1, (index) => index);
-  for (var i = 0; i < a.length; i++) {
-    final current = List<int>.filled(b.length + 1, 0);
-    current[0] = i + 1;
-    final codeUnit = a.codeUnitAt(i);
-    for (var j = 0; j < b.length; j++) {
-      final cost = codeUnit == b.codeUnitAt(j) ? 0 : 1;
-      final insert = current[j] + 1;
-      final delete = previous[j + 1] + 1;
-      final replace = previous[j] + cost;
-      current[j + 1] = math.min(
-        insert,
-        math.min(delete, replace),
-      );
-    }
-    previous = current;
-  }
-  return previous[b.length];
 }
 
 /// 校验字节是否为可解码的图片。

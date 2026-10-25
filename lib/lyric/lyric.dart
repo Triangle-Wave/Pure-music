@@ -38,9 +38,13 @@ class LyricLine {
   String? romanLyric;
   List<SyncLyricWord>? romanWords;
 
+  /// 罗马音由本地转写生成，仅用于显示，不写回歌词文件。
+  bool autoRomanized;
+
   LyricLine(this.start, this.length, [this.translation])
     : romanLyric = null,
-      romanWords = null;
+      romanWords = null,
+      autoRomanized = false;
 }
 
 class BackgroundVocal {

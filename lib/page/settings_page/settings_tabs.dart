@@ -4121,6 +4121,22 @@ class _LyricContentGroupState extends State<_LyricContentGroup> {
             },
           ),
         ),
+        const SizedBox(height: 12.0),
+        SettingsTile(
+          description: '自动生成罗马音',
+          subtitle: settings.autoRomanizeLyric
+              ? '日文歌词缺少罗马音时用假名本地转写'
+              : '只显示歌词自带的罗马音',
+          action: Switch(
+            value: settings.autoRomanizeLyric,
+            onChanged: (value) {
+              setState(() => settings.autoRomanizeLyric = value);
+              settings.saveSettings();
+              PlayService.instance.lyricService
+                  .applyAutoRomanizationSetting();
+            },
+          ),
+        ),
         const SizedBox(height: 24.0),
         const SettingsSectionHeader('文字转换'),
         const SizedBox(height: 4.0),

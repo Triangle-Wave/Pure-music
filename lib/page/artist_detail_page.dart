@@ -1,3 +1,4 @@
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/enums.dart';
@@ -10,8 +11,36 @@ import 'package:pure_music/component/quiet_empty_state.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
+import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
+
+/// 本地封面优先；没有本地图时使用在线歌手头像，失败返回 null 走占位图。
+Future<ImageProvider?> _artistPicture(Artist artist) async {
+  try {
+    final local = await artist.picture;
+    if (local != null) return local;
+  } catch (error) {
+    log.library.warn(
+      'artist_detail_local_picture_failed',
+      '艺术家本地封面读取失败',
+      fields: {'error': error.runtimeType.toString()},
+    );
+  }
+  try {
+    final online = await OnlineArtistImageService.instance.imageFor(
+      artist.name,
+    );
+    return online;
+  } catch (error) {
+    log.library.warn(
+      'artist_detail_online_picture_failed',
+      '艺术家在线头像读取失败',
+      fields: {'error': error.runtimeType.toString()},
+    );
+    return null;
+  }
+}
 
 class ArtistDetailPage extends StatelessWidget {
   const ArtistDetailPage({super.key, required this.artist});
@@ -28,7 +57,7 @@ class ArtistDetailPage extends StatelessWidget {
     return UniDetailPage<Artist, Audio, Album>(
       pref: AppPreference.instance.artistDetailPagePref,
       primaryContent: artist,
-      primaryPic: artist.picture,
+      primaryPic: _artistPicture(artist),
       picShape: PicShape.oval,
       title: artist.name,
       subtitle: '${artist.works.length} 首作品',

@@ -31,6 +31,8 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
   bool _obscurePassword = true;
   bool _onlineAlbumEnabled = true;
   bool _savingOnlineAlbum = false;
+  bool _onlineArtistImageEnabled = true;
+  bool _savingOnlineArtistImage = false;
 
   @override
   void initState() {
@@ -47,6 +49,7 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
     _passController.text = settings.proxyPass;
     _bypassController.text = settings.proxyBypass;
     _onlineAlbumEnabled = settings.onlineAlbumInfoEnabled;
+    _onlineArtistImageEnabled = settings.onlineArtistImageEnabled;
   }
 
   @override
@@ -153,6 +156,29 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
     setState(() => _savingOnlineAlbum = false);
   }
 
+  Future<void> _setOnlineArtistImageEnabled(bool value) async {
+    if (_savingOnlineArtistImage) return;
+    final settings = AppSettings.instance;
+    final previous = settings.onlineArtistImageEnabled;
+    setState(() {
+      _onlineArtistImageEnabled = value;
+      _savingOnlineArtistImage = true;
+    });
+    settings.onlineArtistImageEnabled = value;
+    final saved = await settings.saveSettings();
+    if (!mounted) return;
+    if (!saved) {
+      settings.onlineArtistImageEnabled = previous;
+      setState(() {
+        _onlineArtistImageEnabled = previous;
+        _savingOnlineArtistImage = false;
+      });
+      showTextOnSnackBar('设置保存失败', variant: ToastVariant.error);
+      return;
+    }
+    setState(() => _savingOnlineArtistImage = false);
+  }
+
   String _modeSubtitle() {
     return switch (_mode) {
       ProxyMode.system => '读取 http_proxy / https_proxy 环境变量',
@@ -252,10 +278,21 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
         const SizedBox(height: 4.0),
         SettingsTile(
           description: '在线专辑信息',
-          subtitle: '从 MusicBrainz 获取年份、厂牌与风格，并从 Cover Art Archive 读取封面、封底和内页',
+          subtitle: '优先从网易云、QQ 音乐与酷狗读取专辑封面和曲目数，再用 MusicBrainz 与 Cover Art Archive 补充年份、厂牌与封底内页',
           action: Switch(
             value: _onlineAlbumEnabled,
             onChanged: _savingOnlineAlbum ? null : _setOnlineAlbumEnabled,
+          ),
+        ),
+        const SizedBox(height: 12.0),
+        SettingsTile(
+          description: '艺术家图片',
+          subtitle: '按艺术家名从网易云、QQ 音乐与酷狗获取歌手头像，取不到时保留本地占位图',
+          action: Switch(
+            value: _onlineArtistImageEnabled,
+            onChanged: _savingOnlineArtistImage
+                ? null
+                : _setOnlineArtistImageEnabled,
           ),
         ),
         const SizedBox(height: 24.0),

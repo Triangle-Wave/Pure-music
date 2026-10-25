@@ -216,9 +216,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     final artworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
     // 默认使用本地专辑封面；只有用户已经选过在线封面、且刷新后该封面
     // 仍存在时，才继续显示在线图，避免匹配偏差直接覆盖当前专辑封面。
-    final selected = previousUrl == null
-        ? -1
-        : artworks.indexWhere((artwork) => artwork.url == previousUrl);
+    // 本地没有任何封面时直接显示在线封面，减少占位图。
+    final localCover = previousUrl == null ? await _localCover() : null;
+    if (!mounted || requestId != _onlineRequestId) return;
+    final selected = previousUrl != null
+        ? artworks.indexWhere((artwork) => artwork.url == previousUrl)
+        : (localCover == null && artworks.isNotEmpty ? 0 : -1);
     setState(() {
       _onlineLoading = false;
       _onlineDone = true;
@@ -468,7 +471,7 @@ class OnlineAlbumPanel extends StatelessWidget {
                 ),
                 const SizedBox(width: 5),
                 Text(
-                  'MusicBrainz',
+                  current?.sourceLabel ?? '在线专辑',
                   style: TextStyle(
                     fontSize: AppType.caption,
                     fontWeight: AppType.weightSemibold,
@@ -535,7 +538,7 @@ class OnlineAlbumPanel extends StatelessWidget {
               ],
               const SizedBox(height: 6),
               Text(
-                '来源 MusicBrainz · Cover Art Archive',
+                '来源 ${current.sourceLabel}',
                 style: TextStyle(
                   fontSize: AppType.caption,
                   color: scheme.onSurfaceVariant.withValues(alpha: 0.78),
@@ -809,8 +812,15 @@ class _ArtworkSwitcherState extends State<_ArtworkSwitcher> {
                       color: scheme.onSurfaceVariant,
                     );
                   }
+                  final target = (22 * MediaQuery.devicePixelRatioOf(context))
+                      .round();
                   return Image(
-                    image: provider,
+                    image: ResizeImage(
+                      provider,
+                      width: target,
+                      height: target,
+                      allowUpscaling: false,
+                    ),
                     fit: BoxFit.cover,
                     gaplessPlayback: true,
                     errorBuilder: (_, _, _) => Icon(

@@ -217,6 +217,7 @@ class AppSettings {
   LyricSourceType preferredOnlineSource = LyricSourceType.qq;
   bool showTranslation = true;
   bool showRomanization = true;
+  bool autoRomanizeLyric = true;
   bool keepLyricMetadata = true;
   bool showDesktopLyricRoman = true;
   int desktopLyricRomanPosition = 1;
@@ -264,6 +265,7 @@ class AppSettings {
   bool keepPitch = true;
   bool lastFmEnabled = false;
   bool onlineAlbumInfoEnabled = true;
+  bool onlineArtistImageEnabled = true;
   Set<NowPlayingMode> wavyBarEnabledModes = defaultWavyBarEnabledModes();
   bool showSpectrumBar = false;
   bool useMaterialYouForSpectrumBar = false;
@@ -550,6 +552,13 @@ class AppSettings {
     if (sr != null) {
       _instance.showRomanization = normalizedBoolSetting(
         sr,
+        defaultValue: true,
+      );
+    }
+    final arl = settingsMap['AutoRomanizeLyric'];
+    if (arl != null) {
+      _instance.autoRomanizeLyric = normalizedBoolSetting(
+        arl,
         defaultValue: true,
       );
     }
@@ -1154,6 +1163,10 @@ class AppSettings {
       settingsMap['OnlineAlbumInfoEnabled'],
       defaultValue: true,
     );
+    _instance.onlineArtistImageEnabled = normalizedBoolSetting(
+      settingsMap['OnlineArtistImageEnabled'],
+      defaultValue: true,
+    );
   }
 
   static Future<void> readFromJson() async {
@@ -1199,6 +1212,7 @@ class AppSettings {
     'PreferredOnlineSource': preferredOnlineSource.name,
     'ShowTranslation': showTranslation,
     'ShowRomanization': showRomanization,
+    'AutoRomanizeLyric': autoRomanizeLyric,
     'KeepLyricMetadata': keepLyricMetadata,
     'ZhConversionMode': zhConversionMode.name,
     'PromptWriteLyricToTagDelay': promptWriteLyricToTagDelay,
@@ -1290,6 +1304,7 @@ class AppSettings {
     'ProxyPass': proxyPass,
     'ProxyBypass': proxyBypass,
     'OnlineAlbumInfoEnabled': onlineAlbumInfoEnabled,
+    'OnlineArtistImageEnabled': onlineArtistImageEnabled,
   };
 
   Future<void> _writeSettingsFile(

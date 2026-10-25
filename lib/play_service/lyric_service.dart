@@ -6,6 +6,7 @@ import 'dart:math' show max, min;
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/lyric/lrc.dart';
 import 'package:pure_music/lyric/lrc_serializer.dart';
+import 'package:pure_music/lyric/japanese_romanizer.dart';
 import 'package:pure_music/lyric/lyric_manual_offset.dart';
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/lyric_tag_word_format.dart';
@@ -1006,6 +1007,10 @@ class LyricService extends ChangeNotifier {
       );
     }
 
+    if (AppSettings.instance.autoRomanizeLyric) {
+      applyAutoRomanization(lyric);
+    }
+
     _currLyric = lyric;
     _ttmlGeneration++;
     _ttmlTimeline = lyric is Ttml ? TtmlTimeline(lyric) : null;
@@ -1803,5 +1808,15 @@ class LyricService extends ChangeNotifier {
     clearCache();
     clearOnlineLyricCache();
     updateLyric();
+  }
+
+  /// 自动罗马音开关变化后重建当前歌词，并丢弃其他歌曲的缓存。
+  void applyAutoRomanizationSetting() {
+    clearCache();
+    final lyric = _currLyric;
+    if (lyric == null) return;
+    revertAutoRomanization(lyric);
+    _setCurrLyric(lyric);
+    _notifyLyricChangeListeners();
   }
 }

@@ -94,7 +94,7 @@ void _appendSupplementalLines(
       output.add('$timeTag$translation');
     }
   }
-  if (includeRomanization) {
+  if (includeRomanization && !line.autoRomanized) {
     final romanization = line.romanLyric?.trim();
     if (romanization != null && romanization.isNotEmpty) {
       output.add('$timeTag$romanization');
