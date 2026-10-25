@@ -11,6 +11,7 @@ import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/audio_sort.dart';
 import 'package:pure_music/component/artist_tile.dart';
 import 'package:pure_music/component/audio_tile.dart';
+import 'package:pure_music/component/online_candidate_dialog.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
 import 'package:pure_music/page/uni_page.dart';
@@ -152,6 +153,7 @@ class AlbumDetailPage extends StatefulWidget {
 class _AlbumDetailPageState extends State<AlbumDetailPage> {
   final OnlineAlbumService _onlineAlbum = OnlineAlbumService.instance;
 
+  OnlineAlbumCandidateCache? _candidateCache;
   OnlineAlbumInfo? _onlineInfo;
   List<OnlineAlbumArtwork> _artworks = const [];
   int _selectedArtwork = -1;
@@ -160,6 +162,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   bool _onlinePanelClosed = false;
   int _onlineRequestId = 0;
   late Future<ImageProvider?> _primaryPic;
+
+  bool get _onlineDisabled => _candidateCache?.disabled ?? false;
 
   @override
   void initState() {
@@ -179,6 +183,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlineRequestId++;
       _onlineLoading = false;
       _onlineInfo = null;
+      _candidateCache = null;
       _artworks = const [];
       _selectedArtwork = -1;
       _onlineDone = false;
@@ -200,39 +205,144 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         : null;
     final requestId = ++_onlineRequestId;
     setState(() => _onlineLoading = true);
-    OnlineAlbumInfo? info;
+    if (force && previousUrl != null) {
+      await _onlineAlbum.invalidateArtwork(previousUrl);
+      if (!mounted || requestId != _onlineRequestId) return;
+    }
+    OnlineAlbumCandidateCache? cache;
     try {
-      info = await _onlineAlbum.lookup(widget.album, force: force);
+      cache = await _onlineAlbum.loadCandidates(
+        widget.album,
+        force: force,
+      );
     } catch (error) {
-      info = null;
+      cache = _candidateCache;
       log.library.warn(
         'online_album_ui_lookup_failed',
         '在线专辑信息加载失败',
         fields: {'error': error.runtimeType.toString()},
       );
     }
-    if (!mounted) return;
-    if (requestId != _onlineRequestId) return;
-    final artworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
-    // 默认使用本地专辑封面；只有用户已经选过在线封面、且刷新后该封面
-    // 仍存在时，才继续显示在线图，避免匹配偏差直接覆盖当前专辑封面。
-    // 本地没有任何封面时直接显示在线封面，减少占位图。
-    final localCover = previousUrl == null ? await _localCover() : null;
     if (!mounted || requestId != _onlineRequestId) return;
-    final selected = previousUrl != null
+    await _applyCandidateCache(
+      cache,
+      previousUrl: previousUrl,
+      requestId: requestId,
+    );
+  }
+
+  Future<void> _applyCandidateCache(
+    OnlineAlbumCandidateCache? cache, {
+    String? previousUrl,
+    int? requestId,
+  }) async {
+    final info = cache?.info;
+    final artworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
+    // 显式选择候选时直接展示其封面；否则保持本地封面优先，本地没有
+    // 封面时才使用在线图。
+    final explicit = cache?.hasExplicitSelection ?? false;
+    var selected = previousUrl != null
         ? artworks.indexWhere((artwork) => artwork.url == previousUrl)
-        : (localCover == null && artworks.isNotEmpty ? 0 : -1);
+        : -1;
+    if (selected < 0 && explicit && artworks.isNotEmpty) {
+      selected = 0;
+    }
+    if (selected < 0 && !explicit && artworks.isNotEmpty) {
+      final localCover = await _localCover();
+      if (!mounted || (requestId != null && requestId != _onlineRequestId)) {
+        return;
+      }
+      if (localCover == null) selected = 0;
+    }
+    final cover = selected >= 0
+        ? await _resolveArtwork(artworks[selected])
+        : await _localCover();
+    if (!mounted || (requestId != null && requestId != _onlineRequestId)) {
+      return;
+    }
     setState(() {
       _onlineLoading = false;
       _onlineDone = true;
+      _candidateCache = cache;
       _onlineInfo = info;
       _artworks = artworks;
       _selectedArtwork = selected;
-      _onlinePanelClosed = force ? false : _onlinePanelClosed;
-      _primaryPic = selected >= 0
-          ? _resolveArtwork(artworks[selected])
-          : _localCover();
+      _primaryPic = Future<ImageProvider?>.value(cover);
     });
+  }
+
+  Future<void> _chooseCandidate() async {
+    if (!AppSettings.instance.onlineAlbumInfoEnabled) return;
+    var cache = _candidateCache;
+    if (cache == null) {
+      try {
+        cache = await _onlineAlbum.loadCandidates(widget.album);
+      } catch (error) {
+        log.library.warn(
+          'online_album_candidates_ui_failed',
+          '在线专辑候选读取失败',
+          fields: {'error': error.runtimeType.toString()},
+        );
+      }
+    }
+    if (!mounted) return;
+    final options = <OnlineCandidateOption>[
+      for (final candidate
+          in cache?.candidates ?? const <OnlineAlbumCandidate>[])
+        OnlineCandidateOption(
+          id: candidate.id,
+          source: candidate.source,
+          title: candidate.title,
+          subtitle: [
+            if (candidate.artist.trim().isNotEmpty) candidate.artist,
+            if (candidate.year != null) '${candidate.year}',
+            if (candidate.trackCount != null) '${candidate.trackCount} 首',
+          ].join(' · '),
+          imageUrl: candidate.imageUrl,
+          score: candidate.score,
+        ),
+    ];
+    final choice = await showOnlineCandidateDialog(
+      context,
+      title: '选择专辑来源',
+      options: options,
+      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
+      disabled: cache?.disabled ?? false,
+      artworkLoader: _onlineAlbum.artwork,
+    );
+    if (choice == null || !mounted) return;
+    await _applyCandidateChoice(choice);
+  }
+
+  Future<void> _applyCandidateChoice(OnlineCandidateChoice choice) async {
+    final requestId = ++_onlineRequestId;
+    setState(() => _onlineLoading = true);
+    OnlineAlbumCandidateCache? cache;
+    try {
+      cache = switch (choice.action) {
+        OnlineCandidateAction.auto => await _onlineAlbum.updateSelection(
+          widget.album,
+        ),
+        OnlineCandidateAction.disable => await _onlineAlbum.updateSelection(
+          widget.album,
+          disabled: true,
+        ),
+        OnlineCandidateAction.select => await _onlineAlbum.updateSelection(
+          widget.album,
+          candidateId: choice.candidateId,
+        ),
+      };
+    } catch (error) {
+      cache = _candidateCache;
+      log.library.warn(
+        'online_album_selection_failed',
+        '在线专辑候选选择失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    cache ??= _candidateCache;
+    if (!mounted || requestId != _onlineRequestId) return;
+    await _applyCandidateCache(cache, requestId: requestId);
   }
 
   Future<ImageProvider?> _resolveArtwork(OnlineAlbumArtwork artwork) async {
@@ -291,6 +401,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       return OnlineAlbumPanel(
         info: null,
         loading: true,
+        disabled: _onlineDisabled,
+        onChoose: _chooseCandidate,
         onClose: _closeOnlinePanel,
       );
     }
@@ -298,6 +410,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     return OnlineAlbumPanel(
       info: _onlineInfo,
       loading: _onlineLoading,
+      disabled: _onlineDisabled,
+      onChoose: _chooseCandidate,
       onRefresh: _onlineLoading ? null : _refreshOnlineInfo,
       onClose: _closeOnlinePanel,
     );
@@ -438,13 +552,17 @@ class OnlineAlbumPanel extends StatelessWidget {
     super.key,
     required this.info,
     required this.loading,
+    this.disabled = false,
     this.onRefresh,
+    this.onChoose,
     this.onClose,
   });
 
   final OnlineAlbumInfo? info;
   final bool loading;
+  final bool disabled;
   final VoidCallback? onRefresh;
+  final VoidCallback? onChoose;
   final VoidCallback? onClose;
 
   @override
@@ -470,12 +588,17 @@ class OnlineAlbumPanel extends StatelessWidget {
                   color: scheme.onSurfaceVariant,
                 ),
                 const SizedBox(width: 5),
-                Text(
-                  current?.sourceLabel ?? '在线专辑',
-                  style: TextStyle(
-                    fontSize: AppType.caption,
-                    fontWeight: AppType.weightSemibold,
-                    color: scheme.onSurfaceVariant,
+                Expanded(
+                  child: Text(
+                    current?.sourceLabel ??
+                        (disabled ? '在线专辑（已隐藏）' : '在线专辑'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: AppType.caption,
+                      fontWeight: AppType.weightSemibold,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 if (loading) ...[
@@ -489,7 +612,12 @@ class OnlineAlbumPanel extends StatelessWidget {
                     ),
                   ),
                 ],
-                const Spacer(),
+                _panelButton(
+                  scheme,
+                  Symbols.tune,
+                  '选择来源',
+                  loading ? null : onChoose,
+                ),
                 _panelButton(
                   scheme,
                   Symbols.refresh,
@@ -500,7 +628,15 @@ class OnlineAlbumPanel extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 6),
-            if (loading && current == null)
+            if (disabled)
+              Text(
+                '在线信息已隐藏，封面使用本地图片；可通过“选择来源”恢复。',
+                style: TextStyle(
+                  fontSize: AppType.caption,
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            else if (loading && current == null)
               Text(
                 '正在读取专辑信息…',
                 style: TextStyle(

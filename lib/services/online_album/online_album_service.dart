@@ -18,127 +18,21 @@ import 'package:pure_music/services/online_album/album_match.dart';
 import 'package:pure_music/services/online_album/cn_music_client.dart';
 import 'package:pure_music/services/online_album/cover_art_client.dart';
 import 'package:pure_music/services/online_album/musicbrainz_client.dart';
+import 'package:pure_music/services/online_album/online_album_models.dart';
 
 export 'package:pure_music/services/online_album/album_match.dart';
+export 'package:pure_music/services/online_album/online_album_models.dart';
 
-const Duration onlineAlbumCacheTtl = Duration(days: 7);
-
-class OnlineAlbumArtwork {
-  const OnlineAlbumArtwork({
-    required this.url,
-    required this.role,
-    required this.label,
-  });
-
-  final String url;
-
-  /// `front`、`back` 或 `booklet`。
-  final String role;
-  final String label;
-}
-
-class OnlineAlbumInfo {
-  const OnlineAlbumInfo({
-    required this.releaseGroupId,
-    required this.title,
-    this.artist,
-    this.year,
-    this.label,
-    this.genre,
-    this.summary,
-    this.trackCount,
-    this.primaryType,
-    this.secondaryTypes = const [],
-    this.covers = CoverArtSet.empty,
-    this.source,
-  });
-
-  final String releaseGroupId;
-  final String title;
-  final String? artist;
-  final int? year;
-  final String? label;
-  final String? genre;
-  final String? summary;
-  final int? trackCount;
-  final String? primaryType;
-  final List<String> secondaryTypes;
-  final CoverArtSet covers;
-
-  /// 数据来源显示名，例如“网易云音乐”“MusicBrainz”。
-  final String? source;
-
-  String get sourceLabel {
-    final value = source?.trim();
-    return value == null || value.isEmpty ? 'MusicBrainz' : value;
-  }
-
-  List<OnlineAlbumArtwork> get artworks {
-    final result = <OnlineAlbumArtwork>[];
-    final front = covers.front;
-    if (front != null) {
-      result.add(
-        OnlineAlbumArtwork(url: front.url, role: 'front', label: '封面'),
-      );
-    }
-    final back = covers.back;
-    if (back != null) {
-      result.add(OnlineAlbumArtwork(url: back.url, role: 'back', label: '封底'));
-    }
-    for (var i = 0; i < covers.booklets.length; i++) {
-      result.add(
-        OnlineAlbumArtwork(
-          url: covers.booklets[i].url,
-          role: 'booklet',
-          label: '内页 ${i + 1}',
-        ),
-      );
-    }
-    return List.unmodifiable(result);
-  }
-
-  Map<String, Object?> toJson() => {
-    'releaseGroupId': releaseGroupId,
-    'title': title,
-    'artist': artist,
-    'year': year,
-    'label': label,
-    'genre': genre,
-    'summary': summary,
-    'trackCount': trackCount,
-    'primaryType': primaryType,
-    'secondaryTypes': secondaryTypes,
-    'covers': covers.toJson(),
-    'source': source,
-  };
-
-  static OnlineAlbumInfo? fromJson(Object? data) {
-    if (data is! Map<dynamic, dynamic>) return null;
-    final releaseGroupId = _text(data['releaseGroupId']);
-    final title = _text(data['title']);
-    if (releaseGroupId == null || title == null) return null;
-    return OnlineAlbumInfo(
-      releaseGroupId: releaseGroupId,
-      title: title,
-      artist: _text(data['artist']),
-      year: _number(data['year']),
-      label: _text(data['label']),
-      genre: _text(data['genre']),
-      summary: _text(data['summary']),
-      trackCount: _number(data['trackCount']),
-      primaryType: _text(data['primaryType']),
-      secondaryTypes: _textList(data['secondaryTypes']),
-      covers: CoverArtSet.fromJson(data['covers']),
-      source: _text(data['source']),
-    );
-  }
-}
+/// 专辑信息与候选默认长期保留；只有用户主动刷新或清理缓存才重新请求。
+const Duration onlineAlbumCacheTtl = Duration(days: 365);
 
 /// 在线专辑信息服务。
 ///
-/// 结果写入 `getAppDataDir()/online_album/`：`info/` 保存 7 天有效的
-/// JSON。封面图片由 [CoverDiskCache] 统一写入 `<数据根>/cache/covers/`，
-/// 命中时返回 `FileImage`，同一进程与磁盘有效期内都不再发网络请求。
+/// 每次查询把全部候选写入 `<数据根>/online_album/candidates/<sha1>.json`，
+/// 同文件记录当前选择（`selectedCandidateId` 或 `disabled`）。命中缓存时
+/// 不再发网络请求，只有 [loadCandidates] / [lookup] 传入 `force: true` 才
+/// 重新查询并保留用户选择。封面图片由 [CoverDiskCache] 统一写入
+/// `<数据根>/cache/covers/`，同一进程与磁盘有效期内都不再下载。
 /// 网络、文件与 JSON 错误都降级为“暂无信息”，不会把错误抛到界面。
 class OnlineAlbumService {
   OnlineAlbumService._({
@@ -187,7 +81,8 @@ class OnlineAlbumService {
   final CoverDiskCache _coverDiskCache;
   final Duration cacheTtl;
 
-  final Map<String, Future<OnlineAlbumInfo?>> _pendingLookups = {};
+  final Map<String, Future<OnlineAlbumCandidateCache?>> _pendingLookups = {};
+  final Map<String, OnlineAlbumCandidateCache> _albumMemory = {};
   final Map<String, Future<ImageProvider?>> _artworkMemory = {};
   Directory? _rootDir;
 
@@ -201,14 +96,30 @@ class OnlineAlbumService {
     return sha1.convert(utf8.encode(raw)).toString();
   }
 
-  Future<OnlineAlbumInfo?> lookup(Album album, {bool force = false}) {
+  Future<OnlineAlbumInfo?> lookup(Album album, {bool force = false}) async {
+    final cache = await loadCandidates(album, force: force);
+    return cache?.info;
+  }
+
+  /// 读取专辑候选与当前选择；缓存缺失或 [force] 为真时重新查询。
+  Future<OnlineAlbumCandidateCache?> loadCandidates(
+    Album album, {
+    bool force = false,
+  }) async {
     if (!AppSettings.instance.onlineAlbumInfoEnabled) {
-      return Future<OnlineAlbumInfo?>.value();
+      return null;
     }
     final key = cacheKeyForAlbum(album);
     final pending = _pendingLookups[key];
-    if (!force && pending != null) return pending;
-    final request = _lookup(album, key, force: force);
+    if (pending != null) {
+      if (!force) return pending;
+      await pending;
+    }
+    if (!force) {
+      final memory = _albumMemory[key];
+      if (memory != null) return memory;
+    }
+    final request = _loadCandidates(album, key, force: force);
     _pendingLookups[key] = request;
     unawaited(
       request.whenComplete(() {
@@ -218,6 +129,36 @@ class OnlineAlbumService {
       }),
     );
     return request;
+  }
+
+  /// 保存用户选择。`candidateId` 为空且 [disabled] 为真表示“不使用”。
+  Future<OnlineAlbumCandidateCache?> updateSelection(
+    Album album, {
+    String? candidateId,
+    bool disabled = false,
+  }) async {
+    final key = cacheKeyForAlbum(album);
+    final stored = _albumMemory[key] ?? await _readCandidateCache(key);
+    final cache =
+        stored ??
+        OnlineAlbumCandidateCache(
+          candidates: const [],
+          savedAt: _clock(),
+        );
+    var resolvedId = disabled ? null : candidateId;
+    if (resolvedId != null &&
+        !cache.candidates.any((candidate) => candidate.id == resolvedId)) {
+      resolvedId = null;
+    }
+    final updated = cache.withSelection(
+      candidateId: resolvedId,
+      disabled: disabled,
+      savedAt: _clock(),
+    );
+    await _writeCandidateCache(key, updated);
+    _albumMemory[key] = updated;
+    _pendingLookups.remove(key);
+    return updated;
   }
 
   Future<ImageProvider?> artwork(String url) {
@@ -240,77 +181,241 @@ class OnlineAlbumService {
     return future;
   }
 
-  Future<OnlineAlbumInfo?> _lookup(
+  /// 手动刷新时丢弃单张在线封面的磁盘与内存缓存，下一次显示重新下载。
+  Future<void> invalidateArtwork(String url) async {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) return;
+    _artworkMemory.remove(trimmed);
+    try {
+      await _coverDiskCache.deleteNetworkImage(trimmed);
+    } catch (error) {
+      log.library.debug(
+        'online_album_artwork_invalidate_failed',
+        '在线封面缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+  }
+
+  /// 清空在线专辑信息、候选与在线图片缓存，供设置页手动清理。
+  Future<void> clearCache() async {
+    _albumMemory.clear();
+    _pendingLookups.clear();
+    _artworkMemory.clear();
+    try {
+      final root = await _root();
+      for (final name in const ['candidates', 'info']) {
+        final directory = Directory(path.join(root.path, name));
+        if (await directory.exists()) await directory.delete(recursive: true);
+      }
+    } catch (error) {
+      log.library.warn(
+        'online_album_cache_clear_failed',
+        '在线专辑缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    try {
+      await _coverDiskCache.clearNetworkImages();
+    } catch (error) {
+      log.library.warn(
+        'online_album_artwork_clear_failed',
+        '在线封面缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+  }
+
+  Future<OnlineAlbumCandidateCache?> _loadCandidates(
     Album album,
     String key, {
     required bool force,
   }) async {
+    OnlineAlbumCandidateCache? previous;
     try {
-      if (force) {
-        await _deleteInfoCache(key);
-      } else {
-        final cached = await _readInfoCache(key);
-        if (cached != null) return cached;
-      }
-      final info = await _fetchInfo(album);
-      if (info != null) await _writeInfoCache(key, info);
-      return info;
+      previous = _albumMemory[key] ?? await _readCandidateCache(key);
     } catch (error) {
       log.library.warn(
-        'online_album_lookup_failed',
-        '在线专辑信息获取失败',
-        fields: {'stage': 'lookup', 'error': error.runtimeType.toString()},
+        'online_album_cache_read_failed',
+        '在线专辑缓存读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      previous = null;
+    }
+    if (!force && previous != null) return previous;
+
+    final fetched = await _fetchCandidatesSafely(album);
+    if (fetched == null || fetched.isEmpty) {
+      // 网络失败或没有结果时继续使用旧缓存，避免刷新把已有信息清空。
+      return previous;
+    }
+    final selectedId = previous?.selectedCandidateId;
+    final stillExists =
+        selectedId != null &&
+        fetched.any((candidate) => candidate.id == selectedId);
+    final cache = OnlineAlbumCandidateCache(
+      candidates: List.unmodifiable(fetched),
+      selectedCandidateId: stillExists ? selectedId : null,
+      disabled: previous?.disabled ?? false,
+      savedAt: _clock(),
+    );
+    await _writeCandidateCache(key, cache);
+    _albumMemory[key] = cache;
+    return cache;
+  }
+
+  Future<OnlineAlbumCandidateCache?> _readCandidateCache(String key) async {
+    try {
+      final file = await _candidateFile(key);
+      if (!await file.exists()) return null;
+      final modified = await file.lastModified();
+      final decoded = jsonDecode(await file.readAsString());
+      final cache = OnlineAlbumCandidateCache.fromJson(decoded);
+      if (cache == null) {
+        await _deleteCacheFile(file, 'invalid');
+        return null;
+      }
+      final savedAt = cache.savedAt ?? modified;
+      if (_isExpired(savedAt)) {
+        await _deleteCacheFile(file, 'expired');
+        return null;
+      }
+      return cache;
+    } catch (error) {
+      log.library.warn(
+        'online_album_cache_read_failed',
+        '在线专辑缓存读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      try {
+        final file = await _candidateFile(key);
+        if (await file.exists()) await file.delete();
+      } catch (deleteError) {
+        log.library.debug(
+          'online_album_cache_delete_failed',
+          '损坏的在线专辑缓存删除失败',
+          fields: {'error': deleteError.runtimeType.toString()},
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<void> _writeCandidateCache(
+    String key,
+    OnlineAlbumCandidateCache cache,
+  ) async {
+    try {
+      final file = await _candidateFile(key);
+      await writeTextFileAtomically(file.path, jsonEncode(cache.toJson()));
+    } catch (error) {
+      log.library.warn(
+        'online_album_cache_write_failed',
+        '在线专辑缓存写入失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+  }
+
+  Future<void> _deleteCacheFile(File file, String reason) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      log.library.debug(
+        'online_album_cache_delete_failed',
+        '在线专辑缓存清理失败',
+        fields: {
+          'reason': reason,
+          'error': error.runtimeType.toString(),
+        },
+      );
+    }
+  }
+
+  Future<List<OnlineAlbumCandidate>?> _fetchCandidatesSafely(Album album) async {
+    try {
+      final result = await _fetchCandidates(album);
+      return result;
+    } catch (error) {
+      log.library.warn(
+        'online_album_fetch_failed',
+        '在线专辑候选查询失败',
+        fields: {'error': error.runtimeType.toString()},
       );
       return null;
     }
   }
 
-  /// 国内源优先：命中可信候选就直接返回，失败时交给 MusicBrainz 回退。
-  Future<OnlineAlbumInfo?> _fetchCnInfo(Album album) async {
+  Future<List<OnlineAlbumCandidate>?> _fetchCandidates(Album album) async {
     final title = album.name.trim();
-    if (title.isEmpty || album.works.isEmpty) return null;
+    if (title.isEmpty || album.works.isEmpty) {
+      return const <OnlineAlbumCandidate>[];
+    }
     final artist = albumArtistFor(album);
     final trackCount = album.works.length;
     final yearHint = extractAlbumYearHint(album);
+
+    final cnCandidates = await _fetchCnCandidates(
+      title: title,
+      artist: artist,
+      trackCount: trackCount,
+      yearHint: yearHint,
+    );
+    cnCandidates.sort((a, b) => b.score.compareTo(a.score));
+    final bestCn = cnCandidates.isEmpty ? null : cnCandidates.first;
+    if (bestCn != null && bestCn.score >= minimumOnlineAlbumScore) {
+      return cnCandidates;
+    }
+
+    final mbCandidates = await _fetchMusicBrainzCandidates(
+      title: title,
+      artist: artist,
+      trackCount: trackCount,
+      yearHint: yearHint,
+    );
+    if (mbCandidates == null) {
+      return cnCandidates.isEmpty ? null : cnCandidates;
+    }
+    final merged = <OnlineAlbumCandidate>[...cnCandidates, ...mbCandidates]
+      ..sort((a, b) => b.score.compareTo(a.score));
+    return merged;
+  }
+
+  Future<List<OnlineAlbumCandidate>> _fetchCnCandidates({
+    required String title,
+    required String artist,
+    required int trackCount,
+    required int? yearHint,
+  }) async {
     List<CnAlbumCandidate> candidates;
     try {
-      candidates = await _cnMusic.searchAlbums(
-        title: title,
-        artist: artist,
-      );
+      candidates = await _cnMusic.searchAlbums(title: title, artist: artist);
     } catch (error) {
       log.library.debug(
         'online_album_cn_search_failed',
         '国内音乐源搜索失败',
         fields: {'error': error.runtimeType.toString()},
       );
-      return null;
+      return const <OnlineAlbumCandidate>[];
     }
-    if (candidates.isEmpty) return null;
-    final best = pickBestCnAlbumCandidate(
-      albumTitle: title,
-      artist: artist,
-      trackCount: trackCount,
-      yearHint: yearHint,
-      candidates: candidates,
-      aliases: AppSettings.instance.artistAliases,
-    );
-    if (best == null) return null;
-    final coverUrl = best.coverUrl;
-    return OnlineAlbumInfo(
-      releaseGroupId: 'cn:${best.source.name}:${best.id}',
-      title: best.title,
-      artist: best.artist.trim().isEmpty ? artist : best.artist,
-      year: best.year ?? yearHint,
-      summary: buildOnlineAlbumSummary(
-        primaryType: 'Album',
-        secondaryTypes: const [],
-        releaseDate: null,
-        trackCount: best.trackCount,
-      ),
-      trackCount: best.trackCount,
-      source: best.source.label,
-      covers: coverUrl == null || coverUrl.isEmpty
+    final aliases = AppSettings.instance.artistAliases;
+    final result = <OnlineAlbumCandidate>[];
+    for (final candidate in candidates) {
+      final score = scoreCnAlbumCandidate(
+        albumTitle: title,
+        artist: artist,
+        trackCount: trackCount,
+        yearHint: yearHint,
+        candidate: candidate,
+        aliases: aliases,
+      );
+      final candidateArtist = candidate.artist.trim().isEmpty
+          ? artist
+          : candidate.artist;
+      final year = candidate.year ?? yearHint;
+      final coverUrl = candidate.coverUrl;
+      final id = 'cn:${candidate.source.name}:${candidate.id}';
+      final covers = coverUrl == null || coverUrl.isEmpty
           ? CoverArtSet.empty
           : CoverArtSet(
               front: CoverArtImage(
@@ -320,25 +425,60 @@ class OnlineAlbumService {
                 back: false,
                 types: const ['front'],
               ),
+            );
+      result.add(
+        OnlineAlbumCandidate(
+          id: id,
+          source: candidate.source.label,
+          title: candidate.title,
+          artist: candidateArtist,
+          year: year,
+          trackCount: candidate.trackCount,
+          imageUrl: coverUrl,
+          score: score,
+          info: OnlineAlbumInfo(
+            releaseGroupId: id,
+            title: candidate.title,
+            artist: candidateArtist,
+            year: year,
+            summary: buildOnlineAlbumSummary(
+              primaryType: 'Album',
+              secondaryTypes: const [],
+              releaseDate: null,
+              trackCount: candidate.trackCount,
             ),
-    );
+            trackCount: candidate.trackCount,
+            source: candidate.source.label,
+            covers: covers,
+          ),
+        ),
+      );
+    }
+    return result;
   }
 
-  Future<OnlineAlbumInfo?> _fetchInfo(Album album) async {
-    final cnInfo = await _fetchCnInfo(album);
-    if (cnInfo != null) return cnInfo;
-
-    final title = album.name.trim();
-    if (title.isEmpty || album.works.isEmpty) return null;
-    final artist = albumArtistFor(album);
-    final trackCount = album.works.length;
-    final yearHint = extractAlbumYearHint(album);
-
-    final groups = await _musicBrainz.searchReleaseGroups(
-      release: title,
-      artist: artist,
-    );
-    if (groups.isEmpty) return null;
+  /// MusicBrainz 候选。返回 null 表示请求失败；返回空列表表示确实无结果。
+  Future<List<OnlineAlbumCandidate>?> _fetchMusicBrainzCandidates({
+    required String title,
+    required String artist,
+    required int trackCount,
+    required int? yearHint,
+  }) async {
+    List<MbReleaseGroup> groups;
+    try {
+      groups = await _musicBrainz.searchReleaseGroups(
+        release: title,
+        artist: artist,
+      );
+    } catch (error) {
+      log.library.debug(
+        'online_album_musicbrainz_search_failed',
+        'MusicBrainz 搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+    if (groups.isEmpty) return const <OnlineAlbumCandidate>[];
 
     final ranked = <_RankedGroup>[
       for (final group in groups.take(8))
@@ -377,24 +517,9 @@ class OnlineAlbumService {
     }
     finalists.sort((a, b) => b.score.compareTo(a.score));
     final best = finalists.first;
-    if (best.score < minimumOnlineAlbumScore) return null;
-
-    var release = best.release;
-    if (release == null) {
-      try {
-        final releases = await _musicBrainz.browseReleases(best.group.id);
-        release = pickBestRelease(releases, trackCount);
-      } on MusicBrainzException catch (error) {
-        release = null;
-        log.library.debug(
-          'online_album_release_lookup_failed',
-          '发行版查询失败',
-          fields: {'error': error.runtimeType.toString()},
-        );
-      }
-    }
 
     MbReleaseDetail? detail;
+    final release = best.release;
     if (release != null) {
       try {
         detail = await _musicBrainz.lookupRelease(release.id);
@@ -407,18 +532,42 @@ class OnlineAlbumService {
         );
       }
     }
-
     final covers = await _coverArt.fetch(
       releaseGroupId: best.group.id,
       releaseId: release?.id,
     );
-    final detailGenres = detail?.genres ?? const <String>[];
-    final detailTags = detail?.tags ?? const <String>[];
+
+    final result = <OnlineAlbumCandidate>[];
+    for (final candidate in ranked) {
+      final isBest = identical(candidate, best);
+      result.add(
+        _buildMusicBrainzCandidate(
+          candidate: candidate,
+          fallbackArtist: artist,
+          yearHint: yearHint,
+          detail: isBest ? detail : null,
+          covers: isBest ? covers : null,
+        ),
+      );
+    }
+    result.sort((a, b) => b.score.compareTo(a.score));
+    return result;
+  }
+
+  OnlineAlbumCandidate _buildMusicBrainzCandidate({
+    required _RankedGroup candidate,
+    required String fallbackArtist,
+    required int? yearHint,
+    required MbReleaseDetail? detail,
+    required CoverArtSet? covers,
+  }) {
+    final group = candidate.group;
+    final release = candidate.release;
     final genreValues = <String>[
-      ...best.group.genres,
-      ...best.group.tags,
-      ...detailGenres,
-      ...detailTags,
+      ...group.genres,
+      ...group.tags,
+      ...?detail?.genres,
+      ...?detail?.tags,
     ];
     final genre = genreValues.isEmpty
         ? null
@@ -426,31 +575,57 @@ class OnlineAlbumService {
     final labels = detail?.labels ?? const <String>[];
     final label = labels.isEmpty ? null : labels.first;
     final year =
-        yearFromDate(best.group.firstReleaseDate) ?? yearFromDate(detail?.date);
-    final releaseDate = best.group.firstReleaseDate ?? detail?.date;
-    final resolvedTrackCount = detail?.trackCount ?? release?.trackCount;
+        yearFromDate(group.firstReleaseDate) ??
+        yearFromDate(detail?.date) ??
+        yearHint;
+    final releaseDate = group.firstReleaseDate ?? detail?.date;
+    final resolvedTrackCount =
+        detail?.trackCount ?? release?.trackCount ?? candidate.releaseTrackCount;
     final summary = buildOnlineAlbumSummary(
-      primaryType: best.group.primaryType,
-      secondaryTypes: best.group.secondaryTypes,
+      primaryType: group.primaryType,
+      secondaryTypes: group.secondaryTypes,
       releaseDate: releaseDate,
       trackCount: resolvedTrackCount,
     );
-
-    return OnlineAlbumInfo(
-      releaseGroupId: best.group.id,
-      title: best.group.title,
-      artist: best.group.artistNames.isNotEmpty
-          ? best.group.artistNames.join(' / ')
-          : artist,
-      year: year,
-      label: label,
-      genre: genre,
-      summary: summary,
-      trackCount: resolvedTrackCount,
-      primaryType: best.group.primaryType,
-      secondaryTypes: best.group.secondaryTypes,
-      covers: covers ?? CoverArtSet.empty,
+    final coversForCandidate =
+        covers ??
+        CoverArtSet(
+          front: CoverArtImage(
+            url:
+                '$coverArtArchiveBaseUrl/release-group/'
+                '${Uri.encodeComponent(group.id)}/front-500',
+            largeUrl: null,
+            front: true,
+            back: false,
+            types: const ['front'],
+          ),
+        );
+    final artist = group.artistNames.isNotEmpty
+        ? group.artistNames.join(' / ')
+        : fallbackArtist;
+    return OnlineAlbumCandidate(
+      id: 'mb:${group.id}',
       source: 'MusicBrainz',
+      title: group.title,
+      artist: artist,
+      year: year,
+      trackCount: resolvedTrackCount,
+      imageUrl: coversForCandidate.front?.url,
+      score: candidate.score,
+      info: OnlineAlbumInfo(
+        releaseGroupId: group.id,
+        title: group.title,
+        artist: artist,
+        year: year,
+        label: label,
+        genre: genre,
+        summary: summary,
+        trackCount: resolvedTrackCount,
+        primaryType: group.primaryType,
+        secondaryTypes: group.secondaryTypes,
+        covers: coversForCandidate,
+        source: 'MusicBrainz',
+      ),
     );
   }
 
@@ -464,61 +639,10 @@ class OnlineAlbumService {
     return dir;
   }
 
-  Future<File> _infoFile(String key) async {
-    final dir = Directory(path.join((await _root()).path, 'info'));
+  Future<File> _candidateFile(String key) async {
+    final dir = Directory(path.join((await _root()).path, 'candidates'));
     await dir.create(recursive: true);
     return File(path.join(dir.path, '$key.json'));
-  }
-
-  Future<OnlineAlbumInfo?> _readInfoCache(String key) async {
-    try {
-      final file = await _infoFile(key);
-      if (!await file.exists()) return null;
-      final modified = await file.lastModified();
-      if (_isExpired(modified)) {
-        await file.delete();
-        return null;
-      }
-      final decoded = jsonDecode(await file.readAsString());
-      return OnlineAlbumInfo.fromJson(decoded);
-    } catch (error) {
-      log.library.warn(
-        'online_album_cache_read_failed',
-        '在线专辑缓存读取失败',
-        fields: {'error': error.runtimeType.toString()},
-      );
-      return null;
-    }
-  }
-
-  Future<void> _writeInfoCache(String key, OnlineAlbumInfo info) async {
-    try {
-      final file = await _infoFile(key);
-      final payload = <String, Object?>{
-        ...info.toJson(),
-        'savedAt': _clock().toIso8601String(),
-      };
-      await writeTextFileAtomically(file.path, jsonEncode(payload));
-    } catch (error) {
-      log.library.warn(
-        'online_album_cache_write_failed',
-        '在线专辑缓存写入失败',
-        fields: {'error': error.runtimeType.toString()},
-      );
-    }
-  }
-
-  Future<void> _deleteInfoCache(String key) async {
-    try {
-      final file = await _infoFile(key);
-      if (await file.exists()) await file.delete();
-    } catch (error) {
-      log.library.debug(
-        'online_album_cache_delete_failed',
-        '在线专辑缓存清理失败',
-        fields: {'error': error.runtimeType.toString()},
-      );
-    }
   }
 
   Future<ImageProvider?> _loadArtwork(String url) async {
@@ -604,6 +728,8 @@ class _RankedGroup {
   final MbReleaseGroup group;
   double score;
   MbRelease? release;
+
+  int? get releaseTrackCount => release?.trackCount;
 }
 
 String albumArtistFor(Album album) {
@@ -766,26 +892,4 @@ Future<bool> canDecodeImageBytes(Uint8List bytes) async {
     frame?.image.dispose();
     codec?.dispose();
   }
-}
-
-String? _text(Object? value) {
-  if (value is String && value.trim().isNotEmpty) return value.trim();
-  return null;
-}
-
-int? _number(Object? value) {
-  if (value is int) return value;
-  if (value is num) return value.round();
-  if (value is String) return int.tryParse(value.trim());
-  return null;
-}
-
-List<String> _textList(Object? value) {
-  if (value is! List<dynamic>) return const [];
-  final result = <String>[];
-  for (final item in value) {
-    final text = _text(item);
-    if (text != null) result.add(text);
-  }
-  return List.unmodifiable(result);
 }

@@ -10,6 +10,8 @@ import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/page/settings_page/tabs/settings_section_header.dart';
+import 'package:pure_music/services/online_album/online_album_service.dart';
+import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 
 class NetworkProxySettingsPanel extends StatefulWidget {
   const NetworkProxySettingsPanel({super.key});
@@ -33,6 +35,7 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
   bool _savingOnlineAlbum = false;
   bool _onlineArtistImageEnabled = true;
   bool _savingOnlineArtistImage = false;
+  bool _clearingOnlineCache = false;
 
   @override
   void initState() {
@@ -179,6 +182,28 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
     setState(() => _savingOnlineArtistImage = false);
   }
 
+  Future<void> _clearOnlineCache() async {
+    if (_clearingOnlineCache) return;
+    setState(() => _clearingOnlineCache = true);
+    try {
+      await OnlineAlbumService.instance.clearCache();
+      await OnlineArtistImageService.instance.clearCache();
+      if (!mounted) return;
+      showTextOnSnackBar('在线信息与封面缓存已清理');
+    } catch (error, trace) {
+      log.settings.error(
+        'legacy',
+        '[network] 清理在线缓存失败',
+        error: error,
+        stackTrace: trace,
+      );
+      if (!mounted) return;
+      showTextOnSnackBar('清理在线缓存失败', variant: ToastVariant.error);
+    } finally {
+      if (mounted) setState(() => _clearingOnlineCache = false);
+    }
+  }
+
   String _modeSubtitle() {
     return switch (_mode) {
       ProxyMode.system => '读取 http_proxy / https_proxy 环境变量',
@@ -293,6 +318,16 @@ class _NetworkProxySettingsPanelState extends State<NetworkProxySettingsPanel> {
             onChanged: _savingOnlineArtistImage
                 ? null
                 : _setOnlineArtistImageEnabled,
+          ),
+        ),
+        const SizedBox(height: 12.0),
+        SettingsTile(
+          description: '在线缓存',
+          subtitle: '专辑信息、候选与在线封面长期保存在本地；清理后下次打开页面重新获取',
+          action: OutlinedButton.icon(
+            onPressed: _clearingOnlineCache ? null : _clearOnlineCache,
+            icon: const Icon(Symbols.delete_sweep, size: 18),
+            label: Text(_clearingOnlineCache ? '清理中' : '清理缓存'),
           ),
         ),
         const SizedBox(height: 24.0),

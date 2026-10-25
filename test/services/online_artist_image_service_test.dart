@@ -105,14 +105,14 @@ void main() {
       await service.imageFor('未知艺术家');
       expect(client.calls, 1);
 
-      // 把缓存文件的修改时间改成 8 天前，模拟过期。
+      // 把缓存文件的修改时间改成一年前，模拟过期。
       final files = dir
           .listSync(recursive: true)
           .whereType<File>()
           .toList(growable: false);
       for (final file in files) {
         await file.setLastModified(
-          now.subtract(const Duration(days: 8)),
+          now.subtract(const Duration(days: 400)),
         );
       }
       final secondClient = _FakeCnMusicClient(const []);
@@ -144,6 +144,81 @@ void main() {
         artworkLoader: (String url) async => provider,
       );
       expect(await service.imageFor('周杰伦'), same(provider));
+    });
+
+    test('选择的候选写入磁盘并在重启后沿用', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_artist');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const netease = CnArtistCandidate(
+        source: CnMusicSource.netease,
+        id: '1',
+        name: '周杰伦',
+        picUrl: 'https://p1.music.126.net/artist.jpg',
+      );
+      const qq = CnArtistCandidate(
+        source: CnMusicSource.qq,
+        id: '2',
+        name: '周杰伦',
+        picUrl: 'https://y.gtimg.cn/artist.jpg',
+      );
+      final first = OnlineArtistImageService.createForTest(
+        cnMusic: _FakeCnMusicClient(const [netease, qq]),
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async => null,
+      );
+      final cache = await first.loadCandidates('周杰伦');
+      expect(cache!.candidates, hasLength(2));
+      await first.updateSelection(
+        '周杰伦',
+        candidateId: 'cn:qq:2',
+      );
+
+      final secondClient = _FakeCnMusicClient(const []);
+      final second = OnlineArtistImageService.createForTest(
+        cnMusic: secondClient,
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async =>
+            MemoryImage(Uint8List.fromList(const [1, 2, 3])),
+      );
+      final preferred = await second.preferredImageFor('周杰伦');
+      expect(preferred, isNotNull);
+      expect(secondClient.calls, 0);
+      final restored = await second.loadCandidates('周杰伦');
+      expect(restored!.selectedCandidateId, 'cn:qq:2');
+    });
+
+    test('选择不使用后不再发请求并返回空头像', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_artist');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const candidate = CnArtistCandidate(
+        source: CnMusicSource.netease,
+        id: '1',
+        name: '周杰伦',
+        picUrl: 'https://p1.music.126.net/artist.jpg',
+      );
+      final first = OnlineArtistImageService.createForTest(
+        cnMusic: _FakeCnMusicClient(const [candidate]),
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async => null,
+      );
+      await first.loadCandidates('周杰伦');
+      await first.updateSelection('周杰伦', disabled: true);
+
+      final secondClient = _FakeCnMusicClient(const [candidate]);
+      final second = OnlineArtistImageService.createForTest(
+        cnMusic: secondClient,
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async {
+          fail('禁用后不应加载在线头像');
+        },
+      );
+      expect(await second.imageFor('周杰伦'), isNull);
+      expect(secondClient.calls, 0);
+      expect(await second.preferredImageFor('周杰伦'), isNull);
     });
   });
 }

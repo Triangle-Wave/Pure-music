@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/component/motion.dart';
+import 'package:pure_music/component/online_candidate_dialog.dart';
 import 'package:pure_music/component/scroll_aware_future_builder.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/page/uni_page.dart';
@@ -7,6 +10,7 @@ import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/menu_styles.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/services/online_album/online_album_models.dart';
 import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -37,8 +41,11 @@ class ArtistTile extends StatefulWidget {
 }
 
 class _ArtistTileState extends State<ArtistTile> {
+  int _onlineRevision = 0;
+
   String get _currentCoverIdentity =>
-      '${widget.artist.primaryPath}|48|'
+      '${widget.artist.primaryPath}|48|$_onlineRevision|'
+      '${OnlineArtistImageService.instance.selectionRevision}|'
       '${AppSettings.instance.onlineArtistImageEnabled}';
 
   @override
@@ -110,7 +117,77 @@ class _ArtistTileState extends State<ArtistTile> {
           leadingIcon: const Icon(Symbols.select),
           child: const Text('多选'),
         ),
+      if (AppSettings.instance.onlineArtistImageEnabled)
+        MenuItemButton(
+          style: menuItemStyle,
+          onPressed: () => unawaited(_chooseOnlineImage()),
+          leadingIcon: const Icon(Symbols.account_box),
+          child: const Text('在线头像'),
+        ),
     ];
+  }
+
+  Future<void> _chooseOnlineImage() async {
+    if (!AppSettings.instance.onlineArtistImageEnabled) return;
+    final service = OnlineArtistImageService.instance;
+    OnlineArtistCandidateCache? cache;
+    try {
+      cache = await service.loadCandidates(widget.artist.name);
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_online_candidates_failed',
+        '艺术家在线候选读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    if (!mounted) return;
+    final options = <OnlineCandidateOption>[
+      for (final candidate
+          in cache?.candidates ?? const <OnlineArtistCandidate>[])
+        OnlineCandidateOption(
+          id: candidate.id,
+          source: candidate.source,
+          title: candidate.name,
+          subtitle: candidate.albumCount == null
+              ? null
+              : '${candidate.albumCount} 张专辑',
+          imageUrl: candidate.imageUrl,
+          score: candidate.score * 100,
+        ),
+    ];
+    final choice = await showOnlineCandidateDialog(
+      context,
+      title: '选择艺术家头像',
+      options: options,
+      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
+      disabled: cache?.disabled ?? false,
+      artworkLoader: service.artwork,
+    );
+    if (choice == null || !mounted) return;
+    try {
+      switch (choice.action) {
+        case OnlineCandidateAction.auto:
+          await service.updateSelection(widget.artist.name);
+        case OnlineCandidateAction.disable:
+          await service.updateSelection(
+            widget.artist.name,
+            disabled: true,
+          );
+        case OnlineCandidateAction.select:
+          await service.updateSelection(
+            widget.artist.name,
+            candidateId: choice.candidateId,
+          );
+      }
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_online_selection_failed',
+        '艺术家在线头像选择失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    if (!mounted) return;
+    setState(() => _onlineRevision++);
   }
 
   Widget _tileSurface(
@@ -247,6 +324,17 @@ class _ArtistTileState extends State<ArtistTile> {
   }
 
   Future<ImageProvider?> _picture(bool hasWorks) async {
+    try {
+      final preferred = await OnlineArtistImageService.instance
+          .preferredImageFor(widget.artist.name);
+      if (preferred != null) return preferred;
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_preferred_picture_failed',
+        '艺术家在线头像选择读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
     if (!hasWorks) return null;
     try {
       final local = await widget.artist.thumbnailPicture(size: 48);

@@ -279,6 +279,33 @@ class CoverDiskCache {
     await _deleteNetworkFile(key, file, 'requested');
   }
 
+  /// 只清空在线封面文件，保留本地缩略图。
+  Future<void> clearNetworkImages() async {
+    final directory = await _root();
+    if (directory == null) return;
+    try {
+      if (!await directory.exists()) {
+        _networkFiles.clear();
+        _networkIndexLoaded = false;
+        return;
+      }
+      await for (final entity in directory.list(followLinks: false)) {
+        if (entity is! File) continue;
+        if (!path.basename(entity.path).startsWith('u_')) continue;
+        await _deleteQuietly(entity, 'clear_network');
+      }
+      _networkFiles.clear();
+      _networkIndexLoaded = false;
+    } catch (error, stackTrace) {
+      log.app.warn(
+        'cover_cache_network_clear_failed',
+        '在线封面缓存清理失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   /// 清空全部磁盘封面，供设置页或诊断使用。
   Future<void> clear() async {
     final directory = await _root();

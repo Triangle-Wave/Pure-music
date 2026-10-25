@@ -10,27 +10,32 @@ import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/services/online_album/album_match.dart';
 import 'package:pure_music/services/online_album/cn_music_client.dart';
+import 'package:pure_music/services/online_album/online_album_models.dart';
 import 'package:pure_music/services/online_album/online_album_service.dart';
 
 /// 艺术家头像服务。
 ///
-/// 按艺术家名搜索网易云、QQ 音乐与酷狗音乐的歌手头像，命中后把 URL
-/// 写入 `getAppDataDir()/online_album/artist/`；图片本身由
+/// 按艺术家名搜索网易云、QQ 音乐与酷狗音乐的歌手头像，把全部候选与当前
+/// 选择写入 `getAppDataDir()/online_album/artist/<sha1>.json`。图片本身由
 /// [OnlineAlbumService.artwork] 写入 `<数据根>/cache/covers/` 并返回
-/// `FileImage`，重启后仍直接读盘。没有结果时缓存空结果，避免列表反复
-/// 请求；所有失败都静默降级为占位图。
+/// `FileImage`，重启后仍直接读盘。选择“不使用”时不再请求在线图片；
+/// 所有失败都静默降级为占位图。
 class OnlineArtistImageService {
   OnlineArtistImageService._({
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
     Future<ImageProvider?> Function(String url)? artworkLoader,
+    Future<void> Function(String url)? artworkInvalidator,
     this.cacheTtl = onlineAlbumCacheTtl,
   }) : _cnMusic = cnMusic ?? CnMusicClient(),
        _appDataDirectory = appDataDirectory ?? getAppDataDir,
        _clock = clock ?? DateTime.now,
        _artworkLoader =
-           artworkLoader ?? OnlineAlbumService.instance.artwork;
+           artworkLoader ?? OnlineAlbumService.instance.artwork,
+       _artworkInvalidator =
+           artworkInvalidator ??
+           OnlineAlbumService.instance.invalidateArtwork;
 
   static final OnlineArtistImageService instance =
       OnlineArtistImageService._();
@@ -41,6 +46,7 @@ class OnlineArtistImageService {
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
     Future<ImageProvider?> Function(String url)? artworkLoader,
+    Future<void> Function(String url)? artworkInvalidator,
     Duration cacheTtl = onlineAlbumCacheTtl,
   }) {
     return OnlineArtistImageService._(
@@ -48,6 +54,7 @@ class OnlineArtistImageService {
       appDataDirectory: appDataDirectory,
       clock: clock,
       artworkLoader: artworkLoader,
+      artworkInvalidator: artworkInvalidator,
       cacheTtl: cacheTtl,
     );
   }
@@ -56,52 +63,161 @@ class OnlineArtistImageService {
   final Future<Directory> Function() _appDataDirectory;
   final DateTime Function() _clock;
   final Future<ImageProvider?> Function(String url) _artworkLoader;
+  final Future<void> Function(String url) _artworkInvalidator;
   final Duration cacheTtl;
 
+  /// 空候选只保留一天，避免新上架的歌手长期没有头像。
+  static const Duration _emptyCacheTtl = Duration(days: 1);
+
   final Map<String, Future<ImageProvider?>> _memory = {};
+  final Map<String, OnlineArtistCandidateCache> _candidateMemory = {};
+  final Map<String, Future<OnlineArtistCandidateCache?>> _pendingCandidates =
+      {};
   final List<Completer<void>> _searchWaiters = [];
   Directory? _cacheDir;
   int _activeSearches = 0;
+  int _selectionRevision = 0;
 
-  Future<ImageProvider?> imageFor(String artistName) {
+  /// 选择变化计数；列表项用它作为图片请求标识，保证跨页面同步刷新。
+  int get selectionRevision => _selectionRevision;
+
+  Future<ImageProvider?> imageFor(String artistName, {bool force = false}) {
     if (!AppSettings.instance.onlineArtistImageEnabled) {
       return Future<ImageProvider?>.value();
     }
     final name = artistName.trim();
     if (name.isEmpty) return Future<ImageProvider?>.value();
     final key = cacheKeyForArtist(name);
-    final cached = _memory[key];
-    if (cached != null) return cached;
+    if (!force) {
+      final cached = _memory[key];
+      if (cached != null) return cached;
+    }
     if (_memory.length >= 256) {
       _memory.remove(_memory.keys.first);
     }
-    final future = _load(name, key);
+    final future = _load(name, key, force: force);
     _memory[key] = future;
     return future;
   }
+
+  /// 只返回用户显式选择的候选图；自动选择与“不使用”都返回 null，
+  /// 让调用方继续本地封面优先的既有逻辑。
+  Future<ImageProvider?> preferredImageFor(String artistName) async {
+    if (!AppSettings.instance.onlineArtistImageEnabled) return null;
+    final name = artistName.trim();
+    if (name.isEmpty) return null;
+    final key = cacheKeyForArtist(name);
+    try {
+      final cache = _candidateMemory[key] ?? await _readCacheEntry(key);
+      if (cache == null || !cache.hasExplicitSelection) return null;
+      final url = cache.activeImageUrl;
+      if (url == null || url.isEmpty) return null;
+      return _artworkLoader(url);
+    } catch (error) {
+      log.library.warn(
+        'online_artist_selection_failed',
+        '读取艺术家头像选择失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
+  /// 选中候选的图片下载走与专辑封面相同的磁盘缓存链路。
+  Future<ImageProvider?> artwork(String url) => _artworkLoader(url);
 
   String cacheKeyForArtist(String artistName) {
     return sha1.convert(utf8.encode(normalizeForMatch(artistName))).toString();
   }
 
-  Future<ImageProvider?> _load(String name, String key) async {
+  /// 读取艺术家候选与当前选择；缓存缺失或 [force] 为真时重新搜索。
+  Future<OnlineArtistCandidateCache?> loadCandidates(
+    String artistName, {
+    bool force = false,
+  }) async {
+    final name = artistName.trim();
+    if (name.isEmpty) return null;
+    if (!AppSettings.instance.onlineArtistImageEnabled) return null;
+    return _ensureCandidates(name, cacheKeyForArtist(name), force: force);
+  }
+
+  /// 保存用户选择。`candidateId` 为空且 [disabled] 为真表示“不使用”。
+  Future<OnlineArtistCandidateCache?> updateSelection(
+    String artistName, {
+    String? candidateId,
+    bool disabled = false,
+  }) async {
+    final name = artistName.trim();
+    if (name.isEmpty) return null;
+    final key = cacheKeyForArtist(name);
+    final stored = _candidateMemory[key] ?? await _readCacheEntry(key);
+    final cache =
+        stored ??
+        OnlineArtistCandidateCache(
+          candidates: const [],
+          savedAt: _clock(),
+        );
+    var resolvedId = disabled ? null : candidateId;
+    if (resolvedId != null &&
+        !cache.candidates.any((candidate) => candidate.id == resolvedId)) {
+      resolvedId = null;
+    }
+    final updated = cache.withSelection(
+      candidateId: resolvedId,
+      disabled: disabled,
+      savedAt: _clock(),
+    );
+    await _writeCacheEntry(key, updated);
+    _candidateMemory[key] = updated;
+    _memory.remove(key);
+    _selectionRevision++;
+    return updated;
+  }
+
+  /// 手动刷新前丢弃该艺术家的内存缓存与在线图片磁盘缓存。
+  Future<void> invalidateImage(String artistName) async {
+    final name = artistName.trim();
+    if (name.isEmpty) return;
+    final key = cacheKeyForArtist(name);
+    _memory.remove(key);
+    _selectionRevision++;
+    final cache = _candidateMemory[key] ?? await _readCacheEntry(key);
+    final url = cache?.activeImageUrl;
+    if (url == null || url.isEmpty) return;
     try {
-      final entry = await _readCacheEntry(key);
-      if (entry != null) {
-        final url = entry.url;
-        if (url == null || url.isEmpty) return null;
-        return _artworkLoader(url);
-      }
-      final candidates = await _withSearchSlot(
-        () => _cnMusic.searchArtists(name: name),
+      await _artworkInvalidator(url);
+    } catch (error) {
+      log.library.debug(
+        'online_artist_image_invalidate_failed',
+        '艺术家头像缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
       );
-      final best = pickBestArtistCandidate(
-        name: name,
-        candidates: candidates,
-        aliases: AppSettings.instance.artistAliases,
+    }
+  }
+
+  /// 清空艺术家头像候选缓存，供设置页手动清理。
+  Future<void> clearCache() async {
+    _memory.clear();
+    _candidateMemory.clear();
+    _pendingCandidates.clear();
+    _cacheDir = null;
+    _selectionRevision++;
+    try {
+      final directory = await _root();
+      if (await directory.exists()) await directory.delete(recursive: true);
+    } catch (error) {
+      log.library.warn(
+        'online_artist_image_cache_clear_failed',
+        '艺术家头像缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
       );
-      final url = best?.picUrl;
-      await _writeCacheEntry(key, url);
+    }
+  }
+
+  Future<ImageProvider?> _load(String name, String key, {bool force}) async {
+    try {
+      final cache = await _ensureCandidates(name, key, force: force);
+      final url = cache?.activeImageUrl;
       if (url == null || url.isEmpty) return null;
       return _artworkLoader(url);
     } catch (error) {
@@ -112,6 +228,100 @@ class OnlineArtistImageService {
       );
       return null;
     }
+  }
+
+  Future<OnlineArtistCandidateCache?> _ensureCandidates(
+    String name,
+    String key, {
+    required bool force,
+  }) async {
+    final pending = _pendingCandidates[key];
+    if (pending != null) {
+      if (!force) return pending;
+      await pending;
+    }
+    final request = _loadCandidateCache(name, key, force: force);
+    _pendingCandidates[key] = request;
+    unawaited(
+      request.whenComplete(() {
+        if (identical(_pendingCandidates[key], request)) {
+          _pendingCandidates.remove(key);
+        }
+      }),
+    );
+    return request;
+  }
+
+  Future<OnlineArtistCandidateCache?> _loadCandidateCache(
+    String name,
+    String key, {
+    required bool force,
+  }) async {
+    OnlineArtistCandidateCache? previous;
+    try {
+      previous = _candidateMemory[key] ?? await _readCacheEntry(key);
+    } catch (error) {
+      log.library.warn(
+        'online_artist_image_cache_read_failed',
+        '艺术家头像缓存读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      previous = null;
+    }
+    if (!force && previous != null) return previous;
+
+    List<CnArtistCandidate> candidates;
+    try {
+      candidates = await _withSearchSlot(
+        () => _cnMusic.searchArtists(name: name),
+      );
+    } catch (error) {
+      log.library.warn(
+        'online_artist_image_search_failed',
+        '艺术家头像搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return previous;
+    }
+
+    final aliases = AppSettings.instance.artistAliases;
+    final ranked = <OnlineArtistCandidate>[];
+    for (final candidate in candidates) {
+      final pic = candidate.picUrl;
+      if (pic == null || pic.isEmpty) continue;
+      final score = artistNameSimilarity(
+        name,
+        candidate.name,
+        aliases: aliases,
+      );
+      ranked.add(
+        OnlineArtistCandidate(
+          id: 'cn:${candidate.source.name}:${candidate.id}',
+          source: candidate.source.label,
+          name: candidate.name,
+          imageUrl: pic,
+          albumCount: candidate.albumCount,
+          score: score,
+        ),
+      );
+    }
+    ranked.sort((a, b) => b.score.compareTo(a.score));
+
+    if (ranked.isEmpty && previous != null) return previous;
+
+    final selectedId = previous?.selectedCandidateId;
+    final stillExists =
+        selectedId != null &&
+        ranked.any((candidate) => candidate.id == selectedId);
+    final cache = OnlineArtistCandidateCache(
+      candidates: List.unmodifiable(ranked),
+      selectedCandidateId: stillExists ? selectedId : null,
+      disabled: previous?.disabled ?? false,
+      savedAt: _clock(),
+    );
+    await _writeCacheEntry(key, cache);
+    _candidateMemory[key] = cache;
+    return cache;
   }
 
   /// 列表里可能同时出现大量艺术家；限制同时进行的搜索数量，
@@ -150,40 +360,53 @@ class OnlineArtistImageService {
     return File(path.join(dir.path, '$key.json'));
   }
 
-  Future<_ArtistImageCacheEntry?> _readCacheEntry(String key) async {
+  Future<OnlineArtistCandidateCache?> _readCacheEntry(String key) async {
     try {
       final file = await _cacheFile(key);
       if (!await file.exists()) return null;
-      if (_isExpired(await file.lastModified())) {
-        await file.delete();
+      final decoded = jsonDecode(await file.readAsString());
+      final cache = OnlineArtistCandidateCache.fromJson(decoded);
+      if (cache == null) {
+        await _deleteCacheFile(file);
         return null;
       }
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map<dynamic, dynamic>) return null;
-      final url = decoded['url'];
-      return _ArtistImageCacheEntry(
-        url: url is String && url.trim().isNotEmpty ? url.trim() : null,
-      );
+      final savedAt = await file.lastModified();
+      final emptyAutomatic =
+          cache.candidates.isEmpty &&
+          !cache.disabled &&
+          cache.selectedCandidateId == null;
+      if (_isExpired(savedAt, emptyAutomatic)) {
+        await _deleteCacheFile(file);
+        return null;
+      }
+      return cache;
     } catch (error) {
       log.library.warn(
         'online_artist_image_cache_read_failed',
         '艺术家头像缓存读取失败',
         fields: {'error': error.runtimeType.toString()},
       );
+      try {
+        final file = await _cacheFile(key);
+        if (await file.exists()) await file.delete();
+      } catch (deleteError) {
+        log.library.debug(
+          'online_artist_image_cache_delete_failed',
+          '损坏的艺术家头像缓存删除失败',
+          fields: {'error': deleteError.runtimeType.toString()},
+        );
+      }
       return null;
     }
   }
 
-  Future<void> _writeCacheEntry(String key, String? url) async {
+  Future<void> _writeCacheEntry(
+    String key,
+    OnlineArtistCandidateCache cache,
+  ) async {
     try {
       final file = await _cacheFile(key);
-      await writeTextFileAtomically(
-        file.path,
-        jsonEncode({
-          'url': url,
-          'savedAt': _clock().toIso8601String(),
-        }),
-      );
+      await writeTextFileAtomically(file.path, jsonEncode(cache.toJson()));
     } catch (error) {
       log.library.warn(
         'online_artist_image_cache_write_failed',
@@ -193,11 +416,20 @@ class OnlineArtistImageService {
     }
   }
 
-  bool _isExpired(DateTime savedAt) => _clock().difference(savedAt) > cacheTtl;
-}
+  Future<void> _deleteCacheFile(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      log.library.debug(
+        'online_artist_image_cache_delete_failed',
+        '艺术家头像缓存清理失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+  }
 
-class _ArtistImageCacheEntry {
-  const _ArtistImageCacheEntry({required this.url});
-
-  final String? url;
+  bool _isExpired(DateTime savedAt, bool emptyAutomatic) {
+    final ttl = emptyAutomatic ? _emptyCacheTtl : cacheTtl;
+    return _clock().difference(savedAt) > ttl;
+  }
 }
