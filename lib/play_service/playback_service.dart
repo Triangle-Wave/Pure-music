@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/play_service/play_service.dart';
@@ -1642,7 +1643,7 @@ class PlaybackService extends ChangeNotifier {
     final trackNumber = segment.trackNumber;
     final sacdArea = area;
     return _sacdSourceCache.extract(trackUid, () async {
-      final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
+      final cacheRoot = (await getSacdCacheDirectory()).path;
       final settings = _sacdPlaybackSettings();
       final source = await SacdSourceResolver.resolve(
         trackUid: trackUid,

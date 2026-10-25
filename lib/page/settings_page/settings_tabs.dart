@@ -42,6 +42,7 @@ import 'package:pure_music/page/settings_page/hotkey_settings.dart'
 import 'package:pure_music/page/settings_page/lastfm_settings.dart';
 import 'package:pure_music/page/settings_page/network_proxy_settings.dart';
 import 'package:pure_music/page/settings_page/backup_settings.dart';
+import 'package:pure_music/page/settings_page/cache_settings.dart';
 import 'package:pure_music/page/settings_page/other_settings.dart'
     show
         AudioEchoLogRecordControl,
@@ -5222,6 +5223,10 @@ class _AdvancedSystemGroup extends StatelessWidget {
         _PreventSleepOnNowPlayingControl(),
         SizedBox(height: 16.0),
         AudioEchoLogRecordControl(),
+        SizedBox(height: 24.0),
+        SettingsSectionHeader('缓存'),
+        SizedBox(height: 4.0),
+        CacheDirectorySettingsPanel(),
       ],
     );
   }

@@ -166,6 +166,7 @@ Future<void> _writeQueuedTextFile({
   }
 }
 
+/// 旧版缓存根 `<数据根>/cache`，仅用于兼容旧缓存路径。
 Future<Directory> getCacheDir() async {
   final root = await getAppDataDir();
   return Directory(path.join(root.path, 'cache')).create(recursive: true);
@@ -314,6 +315,9 @@ class AppSettings {
   String proxyBypass = defaultProxyBypass;
 
   String? midiSoundfontPath;
+
+  /// 缓存根目录；空字符串表示 `<数据根>/cache`。
+  String cacheDirectory = '';
 
   String? fontFamily;
   String? fontPath;
@@ -1167,6 +1171,8 @@ class AppSettings {
       settingsMap['OnlineArtistImageEnabled'],
       defaultValue: true,
     );
+    _instance.cacheDirectory =
+        normalizedPathSetting(settingsMap['CacheDirectory']) ?? '';
   }
 
   static Future<void> readFromJson() async {
@@ -1307,6 +1313,12 @@ class AppSettings {
     'OnlineArtistImageEnabled': onlineArtistImageEnabled,
   };
 
+  Map<String, Object?> _storageSettingsMap() => {
+    'CacheDirectory': cacheDirectory.trim().isEmpty
+        ? null
+        : cacheDirectory.trim(),
+  };
+
   Future<void> _writeSettingsFile(
     Map<String, Object?> settingsMap, {
     required bool isMaximized,
@@ -1378,6 +1390,7 @@ class AppSettings {
         'IsWindowMaximized': isMaximized,
         ..._windowFontPlaybackSettingsMap(),
         ..._networkProxySettingsMap(),
+        ..._storageSettingsMap(),
       };
       await _writeSettingsFile(
         settingsMap,

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/lyric_match_scoring.dart';
 import 'package:pure_music/core/settings.dart';
@@ -57,19 +58,24 @@ class LyricCandidateCacheStats {
 
 /// 歌词候选的磁盘缓存。
 ///
-/// 目录固定为 `<数据根>/cache/lyrics/`，每首歌一个 `<sha1>.json` 文件。所有
-/// 磁盘错误都降级为未命中；缓存文件损坏时删除并重新获取。写入失败向上抛出，
-/// 由用户操作路径提示，自动获取路径自行吞掉并记录。
+/// 目录为缓存根下的 `lyrics/`（默认 `<数据根>/cache/lyrics/`），每首歌一个
+/// `<sha1>.json` 文件。写入落在当前缓存根；旧位置的文件可继续作为只读回退
+/// 命中。所有磁盘错误都降级为未命中；缓存文件损坏时删除并重新获取。写入
+/// 失败向上抛出，由用户操作路径提示，自动获取路径自行吞掉并记录。
 class LyricCandidateCache {
   LyricCandidateCache({
     Future<Directory> Function()? rootDirectory,
+    Future<Directory> Function()? legacyRootDirectory,
     DateTime Function()? clock,
   }) : _rootDirectory = rootDirectory,
+       _legacyRootDirectory = legacyRootDirectory ??
+           (rootDirectory == null ? getLegacyCacheRoot : null),
        _clock = clock ?? DateTime.now;
 
   static final LyricCandidateCache instance = LyricCandidateCache();
 
   final Future<Directory> Function()? _rootDirectory;
+  final Future<Directory> Function()? _legacyRootDirectory;
   final DateTime Function() _clock;
 
   final LinkedHashMap<String, LyricCandidateRecord> _memory = LinkedHashMap();
@@ -103,9 +109,29 @@ class LyricCandidateCache {
   }
 
   Future<LyricCandidateRecord?> _readFromDisk(String cacheKey) async {
+    try {
+      final record = await _readFromDirectory(await _cacheDirectory(), cacheKey);
+      if (record != null) return record;
+      final legacy = await _legacyCacheDirectory();
+      if (legacy == null) return null;
+      return await _readFromDirectory(legacy, cacheKey);
+    } catch (error, trace) {
+      log.lyric.warn(
+        'lyric.cache',
+        '歌词候选缓存目录不可用，按未命中处理',
+        error: error,
+        stackTrace: trace,
+      );
+      return null;
+    }
+  }
+
+  Future<LyricCandidateRecord?> _readFromDirectory(
+    Directory directory,
+    String cacheKey,
+  ) async {
     File? file;
     try {
-      final directory = await _cacheDirectory();
       file = File(p.join(directory.path, '$cacheKey.json'));
       if (!await file.exists()) return null;
       final modified = await file.lastModified();
@@ -201,9 +227,13 @@ class LyricCandidateCache {
     final cacheKey = lyricCandidateCacheKey(audio);
     _memory.remove(cacheKey);
     try {
-      final directory = await _cacheDirectory();
-      final file = File(p.join(directory.path, '$cacheKey.json'));
-      await _deleteFile(file);
+      final directories = <Directory>[await _cacheDirectory()];
+      final legacy = await _legacyCacheDirectory();
+      if (legacy != null) directories.add(legacy);
+      for (final directory in directories) {
+        final file = File(p.join(directory.path, '$cacheKey.json'));
+        await _deleteFile(file);
+      }
     } catch (error, trace) {
       log.lyric.warn(
         'lyric.cache',
@@ -271,21 +301,26 @@ class LyricCandidateCache {
   Future<int> _deleteWhere(bool Function(DateTime modified) matches) async {
     var removed = 0;
     try {
-      final directory = await _cacheDirectory();
-      await for (final entity in directory.list()) {
-        if (entity is! File || !entity.path.endsWith('.json')) continue;
-        try {
-          final modified = await entity.lastModified();
-          if (!matches(modified)) continue;
-          await entity.delete();
-          removed += 1;
-        } catch (error, trace) {
-          log.lyric.warn(
-            'lyric.cache',
-            '删除歌词缓存文件失败',
-            error: error,
-            stackTrace: trace,
-          );
+      final directories = <Directory>[await _cacheDirectory()];
+      final legacy = await _legacyCacheDirectory();
+      if (legacy != null) directories.add(legacy);
+      for (final directory in directories) {
+        if (!await directory.exists()) continue;
+        await for (final entity in directory.list()) {
+          if (entity is! File || !entity.path.endsWith('.json')) continue;
+          try {
+            final modified = await entity.lastModified();
+            if (!matches(modified)) continue;
+            await entity.delete();
+            removed += 1;
+          } catch (error, trace) {
+            log.lyric.warn(
+              'lyric.cache',
+              '删除歌词缓存文件失败',
+              error: error,
+              stackTrace: trace,
+            );
+          }
         }
       }
     } catch (error, trace) {
@@ -314,8 +349,28 @@ class LyricCandidateCache {
 
   Future<Directory> _cacheDirectory() async {
     final root = _rootDirectory;
-    final base = root == null ? await getCacheDir() : await root();
+    final base = root == null ? await getCacheRoot() : await root();
     return Directory(p.join(base.path, 'lyrics')).create(recursive: true);
+  }
+
+  Future<Directory?> _legacyCacheDirectory() async {
+    final root = _legacyRootDirectory;
+    if (root == null) return null;
+    try {
+      final base = await root();
+      final legacy = Directory(p.join(base.path, 'lyrics'));
+      final primary = await _cacheDirectory();
+      if (p.equals(legacy.path, primary.path)) return null;
+      return legacy;
+    } catch (error, trace) {
+      log.lyric.warn(
+        'lyric.cache',
+        '旧歌词候选缓存目录不可用',
+        error: error,
+        stackTrace: trace,
+      );
+      return null;
+    }
   }
 
   void _remember(String cacheKey, LyricCandidateRecord record) {

@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:path/path.dart' as path;
 import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/cover_disk_cache.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
@@ -28,18 +29,20 @@ const Duration onlineAlbumCacheTtl = Duration(days: 365);
 
 /// 在线专辑信息服务。
 ///
-/// 每次查询把全部候选写入 `<数据根>/online_album/candidates/<sha1>.json`，
-/// 同文件记录当前选择（`selectedCandidateId` 或 `disabled`）。命中缓存时
-/// 不再发网络请求，只有 [loadCandidates] / [lookup] 传入 `force: true` 才
-/// 重新查询并保留用户选择。封面图片由 [CoverDiskCache] 统一写入
-/// `<数据根>/cache/covers/`，同一进程与磁盘有效期内都不再下载。
-/// 网络、文件与 JSON 错误都降级为“暂无信息”，不会把错误抛到界面。
+/// 每次查询把全部候选写入缓存根下的
+/// `online_album/candidates/<sha1>.json`，同文件记录当前选择
+/// （`selectedCandidateId` 或 `disabled`）。命中缓存时不再发网络请求，只有
+/// [loadCandidates] / [lookup] 传入 `force: true` 才重新查询并保留用户选择。
+/// 封面图片由 [CoverDiskCache] 统一写入缓存根下的 `covers/`，同一进程与磁盘
+/// 有效期内都不再下载。旧位置 `<数据根>/online_album` 的文件可继续作为只读
+/// 回退命中。网络、文件与 JSON 错误都降级为“暂无信息”，不会把错误抛到界面。
 class OnlineAlbumService {
   OnlineAlbumService._({
     MusicBrainzClient? musicBrainz,
     CoverArtClient? coverArt,
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
+    Future<Directory> Function()? cacheDirectory,
     DateTime Function()? clock,
     CoverDiskCache? coverDiskCache,
     this.cacheTtl = onlineAlbumCacheTtl,
@@ -47,6 +50,9 @@ class OnlineAlbumService {
        _coverArt = coverArt ?? CoverArtClient(),
        _cnMusic = cnMusic ?? CnMusicClient(),
        _appDataDirectory = appDataDirectory ?? getAppDataDir,
+       _cacheDirectory = cacheDirectory,
+       _usesAppDataCacheRoot =
+           cacheDirectory == null && appDataDirectory != null,
        _clock = clock ?? DateTime.now,
        _coverDiskCache = coverDiskCache ?? CoverDiskCache.instance;
 
@@ -58,6 +64,7 @@ class OnlineAlbumService {
     CoverArtClient? coverArt,
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
+    Future<Directory> Function()? cacheDirectory,
     DateTime Function()? clock,
     CoverDiskCache? coverDiskCache,
     Duration cacheTtl = onlineAlbumCacheTtl,
@@ -67,6 +74,7 @@ class OnlineAlbumService {
       coverArt: coverArt,
       cnMusic: cnMusic,
       appDataDirectory: appDataDirectory,
+      cacheDirectory: cacheDirectory,
       clock: clock,
       coverDiskCache: coverDiskCache,
       cacheTtl: cacheTtl,
@@ -77,6 +85,8 @@ class OnlineAlbumService {
   final CoverArtClient _coverArt;
   final CnMusicClient _cnMusic;
   final Future<Directory> Function() _appDataDirectory;
+  final Future<Directory> Function()? _cacheDirectory;
+  final bool _usesAppDataCacheRoot;
   final DateTime Function() _clock;
   final CoverDiskCache _coverDiskCache;
   final Duration cacheTtl;
@@ -85,6 +95,11 @@ class OnlineAlbumService {
   final Map<String, OnlineAlbumCandidateCache> _albumMemory = {};
   final Map<String, Future<ImageProvider?>> _artworkMemory = {};
   Directory? _rootDir;
+
+  /// 缓存根设置变化后调用，下一次访问重新解析目录。
+  void invalidateCacheRoot() {
+    _rootDir = null;
+  }
 
   String cacheKeyForAlbum(Album album) {
     final raw = [
@@ -204,9 +219,14 @@ class OnlineAlbumService {
     _artworkMemory.clear();
     try {
       final root = await _root();
-      for (final name in const ['candidates', 'info']) {
-        final directory = Directory(path.join(root.path, name));
-        if (await directory.exists()) await directory.delete(recursive: true);
+      final legacy = await _legacyRoot();
+      final roots = <Directory>[root];
+      if (!path.equals(root.path, legacy.path)) roots.add(legacy);
+      for (final directoryRoot in roots) {
+        for (final name in const ['candidates', 'info']) {
+          final directory = Directory(path.join(directoryRoot.path, name));
+          if (await directory.exists()) await directory.delete(recursive: true);
+        }
       }
     } catch (error) {
       log.library.warn(
@@ -267,7 +287,22 @@ class OnlineAlbumService {
   Future<OnlineAlbumCandidateCache?> _readCandidateCache(String key) async {
     try {
       final file = await _candidateFile(key);
-      if (!await file.exists()) return null;
+      if (await file.exists()) return _readCandidateFile(file);
+      final legacy = await _legacyCandidateFile(key);
+      if (legacy == null) return null;
+      return _readCandidateFile(legacy);
+    } catch (error) {
+      log.library.warn(
+        'online_album_cache_read_failed',
+        '在线专辑缓存读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
+  Future<OnlineAlbumCandidateCache?> _readCandidateFile(File file) async {
+    try {
       final modified = await file.lastModified();
       final decoded = jsonDecode(await file.readAsString());
       final cache = OnlineAlbumCandidateCache.fromJson(decoded);
@@ -288,7 +323,6 @@ class OnlineAlbumService {
         fields: {'error': error.runtimeType.toString()},
       );
       try {
-        final file = await _candidateFile(key);
         if (await file.exists()) await file.delete();
       } catch (deleteError) {
         log.library.debug(
@@ -632,17 +666,47 @@ class OnlineAlbumService {
   Future<Directory> _root() async {
     final cached = _rootDir;
     if (cached != null) return cached;
-    final appData = await _appDataDirectory();
-    final dir = Directory(path.join(appData.path, 'online_album'));
+    final Directory dir;
+    final cacheProvider = _cacheDirectory;
+    if (cacheProvider != null) {
+      dir = await cacheProvider();
+    } else if (_usesAppDataCacheRoot) {
+      final appData = await _appDataDirectory();
+      dir = Directory(path.join(appData.path, 'online_album'));
+    } else {
+      dir = await getOnlineAlbumCacheDirectory();
+    }
     await dir.create(recursive: true);
     _rootDir = dir;
     return dir;
+  }
+
+  Future<Directory> _legacyRoot() async {
+    final appData = await _appDataDirectory();
+    return Directory(path.join(appData.path, 'online_album'));
   }
 
   Future<File> _candidateFile(String key) async {
     final dir = Directory(path.join((await _root()).path, 'candidates'));
     await dir.create(recursive: true);
     return File(path.join(dir.path, '$key.json'));
+  }
+
+  Future<File?> _legacyCandidateFile(String key) async {
+    try {
+      final legacy = await _legacyRoot();
+      final current = await _root();
+      if (path.equals(legacy.path, current.path)) return null;
+      final file = File(path.join(legacy.path, 'candidates', '$key.json'));
+      return await file.exists() ? file : null;
+    } catch (error) {
+      log.library.debug(
+        'online_album_cache_read_failed',
+        '旧在线专辑缓存不可用',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
   }
 
   Future<ImageProvider?> _loadArtwork(String url) async {

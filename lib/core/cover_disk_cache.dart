@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/log/app_log.dart';
 
 /// 磁盘封面缓存默认大小上限。
@@ -12,24 +13,34 @@ const int coverDiskCacheMaxBytes = 256 << 20;
 
 /// 封面二级磁盘缓存。
 ///
-/// 目录固定为 `<数据根>/cache/covers/`：本地图片按“源路径 + 修改时间 + 目标
-/// 像素尺寸”生成 PNG 缩略图，在线图片按 URL 哈希保存下载结果。文件名只含
-/// SHA-1 摘要与内容扩展名，不把原始路径或 URL 写进目录。
+/// 目录为缓存根下的 `covers/`（默认 `<数据根>/cache/covers/`）：本地图片按
+/// “源路径 + 修改时间 + 目标像素尺寸”生成 PNG 缩略图，在线图片按 URL 哈希
+/// 保存下载结果。文件名只含 SHA-1 摘要与内容扩展名，不把原始路径或 URL
+/// 写进目录。旧位置的文件可继续作为只读回退命中。
 ///
 /// 所有磁盘错误都降级为未命中，调用方继续使用内存缓存与网络链路；缓存文件
 /// 损坏时直接删除，下一次请求重新生成或下载。
 class CoverDiskCache {
   CoverDiskCache({
     Future<Directory> Function()? rootDirectory,
+    Future<Directory> Function()? cacheDirectoryProvider,
+    Future<Directory> Function()? legacyDirectoryProvider,
     DateTime Function()? clock,
     this.maxBytes = coverDiskCacheMaxBytes,
     this.pruneInterval = const Duration(minutes: 5),
   }) : _rootDirectory = rootDirectory,
+       _cacheDirectoryProvider = cacheDirectoryProvider,
+       _legacyDirectoryProvider = legacyDirectoryProvider,
        _clock = clock ?? DateTime.now;
 
-  static final CoverDiskCache instance = CoverDiskCache();
+  static final CoverDiskCache instance = CoverDiskCache(
+    cacheDirectoryProvider: getCoverCacheDirectory,
+    legacyDirectoryProvider: getLegacyCoverCacheDirectory,
+  );
 
   final Future<Directory> Function()? _rootDirectory;
+  final Future<Directory> Function()? _cacheDirectoryProvider;
+  final Future<Directory> Function()? _legacyDirectoryProvider;
   final DateTime Function() _clock;
   final int maxBytes;
   final Duration pruneInterval;
@@ -38,31 +49,57 @@ class CoverDiskCache {
   static const int _pruneScanLimit = 4096;
 
   Directory? _directory;
+  Directory? _legacyDirectory;
+  bool _legacyRootLoaded = false;
   DateTime? _lastPrune;
   final Map<String, File> _localFiles = {};
   final Map<String, File> _networkFiles = {};
   bool _networkIndexLoaded = false;
 
-  /// 由启动流程在数据根确定后调用。
+  /// 直接指定缓存根（数据根）；缓存目录为 `<rootPath>/cache/covers`。
   void configure({required String rootPath}) {
     final root = rootPath.trim();
     if (root.isEmpty) return;
+    invalidateRoot();
     _directory = Directory(path.join(root, 'cache', 'covers'));
-    _localFiles.clear();
-    _networkFiles.clear();
-    _networkIndexLoaded = false;
+  }
+
+  /// 缓存根设置变化后调用，下一次访问重新解析目录。
+  void invalidateRoot() {
+    _directory = null;
+    _legacyDirectory = null;
+    _legacyRootLoaded = false;
+    _resetIndexes();
     _lastPrune = null;
   }
 
   Future<Directory?> _root() async {
     final configured = _directory;
     if (configured != null) return configured;
+    final provider = _cacheDirectoryProvider;
+    if (provider != null) {
+      try {
+        final directory = await provider();
+        _directory = directory;
+        await _legacyRoot();
+        return directory;
+      } catch (error, stackTrace) {
+        log.app.debug(
+          'cover_cache_root_failed',
+          '封面缓存目录不可用，继续使用内存缓存',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        return null;
+      }
+    }
     final factory = _rootDirectory;
     if (factory == null) return null;
     try {
       final base = await factory();
       final directory = Directory(path.join(base.path, 'cache', 'covers'));
       _directory = directory;
+      await _legacyRoot();
       return directory;
     } catch (error, stackTrace) {
       log.app.debug(
@@ -75,9 +112,33 @@ class CoverDiskCache {
     }
   }
 
+  Future<Directory?> _legacyRoot() async {
+    if (_legacyRootLoaded) return _legacyDirectory;
+    _legacyRootLoaded = true;
+    final provider = _legacyDirectoryProvider;
+    if (provider == null) return null;
+    try {
+      final directory = await provider();
+      final current = _directory;
+      _legacyDirectory = current != null &&
+              path.equals(current.path, directory.path)
+          ? null
+          : directory;
+    } catch (error, stackTrace) {
+      log.app.debug(
+        'cover_cache_legacy_root_failed',
+        '旧封面缓存目录不可用',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    return _legacyDirectory;
+  }
+
   Future<Directory?> _readyRoot() async {
     final directory = await _root();
     if (directory == null) return null;
+    await _legacyRoot();
     try {
       if (!await directory.exists()) {
         await directory.create(recursive: true);
@@ -138,6 +199,14 @@ class CoverDiskCache {
     if (_isUsableSync(file)) {
       _localFiles[key] = file;
       return file;
+    }
+    final legacy = _legacyDirectory;
+    if (legacy != null) {
+      final legacyFile = File(path.join(legacy.path, 'l_$key.png'));
+      if (_isUsableSync(legacyFile)) {
+        _localFiles[key] = legacyFile;
+        return legacyFile;
+      }
     }
     return null;
   }
@@ -279,20 +348,27 @@ class CoverDiskCache {
     await _deleteNetworkFile(key, file, 'requested');
   }
 
-  /// 只清空在线封面文件，保留本地缩略图。
+  /// 只清空在线封面文件，保留本地缩略图；旧缓存目录中的在线封面一并清理。
   Future<void> clearNetworkImages() async {
     final directory = await _root();
-    if (directory == null) return;
+    final legacy = _legacyDirectory;
+    final directories = <Directory>[
+      if (directory != null) directory,
+      if (legacy != null) legacy,
+    ];
+    if (directories.isEmpty) {
+      _networkFiles.clear();
+      _networkIndexLoaded = false;
+      return;
+    }
     try {
-      if (!await directory.exists()) {
-        _networkFiles.clear();
-        _networkIndexLoaded = false;
-        return;
-      }
-      await for (final entity in directory.list(followLinks: false)) {
-        if (entity is! File) continue;
-        if (!path.basename(entity.path).startsWith('u_')) continue;
-        await _deleteQuietly(entity, 'clear_network');
+      for (final current in directories) {
+        if (!await current.exists()) continue;
+        await for (final entity in current.list(followLinks: false)) {
+          if (entity is! File) continue;
+          if (!path.basename(entity.path).startsWith('u_')) continue;
+          await _deleteQuietly(entity, 'clear_network');
+        }
       }
       _networkFiles.clear();
       _networkIndexLoaded = false;
@@ -306,18 +382,25 @@ class CoverDiskCache {
     }
   }
 
-  /// 清空全部磁盘封面，供设置页或诊断使用。
+  /// 清空全部磁盘封面，供设置页或诊断使用；旧缓存目录中的封面一并清理。
   Future<void> clear() async {
     final directory = await _root();
-    if (directory == null) return;
+    final legacy = _legacyDirectory;
+    final directories = <Directory>[
+      if (directory != null) directory,
+      if (legacy != null) legacy,
+    ];
+    if (directories.isEmpty) {
+      _resetIndexes();
+      return;
+    }
     try {
-      if (!await directory.exists()) {
-        _resetIndexes();
-        return;
-      }
-      await for (final entity in directory.list(followLinks: false)) {
-        if (entity is File) {
-          await _deleteQuietly(entity, 'clear');
+      for (final current in directories) {
+        if (!await current.exists()) continue;
+        await for (final entity in current.list(followLinks: false)) {
+          if (entity is File) {
+            await _deleteQuietly(entity, 'clear');
+          }
         }
       }
       _resetIndexes();
@@ -394,7 +477,35 @@ class CoverDiskCache {
     if (!_networkIndexLoaded) {
       await _loadNetworkIndex(directory);
     }
-    return _networkFiles[key];
+    final indexed = _networkFiles[key];
+    if (indexed != null) return indexed;
+    return _legacyNetworkFile(key);
+  }
+
+  /// 旧缓存目录中的在线封面按已知扩展名探测，命中后加入索引。
+  Future<File?> _legacyNetworkFile(String key) async {
+    final legacy = _legacyDirectory;
+    if (legacy == null) return null;
+    for (final extension in const [
+      '.png',
+      '.jpg',
+      '.jpeg',
+      '.gif',
+      '.webp',
+      '.bmp',
+      '.img',
+    ]) {
+      final file = File(path.join(legacy.path, 'u_$key$extension'));
+      try {
+        if (await file.exists()) {
+          _networkFiles[key] = file;
+          return file;
+        }
+      } catch (_) {
+        // 旧文件不可读时按未命中处理。
+      }
+    }
+    return null;
   }
 
   Future<void> _loadNetworkIndex(Directory directory) async {

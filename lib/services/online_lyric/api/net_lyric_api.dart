@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:isolate';
 
-import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/native/rust/api/amll_ttml.dart' as frb_amll;
 import 'package:pure_music/native/rust/api/ne.dart' as rust_ne;
 
@@ -358,7 +358,7 @@ Future<List<AmllSearchItem>> amllSearchSingle({
   int pageSize = 15,
   bool forceRefresh = false,
 }) async {
-  final cacheDir = await getCacheDir();
+  final cacheDir = await getLyricIndexCacheDirectory();
   if (forceRefresh) amllClearCache();
   return frb_amll.amllSearchLyrics(
     keyword: keyword,

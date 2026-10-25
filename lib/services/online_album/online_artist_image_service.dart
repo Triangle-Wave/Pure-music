@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:path/path.dart' as path;
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/services/online_album/album_match.dart';
@@ -16,20 +17,25 @@ import 'package:pure_music/services/online_album/online_album_service.dart';
 /// 艺术家头像服务。
 ///
 /// 按艺术家名搜索网易云、QQ 音乐与酷狗音乐的歌手头像，把全部候选与当前
-/// 选择写入 `getAppDataDir()/online_album/artist/<sha1>.json`。图片本身由
-/// [OnlineAlbumService.artwork] 写入 `<数据根>/cache/covers/` 并返回
-/// `FileImage`，重启后仍直接读盘。选择“不使用”时不再请求在线图片；
-/// 所有失败都静默降级为占位图。
+/// 选择写入缓存根下的 `online_album/artist/<sha1>.json`。旧位置
+/// `<数据根>/online_album/artist` 的文件可继续作为只读回退命中。图片本身由
+/// [OnlineAlbumService.artwork] 写入缓存根下的 `covers/` 并返回 `FileImage`，
+/// 重启后仍直接读盘。选择“不使用”时不再请求在线图片；所有失败都静默降级为
+/// 占位图。
 class OnlineArtistImageService {
   OnlineArtistImageService._({
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
+    Future<Directory> Function()? cacheDirectory,
     DateTime Function()? clock,
     Future<ImageProvider?> Function(String url)? artworkLoader,
     Future<void> Function(String url)? artworkInvalidator,
     this.cacheTtl = onlineAlbumCacheTtl,
   }) : _cnMusic = cnMusic ?? CnMusicClient(),
        _appDataDirectory = appDataDirectory ?? getAppDataDir,
+       _cacheDirectory = cacheDirectory,
+       _usesAppDataCacheRoot =
+           cacheDirectory == null && appDataDirectory != null,
        _clock = clock ?? DateTime.now,
        _artworkLoader =
            artworkLoader ?? OnlineAlbumService.instance.artwork,
@@ -44,6 +50,7 @@ class OnlineArtistImageService {
   static OnlineArtistImageService createForTest({
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
+    Future<Directory> Function()? cacheDirectory,
     DateTime Function()? clock,
     Future<ImageProvider?> Function(String url)? artworkLoader,
     Future<void> Function(String url)? artworkInvalidator,
@@ -52,6 +59,7 @@ class OnlineArtistImageService {
     return OnlineArtistImageService._(
       cnMusic: cnMusic,
       appDataDirectory: appDataDirectory,
+      cacheDirectory: cacheDirectory,
       clock: clock,
       artworkLoader: artworkLoader,
       artworkInvalidator: artworkInvalidator,
@@ -61,6 +69,8 @@ class OnlineArtistImageService {
 
   final CnMusicClient _cnMusic;
   final Future<Directory> Function() _appDataDirectory;
+  final Future<Directory> Function()? _cacheDirectory;
+  final bool _usesAppDataCacheRoot;
   final DateTime Function() _clock;
   final Future<ImageProvider?> Function(String url) _artworkLoader;
   final Future<void> Function(String url) _artworkInvalidator;
@@ -205,6 +215,10 @@ class OnlineArtistImageService {
     try {
       final directory = await _root();
       if (await directory.exists()) await directory.delete(recursive: true);
+      final legacy = await _legacyRoot();
+      if (!path.equals(directory.path, legacy.path) && await legacy.exists()) {
+        await legacy.delete(recursive: true);
+      }
     } catch (error) {
       log.library.warn(
         'online_artist_image_cache_clear_failed',
@@ -343,16 +357,32 @@ class OnlineArtistImageService {
     }
   }
 
+  /// 缓存根设置变化后调用，下一次访问重新解析目录。
+  void invalidateCacheRoot() {
+    _cacheDir = null;
+  }
+
   Future<Directory> _root() async {
     final cached = _cacheDir;
     if (cached != null) return cached;
-    final appData = await _appDataDirectory();
-    final dir = Directory(
-      path.join(appData.path, 'online_album', 'artist'),
-    );
+    final Directory dir;
+    final provider = _cacheDirectory;
+    if (provider != null) {
+      dir = await provider();
+    } else if (_usesAppDataCacheRoot) {
+      final appData = await _appDataDirectory();
+      dir = Directory(path.join(appData.path, 'online_album', 'artist'));
+    } else {
+      dir = await getOnlineAlbumArtistCacheDirectory();
+    }
     await dir.create(recursive: true);
     _cacheDir = dir;
     return dir;
+  }
+
+  Future<Directory> _legacyRoot() async {
+    final appData = await _appDataDirectory();
+    return Directory(path.join(appData.path, 'online_album', 'artist'));
   }
 
   Future<File> _cacheFile(String key) async {
@@ -360,10 +390,42 @@ class OnlineArtistImageService {
     return File(path.join(dir.path, '$key.json'));
   }
 
+  Future<File?> _legacyCacheFile(String key) async {
+    try {
+      final legacy = await _legacyRoot();
+      final current = await _root();
+      if (path.equals(legacy.path, current.path)) return null;
+      final file = File(path.join(legacy.path, '$key.json'));
+      return await file.exists() ? file : null;
+    } catch (error) {
+      log.library.debug(
+        'online_artist_image_cache_read_failed',
+        '旧艺术家头像缓存不可用',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
   Future<OnlineArtistCandidateCache?> _readCacheEntry(String key) async {
     try {
       final file = await _cacheFile(key);
-      if (!await file.exists()) return null;
+      if (await file.exists()) return _readCacheFile(file);
+      final legacy = await _legacyCacheFile(key);
+      if (legacy == null) return null;
+      return _readCacheFile(legacy);
+    } catch (error) {
+      log.library.warn(
+        'online_artist_image_cache_read_failed',
+        '艺术家头像缓存读取失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
+  Future<OnlineArtistCandidateCache?> _readCacheFile(File file) async {
+    try {
       final decoded = jsonDecode(await file.readAsString());
       final cache = OnlineArtistCandidateCache.fromJson(decoded);
       if (cache == null) {
@@ -387,7 +449,6 @@ class OnlineArtistImageService {
         fields: {'error': error.runtimeType.toString()},
       );
       try {
-        final file = await _cacheFile(key);
         if (await file.exists()) await file.delete();
       } catch (deleteError) {
         log.library.debug(

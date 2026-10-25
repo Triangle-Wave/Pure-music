@@ -7,6 +7,7 @@ import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/setting_action_state.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/cover_disk_cache.dart';
 import 'package:path/path.dart' as path;
 import 'package:pure_music/entry.dart';
@@ -293,8 +294,6 @@ void _listenRustLogger() {
 Future<bool> _loadSettingsAndCaches() async {
   final supportPath = (await getAppDataDir()).path;
   CoverImageCache.instance.configure(indexPath: supportPath);
-  CoverDiskCache.instance.configure(rootPath: supportPath);
-  unawaited(CoverDiskCache.instance.prune());
   final settingsDir = await getSettingsDir();
   if (File(path.join(settingsDir.path, 'settings.json')).existsSync()) {
     await AppSettings.readFromJson();
@@ -303,6 +302,10 @@ Future<bool> _loadSettingsAndCaches() async {
   if (File(path.join(settingsDir.path, 'app_preference.json')).existsSync()) {
     await AppPreference.read();
   }
+  resetCacheRoot();
+  CoverDiskCache.instance.invalidateRoot();
+  unawaited(ensureCacheDirectories());
+  unawaited(CoverDiskCache.instance.prune());
   await HotkeysHelper.registerHotKeys();
   await AlbumColorCache.instance.init();
   return !File(path.join(supportPath, 'index.json')).existsSync();
