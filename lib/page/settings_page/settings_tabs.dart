@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:pure_music/core/app_fonts.dart';
 import 'package:pure_music/core/design_tokens.dart';
@@ -23,6 +25,8 @@ import 'package:pure_music/component/stacked_list_view.dart'
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/play_service/taskbar_thumbnail_service.dart';
 import 'package:pure_music/play_service/desktop_lyric_service.dart';
+import 'package:pure_music/services/online_lyric/lyric_candidate_cache.dart';
+import 'package:pure_music/services/online_lyric/lyric_candidate_service.dart';
 import 'package:pure_music/page/now_playing_page/component/lyric_view_controls.dart';
 import 'package:pure_music/page/page_scaffold.dart';
 import 'package:pure_music/page/settings_page/artist_alias_editor.dart';
@@ -3460,6 +3464,93 @@ class _DefaultLyricSourceControlState extends State<DefaultLyricSourceControl> {
   }
 }
 
+class _LyricCandidateCacheControl extends StatefulWidget {
+  const _LyricCandidateCacheControl();
+
+  @override
+  State<_LyricCandidateCacheControl> createState() =>
+      _LyricCandidateCacheControlState();
+}
+
+class _LyricCandidateCacheControlState
+    extends State<_LyricCandidateCacheControl> {
+  bool _loading = true;
+  bool _clearing = false;
+  String _summary = '统计中…';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadStats());
+  }
+
+  Future<void> _loadStats() async {
+    final stats = await LyricCandidateCache.instance.stats();
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _summary = stats.isEmpty
+          ? '暂无缓存'
+          : '${stats.fileCount} 首 · ${_formatBytes(stats.bytes)}';
+    });
+  }
+
+  Future<void> _clear() async {
+    if (_clearing) return;
+    setState(() => _clearing = true);
+    try {
+      final removed = await clearLyricCandidateCache();
+      PlayService.instance.lyricService.forgetCachedCandidates();
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _summary = '暂无缓存';
+      });
+      showTextOnSnackBar(
+        '已清理 $removed 首歌词候选缓存',
+        variant: ToastVariant.success,
+      );
+    } catch (error, trace) {
+      log.settings.warn(
+        'legacy',
+        '清理歌词候选缓存失败',
+        error: error,
+        stackTrace: trace,
+      );
+      if (mounted) {
+        showTextOnSnackBar('清理歌词缓存失败，请查看日志', variant: ToastVariant.error);
+      }
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '在线歌词候选缓存',
+      subtitle: '按曲目保存候选与选择，保留一年；清理后下次播放重新获取',
+      action: FilledButton.tonalIcon(
+        onPressed: _loading || _clearing ? null : _clear,
+        icon: _clearing
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Symbols.delete_sweep),
+        label: Text(_summary),
+      ),
+    );
+  }
+}
+
 class SettingsEmptyState extends StatelessWidget {
   const SettingsEmptyState({
     super.key,
@@ -4079,6 +4170,10 @@ class _LyricSourceGroup extends StatelessWidget {
         SettingsSectionHeader('来源'),
         SizedBox(height: 4.0),
         DefaultLyricSourceControl(),
+        SizedBox(height: 16.0),
+        SettingsSectionHeader('缓存'),
+        SizedBox(height: 4.0),
+        _LyricCandidateCacheControl(),
       ],
     );
   }
