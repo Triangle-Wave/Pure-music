@@ -21,6 +21,9 @@ AppContact=qingyueyin
 AppComments=Windows 本地音乐播放器；TAK 解码由 BASS_FFMPEG 插件与 FFmpeg 共享库提供（GPLv3），许可见安装目录 ffmpeg\LICENSE
 AppCopyright=Copyright (C) 2026 qingyueyin
 DefaultDirName={localappdata}\Programs\{#AppName}
+; 交互安装始终显示目录页，安装位置与用户数据位置在同一处确认；静默安装仍由 /DIR 指定路径。
+; UsePreviousAppDir 让目录页预填上次安装的路径。
+DisableDirPage=no
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
