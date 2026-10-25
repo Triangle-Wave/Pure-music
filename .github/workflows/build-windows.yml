@@ -574,15 +574,90 @@ jobs:
           if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $root | Out-Null
 
+          # 卸载器退出后仍可能有 second phase 进程持有 uninstall.log 的写句柄，
+          # 读取时声明 ReadWrite/Delete 共享并重试，失败只提示，不影响冒烟结论。
           function Show-SmokeLog([string]$path) {
-            if (Test-Path -LiteralPath $path -PathType Leaf) {
-              Write-Host "----- $path -----"
-              Get-Content -LiteralPath $path
-              Write-Host "----- end of log -----"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              Write-Host "log not found: $path"
+              return
+            }
+            Write-Host "----- $path -----"
+            $text = $null
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                $stream = [System.IO.File]::Open(
+                  $path,
+                  [System.IO.FileMode]::Open,
+                  [System.IO.FileAccess]::Read,
+                  ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                try {
+                  $reader = [System.IO.StreamReader]::new($stream)
+                  try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                }
+                finally { $stream.Dispose() }
+                break
+              }
+              catch [System.IO.IOException] {
+                Start-Sleep -Milliseconds 250
+              }
+              catch {
+                break
+              }
+            }
+            if ($null -eq $text) {
+              Write-Host "log is still locked by another process; content skipped"
             }
             else {
-              Write-Host "log not found: $path"
+              Write-Host $text.TrimEnd()
             }
+            Write-Host "----- end of log -----"
+          }
+
+          # 以独占写方式探测日志是否仍被占用；不存在或非占用类错误均视为可读。
+          function Test-LogWritable([string]$path) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $true }
+            try {
+              $stream = [System.IO.File]::Open(
+                $path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None)
+              $stream.Dispose()
+              return $true
+            }
+            catch [System.IO.IOException] {
+              return $false
+            }
+            catch {
+              return $true
+            }
+          }
+
+          # 卸载器会把自身复制到临时目录（_iu*.tmp）继续第二阶段删除，
+          # 只等待安装目录与临时目录下的 unins*/_iu* 进程，避免误伤其它进程。
+          function Get-UninstallerProcess([string[]]$pathPrefixes) {
+            foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+              if ($process.ProcessName -notmatch '^(unins|_iu)') { continue }
+              $processPath = $null
+              try { $processPath = $process.Path } catch { $processPath = $null }
+              if (-not $processPath) { continue }
+              foreach ($prefix in $pathPrefixes) {
+                if ($processPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $process
+                  break
+                }
+              }
+            }
+          }
+
+          function Wait-UninstallerFinished([string]$installDir, [string]$logPath, [int]$timeoutSeconds) {
+            $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+            while ((Get-Date) -lt $deadline) {
+              $running = @(Get-UninstallerProcess @($installDir, $env:TEMP))
+              if ($running.Count -eq 0 -and (Test-LogWritable $logPath)) { return $true }
+              Start-Sleep -Milliseconds 500
+            }
+            return $false
           }
 
           function Invoke-Silent([string]$file, [string]$arguments, [int]$timeoutSeconds) {
@@ -635,6 +710,11 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $target "user_data") -PathType Container)) {
               throw "Uninstaller removed user_data; user data must survive an uninstall"
             }
+
+            # 卸载器的第一阶段进程先退出，真正的删除由临时副本完成；等它结束再读日志。
+            if (-not (Wait-UninstallerFinished $target $uninstallLog 120)) {
+              Write-Warning "Uninstaller process or uninstall.log stayed busy for 120 s; log capture may be incomplete."
+            }
             "Silent uninstall verified; user_data preserved."
           }
           catch {
@@ -643,7 +723,22 @@ jobs:
             throw
           }
           finally {
-            if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+            # 卸载器进程可能仍持有 $root 下文件；清理失败只告警，不覆盖冒烟结论。
+            if (Test-Path -LiteralPath $root) {
+              for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                try {
+                  Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+                  break
+                }
+                catch {
+                  if ($attempt -eq 9) {
+                    Write-Warning "Could not remove $root : $($_.Exception.Message)"
+                    break
+                  }
+                  Start-Sleep -Milliseconds 500
+                }
+              }
+            }
           }
 
       # 预演把安装器、便携版 zip 与校验和交给人工验证；正式发版由 Release 承载这些资产。
