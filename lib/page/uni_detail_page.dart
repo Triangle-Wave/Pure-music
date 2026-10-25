@@ -1533,25 +1533,18 @@ class UniDetailPageHeader extends StatelessWidget {
         Flexible(
           flex: 0,
           fit: FlexFit.loose,
-          child: SizedBox(
-            width: trailingWidth * expandedContentOpacity,
-            child: ClipRect(
-              child: Align(
-                alignment: Alignment.bottomRight,
-                heightFactor: expandedContentOpacity,
-                child: Opacity(
-                  opacity: expandedContentOpacity,
-                  child: OverflowBox(
-                    alignment: Alignment.centerRight,
-                    minWidth: trailingWidth,
-                    maxWidth: trailingWidth,
-                    child: SizedBox(
-                      width: trailingWidth,
-                      child: KeyedSubtree(
-                        key: const ValueKey('detail-header-trailing'),
-                        child: trailing,
-                      ),
-                    ),
+          child: ClipRect(
+            child: Align(
+              alignment: Alignment.bottomRight,
+              widthFactor: expandedContentOpacity,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: SizedBox(
+                  width: trailingWidth,
+                  child: KeyedSubtree(
+                    key: const ValueKey('detail-header-trailing'),
+                    child: trailing,
                   ),
                 ),
               ),
