@@ -228,7 +228,11 @@ class OnlineArtistImageService {
     }
   }
 
-  Future<ImageProvider?> _load(String name, String key, {bool force}) async {
+  Future<ImageProvider?> _load(
+    String name,
+    String key, {
+    bool force = false,
+  }) async {
     try {
       final cache = await _ensureCandidates(name, key, force: force);
       final url = cache?.activeImageUrl;
