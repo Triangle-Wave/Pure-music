@@ -1,5 +1,18 @@
 name: Build Windows
 
+# 两阶段发布：先用 dry-run 验证完整编译与打包，通过后再打 tag 正式发版。
+#
+#   1. 预演（构建当前分支的版本，版本号取自 pubspec.yaml，不创建 Release）：
+#        gh workflow run build-windows.yml --ref <branch> -f dry_run=true
+#   2. 在 Actions 中确认 build 与 release 两个 job 均通过，并下载
+#      pure-music-windows-x64-release-dryrun（安装器、便携版 zip 与校验和）逐一验证；
+#   3. 正式发版（tag 必须与 pubspec.yaml 的版本一致）：
+#        git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# 本地等价命令：
+#   .\build_windows.ps1 -Version X.Y.Z -Mode 4 -NonInteractive   # 便携版打包
+#   .\build_windows.ps1 -Version X.Y.Z -Mode 5 -NonInteractive   # 安装器打包
+
 on:
   push:
     branches: [main]
@@ -10,6 +23,11 @@ on:
         description: '要发布的 tag（vX.Y.Z）；留空只构建'
         required: false
         type: string
+      dry_run:
+        description: '预演：构建并打包校验，但不创建 Release（版本号取 pubspec.yaml）'
+        required: false
+        type: boolean
+        default: false
       prerelease:
         description: '标记为预发布'
         required: false
@@ -36,7 +54,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -336,20 +355,22 @@ jobs:
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pure-music-windows-x64-portable
+          name: pure-music-windows-x64-portable${{ inputs.dry_run && '-dryrun' || '' }}
           path: build/portable/Release/
           if-no-files-found: error
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pure-music-windows-x64-installer
+          name: pure-music-windows-x64-installer${{ inputs.dry_run && '-dryrun' || '' }}
           path: build/windows/x64/runner/Release/
           if-no-files-found: error
 
   release:
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '') }}
+    # 预演同样进入本 job 做打包与资产校验，只是跳过 Create GitHub Release。
+    # build 失败时本 job 由 needs 隐含跳过；此处不引入 always()，避免失败后仍执行打包。
+    if: ${{ inputs.dry_run || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '') }}
     runs-on: windows-2022
     timeout-minutes: 60
     permissions:
@@ -362,12 +383,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
 
       - name: Download portable artifact
         uses: actions/download-artifact@v4
         with:
-          name: pure-music-windows-x64-portable
+          name: pure-music-windows-x64-portable${{ inputs.dry_run && '-dryrun' || '' }}
           path: build/windows/x64/runner/Release
 
       # 打包脚本从仓库根读取 desktop_lyric；CI 不提交该目录，用构建产物恢复。
@@ -410,26 +432,37 @@ jobs:
         shell: pwsh
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
           REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = if ($env:EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
-            $env:INPUT_TAG.Trim()
-          } else {
-            $env:REF_NAME.Trim()
-          }
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
-            throw "Release tag must be vX.Y.Z, got '$tag'"
-          }
-          $version = $Matches[1]
+          $dryRun = $env:INPUT_DRY_RUN -eq "true"
 
           $pubspec = Get-Content -LiteralPath "pubspec.yaml" -Raw
           $match = [regex]::Match($pubspec, '(?m)^\s*version\s*:\s*([0-9]+\.[0-9]+\.[0-9]+)')
           if (-not $match.Success) { throw "version not found in pubspec.yaml" }
           $pubVersion = $match.Groups[1].Value
-          if ($pubVersion -ne $version) {
-            throw "Tag $tag does not match pubspec version $pubVersion; bump pubspec.yaml before tagging"
+
+          if ($dryRun) {
+            # 预演不要求 tag 输入：版本号取 pubspec.yaml，tag 只用于产物命名。
+            $version = $pubVersion
+            $tag = "v$version"
+            "Resolve release version (dry run): $tag"
+          }
+          else {
+            $tag = if ($env:EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
+              $env:INPUT_TAG.Trim()
+            } else {
+              $env:REF_NAME.Trim()
+            }
+            if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+              throw "Release tag must be vX.Y.Z, got '$tag'"
+            }
+            $version = $Matches[1]
+            if ($pubVersion -ne $version) {
+              throw "Tag $tag does not match pubspec version $pubVersion; bump pubspec.yaml before tagging"
+            }
           }
 
           "tag=$tag" >> $env:GITHUB_OUTPUT
@@ -459,7 +492,7 @@ jobs:
       - name: Download installer artifact
         uses: actions/download-artifact@v4
         with:
-          name: pure-music-windows-x64-installer
+          name: pure-music-windows-x64-installer${{ inputs.dry_run && '-dryrun' || '' }}
           path: build/windows/x64/runner/Release
 
       - name: Package installer
@@ -524,7 +557,106 @@ jobs:
           }
           Get-ChildItem output -File | Select-Object Name, Length
 
+      # 静默安装冒烟测试：覆盖安装、卸载与 user_data 保留三个阶段。
+      # ShouldSkipPage 在目录页之前被调用，静默安装同样经过该回调，可回归 `{app}` 未初始化的崩溃。
+      - name: Smoke test installer (silent)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = (Resolve-Path -LiteralPath "output/pure_music_${env:VERSION}_release_installer.exe").Path
+          $root = Join-Path $env:RUNNER_TEMP "pure-music-smoke"
+          $target = Join-Path $root "app"
+          $installLog = Join-Path $root "install.log"
+          $uninstallLog = Join-Path $root "uninstall.log"
+
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          function Show-SmokeLog([string]$path) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              Write-Host "----- $path -----"
+              Get-Content -LiteralPath $path
+              Write-Host "----- end of log -----"
+            }
+            else {
+              Write-Host "log not found: $path"
+            }
+          }
+
+          function Invoke-Silent([string]$file, [string]$arguments, [int]$timeoutSeconds) {
+            $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+            if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+              $process.Kill()
+              throw "Timed out after $timeoutSeconds s: $file"
+            }
+            return $process.ExitCode
+          }
+
+          try {
+            $installArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `"/DIR=$target`" `"/LOG=$installLog`""
+            $installExit = Invoke-Silent $installer $installArgs 600
+            if ($installExit -ne 0) {
+              throw "Silent install failed with exit code $installExit"
+            }
+
+            foreach ($required in @("pure_music.exe", "data\app.so", "dll\BASS\bass.dll")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $target $required) -PathType Leaf)) {
+                throw "Installed layout is missing $required"
+              }
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $target "user_data") -PathType Container)) {
+              throw "Installed layout is missing user_data"
+            }
+            "Silent install verified: $target"
+
+            $uninstaller = Get-ChildItem -LiteralPath $target -Filter "unins*.exe" -File |
+              Select-Object -First 1
+            if (-not $uninstaller) {
+              throw "Uninstaller not found in $target"
+            }
+
+            $uninstallArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART `"/LOG=$uninstallLog`""
+            $uninstallExit = Invoke-Silent $uninstaller.FullName $uninstallArgs 600
+            if ($uninstallExit -ne 0) {
+              throw "Silent uninstall failed with exit code $uninstallExit"
+            }
+
+            # 卸载器可能把自身复制到临时目录后立即退出，轮询等待文件真正消失。
+            $appExe = Join-Path $target "pure_music.exe"
+            $deadline = (Get-Date).AddSeconds(120)
+            while ((Test-Path -LiteralPath $appExe) -and ((Get-Date) -lt $deadline)) {
+              Start-Sleep -Milliseconds 500
+            }
+            if (Test-Path -LiteralPath $appExe) {
+              throw "Uninstaller left pure_music.exe behind: $appExe"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $target "user_data") -PathType Container)) {
+              throw "Uninstaller removed user_data; user data must survive an uninstall"
+            }
+            "Silent uninstall verified; user_data preserved."
+          }
+          catch {
+            Show-SmokeLog $installLog
+            Show-SmokeLog $uninstallLog
+            throw
+          }
+          finally {
+            if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          }
+
+      # 预演把安装器、便携版 zip 与校验和交给人工验证；正式发版由 Release 承载这些资产。
+      - name: Upload release assets (dry run)
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-music-windows-x64-release-dryrun
+          path: output/
+          if-no-files-found: error
+
       - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

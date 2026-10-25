@@ -1,5 +1,23 @@
 ﻿#Requires -Version 5.1
 
+<#
+发布流程分两阶段，先验证完整编译与打包，再打 tag：
+
+  1. 预演：在 CI 构建当前分支并完成便携版、安装版与 Inno 打包，不创建 Release。
+       gh workflow run build-windows.yml --ref <branch> -f dry_run=true
+     版本号取自 pubspec.yaml，安装器、便携版 zip 与校验和见 Actions artifact
+     pure-music-windows-x64-release-dryrun。
+
+  2. 正式发版：预演通过并人工验证安装器与 zip 后，打 tag 并推送。
+       git tag vX.Y.Z
+       git push origin vX.Y.Z
+     tag 版本必须与 pubspec.yaml 一致，否则 release job 的版本校验失败。
+
+  本地等价命令：
+       .\build_windows.ps1 -Version X.Y.Z -Mode 4 -NonInteractive
+       .\build_windows.ps1 -Version X.Y.Z -Mode 5 -NonInteractive
+#>
+
 [CmdletBinding()]
 param(
     [string]$Version = "",

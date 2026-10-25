@@ -112,13 +112,14 @@ var
   PortableDataChoicePage: TInputOptionWizardPage;
   PortableDataPathPage: TInputDirWizardPage;
   PortableSourceData: String;
+  SkipPortableImport: Boolean;
 
 function DirectoryHasEntries(const Path: String): Boolean;
 var
   FindRec: TFindRec;
 begin
   Result := False;
-  if not DirExists(Path) then
+  if (Path = '') or (not DirExists(Path)) then
     Exit;
 
   if FindFirst(AddBackslash(Path) + '*', FindRec) then
@@ -187,15 +188,31 @@ begin
   PortableDataPathPage.Add('');
 end;
 
-function ShouldSkipPage(PageID: Integer): Boolean;
+// 判断是否已有数据需要在目录页确认后跳过便携版导入页。
+// `{app}` 在目录页显示前未初始化，这里用向导目录值拼出目标路径。
+procedure UpdatePortableImportSkip;
 var
-  HasInstalledData: Boolean;
+  TargetUserData: String;
 begin
-  // 已有新数据目录，或存在待迁移的旧版安装数据时，跳过便携版导入页，避免覆盖现有数据。
-  HasInstalledData := DirectoryHasEntries(ExpandConstant('{app}\user_data')) or
+  TargetUserData := '';
+  if WizardDirValue <> '' then
+    TargetUserData := AddBackslash(WizardDirValue) + 'user_data';
+
+  SkipPortableImport := DirectoryHasEntries(TargetUserData) or
     DirectoryHasEntries(ExpandConstant('{localappdata}\pure_music'));
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpSelectDir then
+    UpdatePortableImportSkip;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  // 该回调在目录页之前也会被调用，此处只读取已计算好的标志，不展开 `{app}`。
   Result := ((PageID = PortableDataChoicePage.ID) or
-    (PageID = PortableDataPathPage.ID)) and HasInstalledData;
+    (PageID = PortableDataPathPage.ID)) and SkipPortableImport;
   if not Result and (PageID = PortableDataPathPage.ID) then
     Result := not PortableDataChoicePage.Values[0];
 end;
@@ -203,6 +220,13 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  if CurPageID = wpSelectDir then
+  begin
+    // 目录页可能被修改后返回，离开时重算，保证导入页的跳过判断与最终目录一致。
+    UpdatePortableImportSkip;
+    Exit;
+  end;
+
   if CurPageID = PortableDataChoicePage.ID then
   begin
     if not PortableDataChoicePage.Values[0] then
