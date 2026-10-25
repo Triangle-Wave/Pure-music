@@ -14,6 +14,7 @@ import 'package:pure_music/play_service/playback_listen_tracker.dart';
 import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
+import 'package:pure_music/play_service/sacd_pcm_cache_probe.dart';
 import 'package:pure_music/play_service/sacd_source_cache.dart';
 import 'package:pure_music/play_service/sacd_source_resolver.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
@@ -59,6 +60,27 @@ final class _PendingGaplessTransition {
   final Audio audio;
 }
 
+/// 单次后台 PCM 转换任务的全部参数。
+final class _SacdPcmJob {
+  const _SacdPcmJob({
+    required this.trackUid,
+    required this.isoPath,
+    required this.area,
+    required this.trackNumber,
+    required this.cacheRoot,
+    required this.sampleRate,
+    required this.bitDepth,
+  });
+
+  final String trackUid;
+  final String isoPath;
+  final String area;
+  final int trackNumber;
+  final String cacheRoot;
+  final int sampleRate;
+  final int bitDepth;
+}
+
 /// 只通知 now playing 变更
 class PlaybackService extends ChangeNotifier {
   final PlayService playService;
@@ -74,6 +96,12 @@ class PlaybackService extends ChangeNotifier {
   int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
   final SacdSourceCache _sacdSourceCache = SacdSourceCache();
+  final List<_SacdPcmJob> _sacdPcmJobs = <_SacdPcmJob>[];
+  final Set<String> _sacdPcmQueued = <String>{};
+  final Set<String> _sacdPcmFailed = <String>{};
+  Future<void>? _sacdPcmRunner;
+  String? _lastSacdPreparingUid;
+  int _lastSacdPreparingMs = 0;
   int? _listenRecordingToken;
   String? _supportPath;
   bool _closed = false;
@@ -1329,7 +1357,7 @@ class PlaybackService extends ChangeNotifier {
     _applyGaplessReplayGain(pending);
   }
 
-  /// SACD 轨先取真实缓存 DSF 路径，再预建无缝衔接。
+  /// SACD 轨先解析可播放缓存路径，再预建无缝衔接；PCM 未就绪时使用 DSF。
   ///
   /// 提取期间用户可能切歌或切换列表，恢复后必须通过二次校验才操作播放器。
   Future<void> _prepareSacdGaplessSource(
@@ -1340,7 +1368,7 @@ class PlaybackService extends ChangeNotifier {
       // 快速连切时 pending 很快被替换，先让出这段窗口再提取，避免为已失效的目标读盘。
       await Future<void>.delayed(const Duration(milliseconds: 200));
       if (!_isGaplessPreparationCurrent(pending)) return;
-      final sourcePath = await _ensureSacdSource(pending.audio);
+      final sourcePath = await _ensureSacdSource(pending.audio, prefetch: true);
       if (!_isGaplessPreparationCurrent(pending)) return;
       if (!_player.prepareGaplessSource(sourcePath, transitionId: pending.id)) {
         if (identical(_pendingGaplessTransition, pending)) {
@@ -1598,9 +1626,10 @@ class PlaybackService extends ChangeNotifier {
 
   /// 把 SACD 轨道解析为可播放的缓存文件路径。
   ///
-  /// 默认优先转换为 PCM WAV，转换失败回退 DSF；DSF 模式直接提取 DSF。
-  /// 同一轨道的并发解析共享同一个 Future，快速连切时不会重复转换同一轨。
-  Future<String> _ensureSacdSource(Audio audio) {
+  /// PCM 模式下 PCM 缓存已就绪时直接返回 WAV；尚未就绪时先返回 DSF 立即起播，
+  /// 再把该轨排入后台转换队列。DSF 模式只提取 DSF。同一轨道的并发解析共享
+  /// 同一个 Future，快速连切时不会重复转换同一轨。
+  Future<String> _ensureSacdSource(Audio audio, {bool prefetch = false}) {
     final segment = audio.cueSegment;
     final area = segment?.sacdArea;
     if (segment == null || area == null) {
@@ -1615,11 +1644,24 @@ class PlaybackService extends ChangeNotifier {
     return _sacdSourceCache.extract(trackUid, () async {
       final cacheRoot = p.join((await getAppDataDir()).path, 'iso_cache');
       final settings = _sacdPlaybackSettings();
-      return SacdSourceResolver.resolve(
+      final source = await SacdSourceResolver.resolve(
         trackUid: trackUid,
         preferPcm: settings.preferPcm,
         sampleRate: settings.sampleRate,
         bitDepth: settings.bitDepth,
+        loadDsf: () => _ensureSacdDsf(
+          trackUid: trackUid,
+          isoPath: isoPath,
+          area: sacdArea,
+          trackNumber: trackNumber,
+          cacheRoot: cacheRoot,
+          showHint: !prefetch,
+        ),
+        isPcmCached: (dsfPath) => SacdPcmCacheProbe.isReady(
+          dsfPath: dsfPath,
+          sampleRate: settings.sampleRate,
+          bitDepth: settings.bitDepth,
+        ),
         loadPcm: () => rust_sacd.ensureSacdTrackPcm(
           isoPath: isoPath,
           area: sacdArea,
@@ -1628,14 +1670,142 @@ class PlaybackService extends ChangeNotifier {
           sampleRate: settings.sampleRate,
           bitDepth: settings.bitDepth,
         ),
-        loadDsf: () => rust_sacd.ensureSacdTrackExtracted(
-          isoPath: isoPath,
-          area: sacdArea,
-          trackNumber: trackNumber,
-          cacheRoot: cacheRoot,
-        ),
       );
+      if (source.pcmPending) {
+        _scheduleSacdPcmConversion(
+          _SacdPcmJob(
+            trackUid: trackUid,
+            isoPath: isoPath,
+            area: sacdArea,
+            trackNumber: trackNumber,
+            cacheRoot: cacheRoot,
+            sampleRate: settings.sampleRate,
+            bitDepth: settings.bitDepth,
+          ),
+          urgent: !prefetch,
+        );
+      }
+      return source.path;
     });
+  }
+
+  /// 提取轨道 DSF 缓存。
+  ///
+  /// 前台播放等待超过提示阈值时通知界面，让首次播放的等待有可见反馈；
+  /// 命中缓存通常在阈值内返回，不会弹提示。后台预取不提示。
+  Future<String> _ensureSacdDsf({
+    required String trackUid,
+    required String isoPath,
+    required String area,
+    required int trackNumber,
+    required String cacheRoot,
+    required bool showHint,
+  }) async {
+    final hintTimer = showHint
+        ? Timer(const Duration(milliseconds: 400), () {
+            _showSacdPreparingHint(trackUid);
+          })
+        : null;
+    try {
+      return await rust_sacd.ensureSacdTrackExtracted(
+        isoPath: isoPath,
+        area: area,
+        trackNumber: trackNumber,
+        cacheRoot: cacheRoot,
+      );
+    } finally {
+      hintTimer?.cancel();
+    }
+  }
+
+  void _showSacdPreparingHint(String trackUid) {
+    if (_closed) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastSacdPreparingUid == trackUid &&
+        now - _lastSacdPreparingMs < 10000) {
+      return;
+    }
+    _lastSacdPreparingUid = trackUid;
+    _lastSacdPreparingMs = now;
+    showTextOnSnackBar('首次播放，正在准备缓存…');
+  }
+
+  /// 把轨道排入后台 PCM 转换队列。
+  ///
+  /// 同一轨只排一次；当前播放轨插到队首，预取轨排在队尾。队列串行执行，
+  /// 避免多轨同时转换造成磁盘与 CPU 峰值。转换失败过的轨道本次进程内不再
+  /// 重试，继续使用 DSF 播放。
+  void _scheduleSacdPcmConversion(_SacdPcmJob job, {required bool urgent}) {
+    if (_closed) return;
+    if (_sacdPcmFailed.contains(_sacdPcmJobKey(job))) return;
+    if (!_sacdPcmQueued.add(job.trackUid)) return;
+    if (urgent) {
+      _sacdPcmJobs.insert(0, job);
+    } else {
+      _sacdPcmJobs.add(job);
+    }
+    _drainSacdPcmConversions();
+  }
+
+  /// 失败抑制按轨道与转换参数区分，设置变化后允许重新尝试。
+  String _sacdPcmJobKey(_SacdPcmJob job) =>
+      '${job.trackUid}|${job.sampleRate}|${job.bitDepth}';
+
+  void _drainSacdPcmConversions() {
+    if (_closed || _sacdPcmRunner != null || _sacdPcmJobs.isEmpty) return;
+    final job = _sacdPcmJobs.removeAt(0);
+    final runner = _runSacdPcmConversion(job);
+    _sacdPcmRunner = runner;
+    unawaited(
+      runner
+          .whenComplete(() {
+            if (identical(_sacdPcmRunner, runner)) {
+              _sacdPcmRunner = null;
+            }
+            _drainSacdPcmConversions();
+          })
+          .catchError((Object err, StackTrace trace) {
+            log.playback.warn(
+              'sacd.pcm',
+              'SACD 后台转换队列异常',
+              error: err,
+              stackTrace: trace,
+            );
+          }),
+    );
+  }
+
+  Future<void> _runSacdPcmConversion(_SacdPcmJob job) async {
+    try {
+      await rust_sacd.ensureSacdTrackPcm(
+        isoPath: job.isoPath,
+        area: job.area,
+        trackNumber: job.trackNumber,
+        cacheRoot: job.cacheRoot,
+        sampleRate: job.sampleRate,
+        bitDepth: job.bitDepth,
+      );
+      log.playback.debug(
+        'sacd.pcm',
+        'SACD 后台 PCM 转换完成',
+        fields: {'uid': job.trackUid},
+      );
+    } catch (err, trace) {
+      _sacdPcmFailed.add(_sacdPcmJobKey(job));
+      log.playback.warn(
+        'sacd.pcm',
+        'SACD 后台 PCM 转换失败，继续使用 DSF 播放',
+        fields: {
+          'uid': job.trackUid,
+          'sampleRate': job.sampleRate,
+          'bitDepth': job.bitDepth,
+        },
+        error: err,
+        stackTrace: trace,
+      );
+    } finally {
+      _sacdPcmQueued.remove(job.trackUid);
+    }
   }
 
   /// 读取 SACD 播放设置；读取异常时退回 PCM、44.1kHz、24bit。
@@ -1862,12 +2032,12 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  /// 后台准备下一首 SACD 轨道；PCM 模式下生成 PCM 缓存，
+  /// 后台准备下一首 SACD 轨道；DSF 直接提取，PCM 转换排入后台队列，
   /// 失败只记 WARN，不影响当前播放与界面。
   Future<void> _prefetchSacdSource(Audio audio) async {
     final trackUid = audio.cueSegment?.trackUid ?? audio.path;
     try {
-      await _ensureSacdSource(audio);
+      await _ensureSacdSource(audio, prefetch: true);
       log.playback.debug(
         'sacd.prefetch',
         'SACD 预提取完成',
@@ -2704,6 +2874,8 @@ class PlaybackService extends ChangeNotifier {
 
   Future<void> close() async {
     _closed = true;
+    _sacdPcmJobs.clear();
+    _sacdPcmQueued.clear();
     SleepBlocker.instance.unblock();
     SleepTimerService.instance.cancel();
     _songChangeTasks.begin();
