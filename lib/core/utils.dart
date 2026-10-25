@@ -442,8 +442,13 @@ void showTextOnSnackBar(
   final overlay = routerKey.currentState?.overlay;
   if (context == null || overlay == null) return;
 
-  _toastEntry?.remove();
+  _toastRemovalTimer?.cancel();
+  _toastRemovalTimer = null;
   _toastTimer?.cancel();
+  _toastTimer = null;
+  final previousEntry = _toastEntry;
+  _toastEntry = null;
+  previousEntry?.remove();
 
   final IconData effectiveIcon;
   switch (variant) {
@@ -470,18 +475,19 @@ void showTextOnSnackBar(
 
   _toastTimer = Timer(const Duration(seconds: 2), () {
     visible.value = false;
-    Timer(const Duration(milliseconds: 160), () {
+    _toastRemovalTimer = Timer(const Duration(milliseconds: 160), () {
+      if (!identical(_toastEntry, entry)) return;
+      _toastEntry = null;
+      _toastTimer = null;
+      _toastRemovalTimer = null;
       entry.remove();
-      if (identical(_toastEntry, entry)) {
-        _toastEntry = null;
-        _toastTimer = null;
-      }
     });
   });
 }
 
 OverlayEntry? _toastEntry;
 Timer? _toastTimer;
+Timer? _toastRemovalTimer;
 
 OverlayEntry? _lyricWriteEntry;
 Timer? _lyricWriteTimer;
