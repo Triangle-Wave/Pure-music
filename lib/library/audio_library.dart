@@ -3045,6 +3045,29 @@ class Audio {
       final directory = File(filePath).parent.path;
       final cover = AudioLibrary.instance.cachedFolderCoverFile(directory);
       if (cover == null) return null;
+      final ratio = PlatformDispatcher.instance.views.first.devicePixelRatio;
+      final physicalWidth = (width * ratio).round();
+      final physicalHeight = (height * ratio).round();
+      final thumbnail = CoverImageCache.instance.cachedLocalThumbnailFile(
+        path: cover.path,
+        physicalWidth: physicalWidth,
+        physicalHeight: physicalHeight,
+        modified: cover.modified,
+      );
+      if (thumbnail != null) {
+        return ResizeImage(
+          FileImage(thumbnail),
+          width: physicalWidth,
+          height: physicalHeight,
+          allowUpscaling: false,
+        );
+      }
+      CoverImageCache.instance.warmLocalThumbnail(
+        path: cover.path,
+        physicalWidth: physicalWidth,
+        physicalHeight: physicalHeight,
+        modified: cover.modified,
+      );
       return _folderCoverProvider(
         coverPath: cover.path,
         width: width,
@@ -3127,13 +3150,42 @@ class Audio {
     required int width,
     required int height,
   }) async {
-    final coverPath = await resolveFolderCoverPath();
-    if (coverPath == null) return null;
-    return _folderCoverProvider(
-      coverPath: coverPath,
-      width: width,
-      height: height,
-    );
+    try {
+      final directory = File(filePath).parent.path;
+      final cover = await AudioLibrary.instance.resolveFolderCoverFile(
+        directory,
+      );
+      if (cover == null) return null;
+      final ratio = PlatformDispatcher.instance.views.first.devicePixelRatio;
+      final physicalWidth = (width * ratio).round();
+      final physicalHeight = (height * ratio).round();
+      final thumbnail = await CoverImageCache.instance.localThumbnailFile(
+        path: cover.path,
+        physicalWidth: physicalWidth,
+        physicalHeight: physicalHeight,
+        modified: cover.modified,
+      );
+      if (thumbnail != null) {
+        return ResizeImage(
+          FileImage(thumbnail),
+          width: physicalWidth,
+          height: physicalHeight,
+          allowUpscaling: false,
+        );
+      }
+      return _folderCoverProvider(
+        coverPath: cover.path,
+        width: width,
+        height: height,
+      );
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] folder cover load failed: $error',
+        stackTrace: trace,
+      );
+      return null;
+    }
   }
 
   /// 缓存ImageProvider实例，避免每次创建新实例导致Flutter ImageCache失效

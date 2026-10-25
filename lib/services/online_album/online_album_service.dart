@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:path/path.dart' as path;
 import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/cover_disk_cache.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
@@ -136,8 +137,9 @@ class OnlineAlbumInfo {
 /// 在线专辑信息服务。
 ///
 /// 结果写入 `getAppDataDir()/online_album/`：`info/` 保存 7 天有效的
-/// JSON，`art/` 保存按 URL 哈希命名的图片。网络、文件与 JSON 错误
-/// 都降级为“暂无信息”，不会把错误抛到界面。
+/// JSON。封面图片由 [CoverDiskCache] 统一写入 `<数据根>/cache/covers/`，
+/// 命中时返回 `FileImage`，同一进程与磁盘有效期内都不再发网络请求。
+/// 网络、文件与 JSON 错误都降级为“暂无信息”，不会把错误抛到界面。
 class OnlineAlbumService {
   OnlineAlbumService._({
     MusicBrainzClient? musicBrainz,
@@ -145,12 +147,14 @@ class OnlineAlbumService {
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
+    CoverDiskCache? coverDiskCache,
     this.cacheTtl = onlineAlbumCacheTtl,
   }) : _musicBrainz = musicBrainz ?? MusicBrainzClient(),
        _coverArt = coverArt ?? CoverArtClient(),
        _cnMusic = cnMusic ?? CnMusicClient(),
        _appDataDirectory = appDataDirectory ?? getAppDataDir,
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _coverDiskCache = coverDiskCache ?? CoverDiskCache.instance;
 
   static final OnlineAlbumService instance = OnlineAlbumService._();
 
@@ -161,6 +165,7 @@ class OnlineAlbumService {
     CnMusicClient? cnMusic,
     Future<Directory> Function()? appDataDirectory,
     DateTime Function()? clock,
+    CoverDiskCache? coverDiskCache,
     Duration cacheTtl = onlineAlbumCacheTtl,
   }) {
     return OnlineAlbumService._(
@@ -169,6 +174,7 @@ class OnlineAlbumService {
       cnMusic: cnMusic,
       appDataDirectory: appDataDirectory,
       clock: clock,
+      coverDiskCache: coverDiskCache,
       cacheTtl: cacheTtl,
     );
   }
@@ -178,6 +184,7 @@ class OnlineAlbumService {
   final CnMusicClient _cnMusic;
   final Future<Directory> Function() _appDataDirectory;
   final DateTime Function() _clock;
+  final CoverDiskCache _coverDiskCache;
   final Duration cacheTtl;
 
   final Map<String, Future<OnlineAlbumInfo?>> _pendingLookups = {};
@@ -463,13 +470,6 @@ class OnlineAlbumService {
     return File(path.join(dir.path, '$key.json'));
   }
 
-  Future<File> _artworkFile(String url) async {
-    final dir = Directory(path.join((await _root()).path, 'art'));
-    await dir.create(recursive: true);
-    final digest = sha1.convert(utf8.encode(url)).toString();
-    return File(path.join(dir.path, '$digest${_imageExtension(url)}'));
-  }
-
   Future<OnlineAlbumInfo?> _readInfoCache(String key) async {
     try {
       final file = await _infoFile(key);
@@ -523,23 +523,11 @@ class OnlineAlbumService {
 
   Future<ImageProvider?> _loadArtwork(String url) async {
     try {
-      final file = await _artworkFile(url);
-      if (await file.exists()) {
-        if (_isExpired(await file.lastModified())) {
-          await _deleteArtworkFile(file, 'expired');
-        } else {
-          final cachedBytes = await file.readAsBytes();
-          if (await canDecodeImageBytes(cachedBytes)) {
-            return MemoryImage(cachedBytes);
-          }
-          log.library.warn(
-            'online_album_artwork_cache_invalid',
-            '在线封面缓存无法解码，已删除并重新下载',
-            fields: {'stage': 'cache'},
-          );
-          await _deleteArtworkFile(file, 'invalid');
-        }
-      }
+      final cached = await _coverDiskCache.findNetworkImage(
+        url,
+        ttl: cacheTtl,
+      );
+      if (cached != null) return FileImage(cached);
       final bytes = await _downloadBytes(url);
       if (bytes == null) return null;
       if (!await canDecodeImageBytes(bytes)) {
@@ -550,7 +538,9 @@ class OnlineAlbumService {
         );
         return null;
       }
-      await _writeBytesAtomically(file, bytes);
+      final file = await _coverDiskCache.storeNetworkImage(url, bytes);
+      if (file != null) return FileImage(file);
+      // 磁盘不可用时保留原链路：本次仍用内存图显示。
       return MemoryImage(bytes);
     } catch (error) {
       log.library.warn(
@@ -559,18 +549,6 @@ class OnlineAlbumService {
         fields: {'stage': 'artwork', 'error': error.runtimeType.toString()},
       );
       return null;
-    }
-  }
-
-  Future<void> _deleteArtworkFile(File file, String reason) async {
-    try {
-      await file.delete();
-    } catch (error) {
-      log.library.debug(
-        'online_album_artwork_cleanup_failed',
-        '在线封面缓存清理失败',
-        fields: {'reason': reason, 'error': error.runtimeType.toString()},
-      );
     }
   }
 
@@ -615,31 +593,6 @@ class OnlineAlbumService {
       headers['Referer'] = 'https://www.kugou.com/';
     }
     return headers;
-  }
-
-  Future<void> _writeBytesAtomically(File file, Uint8List bytes) async {
-    final tmp = File(
-      '${file.path}.tmp.${DateTime.now().microsecondsSinceEpoch}',
-    );
-    try {
-      await tmp.writeAsBytes(bytes, flush: true);
-      try {
-        await tmp.rename(file.path);
-      } catch (_) {
-        if (await file.exists()) await file.delete();
-        await tmp.rename(file.path);
-      }
-    } finally {
-      try {
-        if (await tmp.exists()) await tmp.delete();
-      } catch (error) {
-        log.library.debug(
-          'online_album_temp_cleanup_failed',
-          '在线封面临时文件清理失败',
-          fields: {'error': error.runtimeType.toString()},
-        );
-      }
-    }
   }
 
   bool _isExpired(DateTime savedAt) => _clock().difference(savedAt) > cacheTtl;
@@ -813,15 +766,6 @@ Future<bool> canDecodeImageBytes(Uint8List bytes) async {
     frame?.image.dispose();
     codec?.dispose();
   }
-}
-
-String _imageExtension(String url) {
-  final uri = Uri.tryParse(url);
-  final extension = uri == null ? '' : path.extension(uri.path).toLowerCase();
-  return switch (extension) {
-    '.jpg' || '.jpeg' || '.png' || '.webp' || '.gif' => extension,
-    _ => '.img',
-  };
 }
 
 String? _text(Object? value) {

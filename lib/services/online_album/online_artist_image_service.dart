@@ -15,9 +15,10 @@ import 'package:pure_music/services/online_album/online_album_service.dart';
 /// 艺术家头像服务。
 ///
 /// 按艺术家名搜索网易云、QQ 音乐与酷狗音乐的歌手头像，命中后把 URL
-/// 写入 `getAppDataDir()/online_album/artist/`，图片本身复用
-/// [OnlineAlbumService.artwork] 的磁盘缓存与解码校验。没有结果时缓存
-/// 空结果，避免列表反复请求；所有失败都静默降级为占位图。
+/// 写入 `getAppDataDir()/online_album/artist/`；图片本身由
+/// [OnlineAlbumService.artwork] 写入 `<数据根>/cache/covers/` 并返回
+/// `FileImage`，重启后仍直接读盘。没有结果时缓存空结果，避免列表反复
+/// 请求；所有失败都静默降级为占位图。
 class OnlineArtistImageService {
   OnlineArtistImageService._({
     CnMusicClient? cnMusic,
