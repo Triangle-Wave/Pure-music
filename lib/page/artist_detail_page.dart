@@ -242,6 +242,8 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       heroTag: 'artist:${artist.primaryPath}',
       primaryPicSeed: artist.cachedDetailPicture,
       headerTrailing: _headerTrailing,
+      // 正文宽度不足时把在线头像面板移到标题下方，优先保证标题与操作区。
+      headerTrailingSideMinWidth: 1100,
       secondaryContent: secondaryContent,
       secondaryContentBuilder: (context, audio, i, multiSelectController, _) =>
           AudioTile(
@@ -301,77 +303,82 @@ class _ArtistOnlinePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
-        borderRadius: AppRadius.mdCircular,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 6, 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Symbols.account_box,
-                  size: 15,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    disabled
-                        ? '在线头像（已隐藏）'
-                        : (source ?? '在线艺术家头像'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: AppType.caption,
-                      fontWeight: AppType.weightSemibold,
-                      color: scheme.onSurfaceVariant,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 460, maxHeight: 112),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+          borderRadius: AppRadius.mdCircular,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 6, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Symbols.account_box,
+                    size: 15,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      disabled
+                          ? '在线头像（已隐藏）'
+                          : (source ?? '在线艺术家头像'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.caption,
+                        fontWeight: AppType.weightSemibold,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-                if (loading) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.6,
-                      color: scheme.primary,
+                  if (loading) ...[
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.6,
+                        color: scheme.primary,
+                      ),
                     ),
+                  ],
+                  _panelButton(
+                    scheme,
+                    Symbols.tune,
+                    '选择头像来源',
+                    loading ? null : onChoose,
+                  ),
+                  _panelButton(
+                    scheme,
+                    Symbols.refresh,
+                    '刷新在线头像',
+                    loading ? null : onRefresh,
                   ),
                 ],
-                _panelButton(
-                  scheme,
-                  Symbols.tune,
-                  '选择头像来源',
-                  loading ? null : onChoose,
-                ),
-                _panelButton(
-                  scheme,
-                  Symbols.refresh,
-                  '刷新在线头像',
-                  loading ? null : onRefresh,
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              disabled
-                  ? '在线头像已隐藏，使用本地图片或占位图。'
-                  : candidateCount > 1
-                  ? '$candidateCount 个候选，可手动切换来源。'
-                  : '仅使用最佳匹配的头像来源。',
-              style: TextStyle(
-                fontSize: AppType.caption,
-                color: scheme.onSurfaceVariant,
               ),
-            ),
-          ],
+              const SizedBox(height: 6),
+              Text(
+                disabled
+                    ? '在线头像已隐藏，使用本地图片或占位图。'
+                    : candidateCount > 1
+                    ? '$candidateCount 个候选，可手动切换来源。'
+                    : '仅使用最佳匹配的头像来源。',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: AppType.caption,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

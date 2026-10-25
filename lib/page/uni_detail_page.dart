@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:pure_music/component/adaptive_action_layout.dart';
@@ -14,6 +13,7 @@ import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/page/uni_detail_header_blur.dart';
+import 'package:pure_music/page/uni_detail_header_layout.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
 import 'package:pure_music/play_service/play_service.dart';
@@ -68,6 +68,7 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.primaryPicSeed,
     this.primaryPicFallback,
     this.headerTrailing,
+    this.headerTrailingSideMinWidth = 0,
     this.headerCoverOverlay,
   });
 
@@ -130,6 +131,10 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
   /// 头部附加内容，例如专辑的在线信息面板。宽屏在右侧，中等宽度移到标题下方，
   /// 窄屏不展示。
   final Widget? headerTrailing;
+
+  /// 头部右侧摆放 [headerTrailing] 所需的最小宽度。低于该值时面板移到
+  /// 标题下方，避免挤压标题与操作区。
+  final double headerTrailingSideMinWidth;
 
   /// 叠加在头图上的控件，例如在线封面切换器。
   final Widget? headerCoverOverlay;
@@ -499,7 +504,7 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
     return ListenableBuilder(
       listenable: AppSettings.listMotionNotifier,
       builder: (context, _) {
-        Widget buildHeader(double collapseProgress) => _UniDetailPageHeader(
+        Widget buildHeader(double collapseProgress) => UniDetailPageHeader(
           pic: widget.primaryPic,
           picShape: widget.picShape,
           title: widget.title,
@@ -517,6 +522,7 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           initialPic: widget.primaryPicSeed,
           fallbackPic: widget.primaryPicFallback,
           headerTrailing: widget.headerTrailing,
+          trailingSideMinWidth: widget.headerTrailingSideMinWidth,
           headerCoverOverlay: widget.headerCoverOverlay,
         );
         if (!_enableHeaderCollapse(context)) {
@@ -1252,8 +1258,10 @@ class _CompactSearchBarState extends State<_CompactSearchBar> {
   }
 }
 
-class _UniDetailPageHeader extends StatelessWidget {
-  const _UniDetailPageHeader({
+/// 详情页头部。公开以便布局回归测试直接构造。
+class UniDetailPageHeader extends StatelessWidget {
+  const UniDetailPageHeader({
+    super.key,
     required this.pic,
     required this.picShape,
     required this.title,
@@ -1271,6 +1279,7 @@ class _UniDetailPageHeader extends StatelessWidget {
     this.initialPic,
     this.fallbackPic,
     this.headerTrailing,
+    this.trailingSideMinWidth = 0,
     this.headerCoverOverlay,
   });
 
@@ -1292,6 +1301,7 @@ class _UniDetailPageHeader extends StatelessWidget {
   final ImageProvider? initialPic;
   final ImageProvider? fallbackPic;
   final Widget? headerTrailing;
+  final double trailingSideMinWidth;
   final Widget? headerCoverOverlay;
 
   @override
@@ -1315,18 +1325,6 @@ class _UniDetailPageHeader extends StatelessWidget {
       constraints.maxWidth,
     );
     final compact = layoutWidth < 560;
-    // 在线信息面板按头部实际可用宽度摆放：宽屏置右，中等宽度移到
-    // 标题下方，更窄时隐藏，保证标题与操作区有可读宽度。
-    final showSideTrailing =
-        headerTrailing != null && constraints.maxWidth >= 860;
-    final stackTrailing =
-        headerTrailing != null &&
-        !showSideTrailing &&
-        constraints.maxWidth >= 620;
-    final showTrailing = showSideTrailing || stackTrailing;
-    final trailingWidth = showSideTrailing
-        ? math.min(300.0, math.max(220.0, constraints.maxWidth * 0.26))
-        : 0.0;
     final expandedCoverSize = compact ? 156.0 : 200.0;
     // Scroll-scrubbed layout stays 1:1 with pixels. Easing the scrub
     // front-loads the collapse (easeOutCubic(0.5) ≈ 0.875) so the first
@@ -1342,6 +1340,16 @@ class _UniDetailPageHeader extends StatelessWidget {
     final expandedContentOpacity = 1.0 - progress;
     final horizontalInset = lerpDouble(compact ? 12.0 : 16.0, 12.0, progress)!;
     final verticalInset = lerpDouble(12.0, 8.0, progress)!;
+    // 按封面、间距与 trailing 面板的实际宽度做预算：标题区至少保留可读
+    // 宽度，右侧放不下时把面板移到标题下方，再窄则隐藏。
+    final headerLayout = UniDetailHeaderLayout.resolve(
+      maxWidth: constraints.maxWidth,
+      horizontalInset: horizontalInset,
+      coverSize: coverSize,
+      gap: gap,
+      hasTrailing: headerTrailing != null,
+      trailingSideMinWidth: trailingSideMinWidth,
+    );
     return Padding(
       padding: EdgeInsets.symmetric(
         horizontal: horizontalInset,
@@ -1350,7 +1358,10 @@ class _UniDetailPageHeader extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _headerCover(scheme, theme.brightness, coverSize),
+          SizedBox(
+            key: const ValueKey('detail-header-cover'),
+            child: _headerCover(scheme, theme.brightness, coverSize),
+          ),
           SizedBox(width: gap),
           Expanded(
             child: ConstrainedBox(
@@ -1359,9 +1370,9 @@ class _UniDetailPageHeader extends StatelessWidget {
                 scheme,
                 titleSize,
                 expandedContentOpacity,
-                showTrailing ? headerTrailing : null,
-                trailingWidth,
-                stackTrailing,
+                headerLayout.showTrailing ? headerTrailing : null,
+                headerLayout.trailingWidth,
+                headerLayout.showStackedTrailing,
               ),
             ),
           ),
@@ -1484,8 +1495,15 @@ class _UniDetailPageHeader extends StatelessWidget {
                     top: 8.0 * expandedContentOpacity,
                   ),
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 460),
-                    child: trailing,
+                    constraints: const BoxConstraints(
+                      maxWidth: UniDetailHeaderLayout.stackedMaxTrailingWidth,
+                      maxHeight:
+                          UniDetailHeaderLayout.stackedMaxTrailingHeight,
+                    ),
+                    child: KeyedSubtree(
+                      key: const ValueKey('detail-header-trailing'),
+                      child: trailing,
+                    ),
                   ),
                 ),
               ),
@@ -1497,22 +1515,42 @@ class _UniDetailPageHeader extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        Expanded(child: info),
-        SizedBox(width: 12.0 * expandedContentOpacity),
-        ClipRect(
-          child: Align(
-            alignment: Alignment.bottomRight,
-            heightFactor: expandedContentOpacity,
-            child: Opacity(
-              opacity: expandedContentOpacity,
-              child: SizedBox(
-                width: trailingWidth * expandedContentOpacity,
-                child: ClipRect(
-                  child: OverflowBox(
-                    alignment: Alignment.centerRight,
-                    minWidth: trailingWidth,
-                    maxWidth: trailingWidth,
-                    child: SizedBox(width: trailingWidth, child: trailing),
+        Expanded(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: UniDetailHeaderLayout.minInfoWidth,
+            ),
+            child: info,
+          ),
+        ),
+        SizedBox(
+          width:
+              UniDetailHeaderLayout.trailingGap * expandedContentOpacity,
+        ),
+        Flexible(
+          flex: 0,
+          fit: FlexFit.loose,
+          child: ClipRect(
+            child: Align(
+              alignment: Alignment.bottomRight,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: SizedBox(
+                  width: trailingWidth * expandedContentOpacity,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.centerRight,
+                      minWidth: trailingWidth,
+                      maxWidth: trailingWidth,
+                      child: SizedBox(
+                        width: trailingWidth,
+                        child: KeyedSubtree(
+                          key: const ValueKey('detail-header-trailing'),
+                          child: trailing,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),

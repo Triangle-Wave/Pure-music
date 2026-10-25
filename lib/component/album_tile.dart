@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/component/cover_pointer_sheen.dart';
 import 'package:pure_music/component/motion.dart';
@@ -281,47 +283,91 @@ class _AlbumTileState extends State<AlbumTile> {
 
   Widget _gridTitle(ColorScheme scheme) {
     final hasWorks = widget.album.works.isNotEmpty;
+    final artistLabel = _albumArtistLabel;
     return ScrollAwareFutureBuilder<AlbumColor?>(
       identity: '$_currentCoverIdentity|color',
       future: () => hasWorks
           ? AlbumColorCache.instance.getAlbumColor(widget.album)
           : Future<AlbumColor?>.value(null),
       builder: (context, snapshot) {
-        if (snapshot.data == null) {
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(4.0, 8.0, 4.0, 4.0),
-            child: Text(
-              widget.album.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: scheme.onSurface,
-                fontWeight: AppType.weightBold,
-              ),
-            ),
-          );
-        }
+        final background = snapshot.data?.primary;
+        final foreground = background == null
+            ? scheme.onSurface
+            : _readableForeground(background, scheme);
+        final secondaryForeground = background == null
+            ? scheme.onSurfaceVariant
+            : foreground.withValues(alpha: 0.78);
         return Container(
           width: double.infinity,
+          constraints: const BoxConstraints(minHeight: 40.0),
           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
-          decoration: BoxDecoration(
-            color: snapshot.data!.primary,
-            borderRadius: const BorderRadius.vertical(
-              bottom: Radius.circular(8.0),
-            ),
-          ),
-          child: Text(
-            widget.album.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: snapshot.data!.onPrimary,
-              fontWeight: AppType.weightBold,
-            ),
+          decoration: background == null
+              ? null
+              : BoxDecoration(
+                  color: background,
+                  borderRadius: const BorderRadius.vertical(
+                    bottom: Radius.circular(8.0),
+                  ),
+                ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.album.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: foreground,
+                  fontWeight: AppType.weightBold,
+                ),
+              ),
+              if (artistLabel != null) ...[
+                const SizedBox(height: 2.0),
+                Text(
+                  artistLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: AppType.caption,
+                    color: secondaryForeground,
+                  ),
+                ),
+              ],
+            ],
           ),
         );
       },
     );
+  }
+
+  /// 卡片上的艺术家名，最多取两位。
+  String? get _albumArtistLabel {
+    final names = widget.album.artistsMap.keys
+        .where((name) => name.trim().isNotEmpty)
+        .take(2)
+        .toList(growable: false);
+    if (names.isEmpty) return null;
+    return names.join(' / ');
+  }
+
+  /// 标题前景色：优先跟随主题的 onSurface；与卡片底色对比不足时按底色
+  /// 亮度取黑或白，避免深底深字、浅底浅字。
+  static Color _readableForeground(Color background, ColorScheme scheme) {
+    if (_contrastRatio(scheme.onSurface, background) >= 4.5) {
+      return scheme.onSurface;
+    }
+    return ThemeData.estimateBrightnessForColor(background) == Brightness.dark
+        ? Colors.white
+        : Colors.black;
+  }
+
+  static double _contrastRatio(Color a, Color b) {
+    final la = a.computeLuminance();
+    final lb = b.computeLuminance();
+    final lighter = math.max(la, lb);
+    final darker = math.min(la, lb);
+    return (lighter + 0.05) / (darker + 0.05);
   }
 
   Widget _gridCheckbox(bool isSelected) {
