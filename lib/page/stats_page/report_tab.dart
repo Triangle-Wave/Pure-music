@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/component/stacked_list_view.dart';
 import 'package:pure_music/core/design_tokens.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/stats_page/charts.dart';
 import 'package:pure_music/page/stats_page/stats_shared.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
 
 /// 报告 tab：收听洞察卡 + 星期热力图 + 每周分布。
 class ReportTab extends StatelessWidget {
@@ -15,7 +15,7 @@ class ReportTab extends StatelessWidget {
     required this.period,
   });
 
-  final rust_library_db.PlayHistoryStats? history;
+  final PlayHistoryStats? history;
   final bool hasAnyHistory;
   final StatsPeriod period;
 
@@ -92,7 +92,7 @@ class ReportTab extends StatelessWidget {
 
   List<Widget> _insights(
     BuildContext context,
-    rust_library_db.PlayHistoryStats history,
+    PlayHistoryStats history,
     List<int> hourly,
     List<int> weekdayHourly,
     double width,
@@ -343,7 +343,7 @@ class ReportTab extends StatelessWidget {
 
   Widget _dayTimelineCard(
     BuildContext context,
-    rust_library_db.PlayHistoryStats history,
+    PlayHistoryStats history,
     List<int> hourly,
   ) {
     final scheme = Theme.of(context).colorScheme;

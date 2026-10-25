@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/component/stacked_list_view.dart';
 import 'package:pure_music/core/design_tokens.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/stats_page/charts.dart';
 import 'package:pure_music/page/stats_page/stats_shared.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
 
 /// 概览 tab：指标、听歌趋势、收听节律。榜单在另外三个栏目。
 class OverviewTab extends StatelessWidget {
@@ -27,7 +27,7 @@ class OverviewTab extends StatelessWidget {
   final int artistCount;
   final int albumCount;
   final int estimatedListen;
-  final rust_library_db.PlayHistoryStats? history;
+  final PlayHistoryStats? history;
   final bool hasAnyHistory;
   final StatsPeriod period;
 
@@ -96,7 +96,7 @@ class OverviewTab extends StatelessWidget {
 
   Widget _trendCard(
     BuildContext context,
-    rust_library_db.PlayHistoryStats? history,
+    PlayHistoryStats? history,
     bool hasHistory,
     bool hasAnyHistory,
   ) {
@@ -141,7 +141,7 @@ class OverviewTab extends StatelessWidget {
 
   Widget _rhythmCard(
     BuildContext context,
-    rust_library_db.PlayHistoryStats? history,
+    PlayHistoryStats? history,
     bool hasHistory,
     bool hasAnyHistory,
   ) {

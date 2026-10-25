@@ -6,9 +6,9 @@ import 'package:pure_music/component/stacked_list_view.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/stats_page/stats_shared.dart';
 import 'package:pure_music/play_service/play_service.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
 
 /// 单曲榜单 tab：最常播放 Top100，右下角定位/回顶按钮。
 class RankedTab extends StatefulWidget {
@@ -20,7 +20,7 @@ class RankedTab extends StatefulWidget {
     required this.loadFailed,
   });
 
-  final List<rust_library_db.PlayCountEntry> rankedTracks;
+  final List<PlayCountRecord> rankedTracks;
   final int totalPlayed;
   final bool loading;
   final bool loadFailed;
@@ -198,7 +198,7 @@ class _RankedTabState extends State<RankedTab> {
 
   Widget _buildRow(
     ColorScheme scheme,
-    rust_library_db.PlayCountEntry entry, {
+    PlayCountRecord entry, {
     required int index,
     required int maxPlays,
   }) {
@@ -247,7 +247,7 @@ class _RankedTabState extends State<RankedTab> {
 
   Widget _rowContent(
     ColorScheme scheme,
-    rust_library_db.PlayCountEntry entry,
+    PlayCountRecord entry,
     Audio? audio, {
     required int index,
     required double fraction,

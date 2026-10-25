@@ -6,9 +6,7 @@ import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
-import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/page_scaffold.dart';
 import 'package:pure_music/page/stats_page/artists_tab.dart';
 import 'package:pure_music/page/stats_page/overview_tab.dart';
@@ -16,6 +14,8 @@ import 'package:pure_music/page/stats_page/ranked_tab.dart';
 import 'package:pure_music/page/stats_page/report_tab.dart';
 import 'package:pure_music/page/stats_page/stats_shared.dart';
 import 'package:pure_music/play_service/play_service.dart';
+import 'package:pure_music/remote/remote_library.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
 
 class StatsPage extends StatefulWidget {
   const StatsPage({super.key});
@@ -31,6 +31,24 @@ class _StatsTab {
   final IconData icon;
 }
 
+enum _StatsSource {
+  all('全部'),
+  local('本地'),
+  remote('远程');
+
+  const _StatsSource(this.label);
+
+  final String label;
+
+  bool matches(String path) {
+    return switch (this) {
+      _StatsSource.all => true,
+      _StatsSource.local => !path.startsWith('remote://'),
+      _StatsSource.remote => path.startsWith('remote://'),
+    };
+  }
+}
+
 class _StatsPageState extends State<StatsPage> {
   static const _rankedLimit = 100;
 
@@ -42,11 +60,14 @@ class _StatsPageState extends State<StatsPage> {
   ];
 
   int _currentIndex = 0;
+  _StatsSource _source = _StatsSource.all;
   StatsPeriod _period = StatsPeriod.current(StatsPeriodMode.week);
   int? _earliestAt;
-  List<rust_library_db.PlayCountEntry>? _topPlayed;
-  rust_library_db.PlayHistoryStats? _history;
+  List<PlayCountRecord>? _topPlayed;
+  List<PlayHistoryRecord> _historyEntries = const [];
+  PlayHistoryStats? _history;
   StatsPeriod? _historyPeriod;
+  _StatsSource? _historySource;
   bool _loading = true;
   bool _loadFailed = false;
   bool _historyLoading = true;
@@ -61,6 +82,7 @@ class _StatsPageState extends State<StatsPage> {
     _playCountRevision = PlayService.instance.playbackService.playCountRevision;
     _playCountRevision.addListener(_onStatsSourceChanged);
     AudioLibrary.libraryVersion.addListener(_onStatsSourceChanged);
+    RemoteLibrary.instance.version.addListener(_onStatsSourceChanged);
     _loadStats();
   }
 
@@ -80,14 +102,20 @@ class _StatsPageState extends State<StatsPage> {
   void _setPeriodMode(StatsPeriodMode mode) {
     if (_period.mode == mode) return;
     setState(() => _period = StatsPeriod.current(mode));
-    _loadHistory();
+    _applyHistory();
   }
 
   void _shiftPeriod(int delta) {
     if (delta > 0 && !_canGoForward) return;
     if (delta < 0 && !_canGoBack) return;
     setState(() => _period = _period.shift(delta));
-    _loadHistory();
+    _applyHistory();
+  }
+
+  void _setSource(_StatsSource source) {
+    if (_source == source) return;
+    setState(() => _source = source);
+    _applyHistory();
   }
 
   Future<void> _loadStats() async {
@@ -103,11 +131,7 @@ class _StatsPageState extends State<StatsPage> {
       });
     }
     try {
-      final supportPath = (await getAppDataDir()).path;
-      final top = await rust_library_db.getTopPlayed(
-        indexPath: supportPath,
-        limit: -1,
-      );
+      final top = await PlaybackStatsService.instance.getTopPlayed(limit: -1);
       final visibleTop = top
           .where(
             (entry) => AudioLibrary.instance.audioByPath(entry.path) != null,
@@ -129,29 +153,32 @@ class _StatsPageState extends State<StatsPage> {
 
   Future<void> _loadHistory() async {
     final requestToken = ++_historyRequestToken;
-    final period = _period;
-    final periodChanged = _historyPeriod != period;
-    if (!_historyLoading || periodChanged) {
-      setState(() {
-        _historyLoading = true;
-        _historyFailed = false;
-        if (periodChanged) _history = null;
-      });
-    }
+    setState(() {
+      _historyLoading = true;
+      _historyFailed = false;
+    });
     try {
-      final supportPath = (await getAppDataDir()).path;
-      final history = await rust_library_db.getPlayHistoryStats(
-        indexPath: supportPath,
-        since: period.startEpoch,
-        until: period.endEpoch,
-      );
+      final entries = await PlaybackStatsService.instance.exportPlayHistory();
+      final remoteHistory = await RemoteLibrary.instance.playHistory();
+      final merged = <PlayHistoryRecord>[
+        ...entries,
+        for (final entry in remoteHistory.entries)
+          PlayHistoryRecord(path: entry.key, playedAt: entry.value),
+      ];
       if (!mounted || requestToken != _historyRequestToken) return;
+      var earliest = 0;
+      for (final entry in merged) {
+        for (final playedAt in entry.playedAt) {
+          final seconds = playedAt.toInt();
+          if (earliest == 0 || seconds < earliest) earliest = seconds;
+        }
+      }
       setState(() {
-        _history = history;
-        _historyPeriod = period;
-        _earliestAt = history.earliestAt.toInt();
+        _historyEntries = merged;
+        _earliestAt = earliest;
         _historyLoading = false;
       });
+      _applyHistory();
     } catch (_) {
       if (!mounted || requestToken != _historyRequestToken) return;
       setState(() {
@@ -161,10 +188,71 @@ class _StatsPageState extends State<StatsPage> {
     }
   }
 
+  void _applyHistory() {
+    final period = _period;
+    final source = _source;
+    final stats = _buildHistoryStats(_historyEntries, period, source);
+    if (!mounted) return;
+    setState(() {
+      _history = stats;
+      _historyPeriod = period;
+      _historySource = source;
+      _earliestAt = stats.earliestAt.toInt();
+    });
+  }
+
+  PlayHistoryStats _buildHistoryStats(
+    List<PlayHistoryRecord> entries,
+    StatsPeriod period,
+    _StatsSource source,
+  ) {
+    final daily = <String, int>{};
+    final hourly = List<int>.filled(24, 0);
+    final weekdayHourly = List<int>.filled(168, 0);
+    var total = 0;
+    var firstAt = 0;
+    var lastAt = 0;
+    var earliestAt = 0;
+    for (final entry in entries) {
+      if (!source.matches(entry.path)) continue;
+      for (final playedAtValue in entry.playedAt) {
+        final playedAt = playedAtValue.toInt();
+        if (earliestAt == 0 || playedAt < earliestAt) earliestAt = playedAt;
+        if (playedAt < period.startEpoch || playedAt >= period.endEpoch) {
+          continue;
+        }
+        final time = DateTime.fromMillisecondsSinceEpoch(playedAt * 1000);
+        total++;
+        if (firstAt == 0 || playedAt < firstAt) firstAt = playedAt;
+        if (playedAt > lastAt) lastAt = playedAt;
+        final day =
+            '${time.year.toString().padLeft(4, '0')}-'
+            '${time.month.toString().padLeft(2, '0')}-'
+            '${time.day.toString().padLeft(2, '0')}';
+        daily[day] = (daily[day] ?? 0) + 1;
+        hourly[time.hour] += 1;
+        weekdayHourly[time.weekday % 7 * 24 + time.hour] += 1;
+      }
+    }
+    final days = daily.keys.toList()..sort();
+    return PlayHistoryStats(
+      total: total,
+      firstAt: firstAt,
+      lastAt: lastAt,
+      earliestAt: earliestAt,
+      daily: days
+          .map((day) => PlayHistoryDayCount(day: day, count: daily[day]!))
+          .toList(growable: false),
+      hourly: List<int>.unmodifiable(hourly),
+      weekdayHourly: List<int>.unmodifiable(weekdayHourly),
+    );
+  }
+
   @override
   void dispose() {
     _playCountRevision.removeListener(_onStatsSourceChanged);
     AudioLibrary.libraryVersion.removeListener(_onStatsSourceChanged);
+    RemoteLibrary.instance.version.removeListener(_onStatsSourceChanged);
     super.dispose();
   }
 
@@ -172,11 +260,18 @@ class _StatsPageState extends State<StatsPage> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final library = AudioLibrary.instance;
-    final audios = library.audioCollection;
-    final data = _topPlayed;
-    final history = _historyPeriod == _period ? _history : null;
+    final remoteAudios = RemoteLibrary.instance.audios;
+    final audios = switch (_source) {
+      _StatsSource.all => [...library.audioCollection, ...remoteAudios],
+      _StatsSource.local => library.audioCollection,
+      _StatsSource.remote => remoteAudios,
+    };
+    final data = _rankingsFor(_source);
+    final history = _historyPeriod == _period && _historySource == _source
+        ? _history
+        : null;
     final hasAnyHistory = (_earliestAt ?? 0) > 0;
-    final rankedTracks = (data ?? const <rust_library_db.PlayCountEntry>[])
+    final rankedTracks = (data ?? const <PlayCountRecord>[])
         .take(_rankedLimit)
         .toList(growable: false);
     return PageScaffold(
@@ -207,6 +302,8 @@ class _StatsPageState extends State<StatsPage> {
               return _tabButton(scheme, i, selected, canSwitch);
             }),
           ),
+          const SizedBox(height: Spacing.md),
+          _sourceSelector(scheme),
           if (_currentIndex == 0 || _currentIndex == 3) ...[
             const SizedBox(height: Spacing.md),
             _periodBar(scheme),
@@ -224,8 +321,8 @@ class _StatsPageState extends State<StatsPage> {
                       ? audios.where((a) => a.playCount > 0).length
                       : data.length,
                   totalTracks: audios.length,
-                  artistCount: library.artistCollection.length,
-                  albumCount: library.albumCollection.length,
+                  artistCount: _distinctArtistCount(audios),
+                  albumCount: _distinctAlbumCount(audios),
                   estimatedListen: _estimatedListenSeconds(audios, data),
                   history: history,
                   hasAnyHistory: hasAnyHistory,
@@ -254,6 +351,104 @@ class _StatsPageState extends State<StatsPage> {
         ],
       ),
     );
+  }
+
+  List<PlayCountRecord>? _rankingsFor(_StatsSource source) {
+    final library = AudioLibrary.instance;
+    final local = _topPlayed
+        ?.where(
+          (entry) =>
+              !entry.path.startsWith('remote://') &&
+              library.audioByPath(entry.path) != null,
+        )
+        .toList(growable: false);
+    if (source == _StatsSource.local) return local;
+    final remote = _remoteRankings();
+    if (source == _StatsSource.remote) return remote;
+    final combined = [...?local, ...remote]
+      ..sort((a, b) {
+        final byCount = b.playCount.compareTo(a.playCount);
+        return byCount != 0 ? byCount : a.path.compareTo(b.path);
+      });
+    return combined;
+  }
+
+  List<PlayCountRecord> _remoteRankings() {
+    final counts = <String, int>{};
+    for (final entry in _historyEntries) {
+      if (!entry.path.startsWith('remote://')) continue;
+      counts[entry.path] = (counts[entry.path] ?? 0) + entry.playedAt.length;
+    }
+    final result = <PlayCountRecord>[];
+    counts.forEach((path, count) {
+      final audio = AudioLibrary.instance.audioByPath(path);
+      if (audio == null) return;
+      result.add(
+        PlayCountRecord(
+          path: path,
+          title: audio.title,
+          artist: audio.artist,
+          album: audio.album,
+          playCount: count,
+        ),
+      );
+    });
+    result.sort((a, b) {
+      final byCount = b.playCount.compareTo(a.playCount);
+      return byCount != 0 ? byCount : a.path.compareTo(b.path);
+    });
+    return result;
+  }
+
+  Widget _sourceSelector(ColorScheme scheme) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SegmentedButton<_StatsSource>(
+        segments: [
+          for (final source in _StatsSource.values)
+            ButtonSegment(
+              value: source,
+              label: Text(source.label),
+              icon: Icon(switch (source) {
+                _StatsSource.all => Symbols.library_music,
+                _StatsSource.local => Symbols.folder,
+                _StatsSource.remote => Symbols.cloud,
+              }, size: 18),
+            ),
+        ],
+        selected: {_source},
+        showSelectedIcon: false,
+        onSelectionChanged: (selection) {
+          if (selection.isEmpty) return;
+          _setSource(selection.first);
+        },
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          textStyle: WidgetStatePropertyAll(
+            TextStyle(
+              fontSize: AppType.caption,
+              fontWeight: AppType.weightSemibold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  int _distinctArtistCount(List<Audio> audios) {
+    return audios
+        .map((audio) => audio.artist.trim())
+        .where((artist) => artist.isNotEmpty)
+        .toSet()
+        .length;
+  }
+
+  int _distinctAlbumCount(List<Audio> audios) {
+    return audios
+        .map((audio) => audio.album.trim())
+        .where((album) => album.isNotEmpty)
+        .toSet()
+        .length;
   }
 
   Widget _tabButton(
@@ -434,10 +629,7 @@ class _StatsPageState extends State<StatsPage> {
     context.push(app_paths.STATS_ALBUM_DETAIL_PAGE, extra: album);
   }
 
-  int _estimatedListenSeconds(
-    List<Audio> audios,
-    List<rust_library_db.PlayCountEntry>? data,
-  ) {
+  int _estimatedListenSeconds(List<Audio> audios, List<PlayCountRecord>? data) {
     if (data == null) {
       return audios.fold<int>(
         0,

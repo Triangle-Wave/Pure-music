@@ -27,9 +27,21 @@ import 'package:pure_music/core/log/rust_log_line.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/window_lifecycle.dart';
 import 'package:pure_music/core/window_placement.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:flutter_single_instance/flutter_single_instance.dart';
+
+const _browserUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36';
+
+class _BrowserHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)..userAgent = _browserUserAgent;
+  }
+}
 
 Future<void> initWindow() async {
   await windowManager.ensureInitialized();
@@ -201,6 +213,7 @@ void _installGlobalErrorLogging() {
 }
 
 Future<void> main() async {
+  HttpOverrides.global = _BrowserHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
   await applicationLogOutput.init();
   _installGlobalErrorLogging();
@@ -309,6 +322,11 @@ Future<bool> _loadSettingsAndCaches() async {
   unawaited(CoverDiskCache.instance.prune());
   await HotkeysHelper.registerHotKeys();
   await AlbumColorCache.instance.init();
+  try {
+    await RemoteLibrary.instance.init();
+  } catch (e, s) {
+    log.app.error('legacy', 'RemoteLibrary.init failed: $e\n$s');
+  }
   return !File(path.join(supportPath, 'index.json')).existsSync();
 }
 

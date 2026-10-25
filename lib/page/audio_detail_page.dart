@@ -25,6 +25,7 @@ import 'package:pure_music/page/audio_detail_metadata_cache.dart';
 import 'package:pure_music/play_service/audio_tag_write_scheduler.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/play_service/taskbar_thumbnail_service.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:pure_music/services/online_lyric/api/net_lyric_api.dart'
     as net_api;
 
@@ -59,8 +60,8 @@ rust_tag_reader.AudioExtraMetadata _emptyAudioExtraMetadata() =>
     );
 
 Future<rust_tag_reader.AudioExtraMetadata> _getAudioExtra(Audio audio) {
-  // SACD 虚拟轨不从 ISO 读取标签，避免解析容器文件。
-  if (audio.isSacdTrack) {
+  // SACD 虚拟轨与远程曲目都不读取本地标签，避免解析容器或发起网络请求。
+  if (audio.isSacdTrack || RemoteLibrary.isRemotePath(audio.path)) {
     return Future<rust_tag_reader.AudioExtraMetadata>.value(
       _emptyAudioExtraMetadata(),
     );
@@ -231,6 +232,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _showCurrentAudioInExplorer() async {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      showTextOnSnackBar('远程曲目不支持在文件管理器中显示');
+      return;
+    }
     if (_isOpeningInExplorer) return;
     setState(() => _isOpeningInExplorer = true);
     try {
@@ -276,6 +281,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _enterEditMode() async {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      showTextOnSnackBar('远程曲目暂不支持编辑标签');
+      return;
+    }
     final requestToken = ++_editRequestToken;
     // SACD 虚拟轨的编辑值只写入本地覆盖层，不读取或写入 ISO。
     await applyAudioDetailMetadataIfMounted(
@@ -621,6 +630,20 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _buildLyricTab(ColorScheme scheme) {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+            '远程曲目暂不支持内嵌歌词',
+            style: TextStyle(
+              color: scheme.onSurfaceVariant,
+              fontSize: AppType.body,
+            ),
+          ),
+        ),
+      );
+    }
     _lyricFuture ??= rust_tag_reader.getLyricFromPath(path: audio.filePath);
     return Stack(
       children: [
@@ -796,28 +819,33 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _viewHeaderActions() {
+    final isRemote = RemoteLibrary.isRemotePath(audio.path);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
-        IconButton.filledTonal(
-          tooltip: '编辑标签',
-          onPressed: _enterEditMode,
-          style: _headerActionStyle(),
-          icon: const Icon(Symbols.edit),
-        ),
-        IconButton.filledTonal(
-          tooltip: '在文件管理器中显示',
-          onPressed: _isOpeningInExplorer ? null : _showCurrentAudioInExplorer,
-          style: _headerActionStyle(),
-          icon: _isOpeningInExplorer
-              ? const SizedBox(
-                  width: 20.0,
-                  height: 20.0,
-                  child: CircularProgressIndicator(strokeWidth: 2.0),
-                )
-              : const Icon(Symbols.folder_open),
-        ),
+        if (!isRemote)
+          IconButton.filledTonal(
+            tooltip: '编辑标签',
+            onPressed: _enterEditMode,
+            style: _headerActionStyle(),
+            icon: const Icon(Symbols.edit),
+          ),
+        if (!isRemote)
+          IconButton.filledTonal(
+            tooltip: '在文件管理器中显示',
+            onPressed: _isOpeningInExplorer
+                ? null
+                : _showCurrentAudioInExplorer,
+            style: _headerActionStyle(),
+            icon: _isOpeningInExplorer
+                ? const SizedBox(
+                    width: 20.0,
+                    height: 20.0,
+                    child: CircularProgressIndicator(strokeWidth: 2.0),
+                  )
+                : const Icon(Symbols.folder_open),
+          ),
         IconButton.filledTonal(
           tooltip: '复制路径',
           onPressed: _isCopyingPath ? null : _copyCurrentAudioPath,
@@ -1103,11 +1131,14 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   List<Widget> _viewFileFields(rust_tag_reader.AudioExtraMetadata? data) {
+    final isRemote = RemoteLibrary.isRemotePath(audio.path);
     return [
       _DetailField(
         label: '格式',
         value: audio.isSacdTrack
             ? 'SACD ISO'
+            : isRemote
+            ? '-'
             : p.extension(audio.filePath).replaceFirst('.', '').toUpperCase(),
       ),
       if (audio.isVirtualTrack)
@@ -1142,6 +1173,9 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _buildFileSize(rust_tag_reader.AudioExtraMetadata? data) {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      return const Text('远程');
+    }
     final fileSize = data?.fileSize;
     if (fileSize != null && fileSize > BigInt.zero) {
       return Text(_formatBytes(fileSize.toInt()));

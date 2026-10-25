@@ -33,6 +33,7 @@ import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/theme.dart';
 import 'package:path/path.dart' as p;
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:pure_music/services/concert_session.dart';
 import 'package:pure_music/services/lastfm/lastfm_models.dart';
 import 'package:pure_music/services/lastfm/lastfm_service.dart';
@@ -515,7 +516,7 @@ class PlaybackService extends ChangeNotifier {
     final audio = nowPlaying;
     if (audio != null && BassPlayer.isMidiPath(audio.path) && applied) {
       final position = _player.position;
-      _player.setSource(audio.path);
+      _player.setSource(_playbackPathFor(audio));
       if (position > 0.2) _player.seek(position);
       _player.start();
     }
@@ -554,7 +555,11 @@ class PlaybackService extends ChangeNotifier {
 
   void reapplyOutputGain() => _eq.reapplyOutputGain();
 
+  String _playbackPathFor(Audio audio) =>
+      RemoteLibrary.instance.resolvePlaybackPath(audio.path);
+
   Future<double?> _readReplayGain(String path) async {
+    if (RemoteLibrary.isRemotePath(path)) return null;
     if (!_pref.replayGainEnabled) return null;
     try {
       final meta = await rust_tag_reader.readAudioExtraMetadata(path: path);
@@ -596,6 +601,7 @@ class PlaybackService extends ChangeNotifier {
   }
 
   Future<void> _skipLeadingSilenceIfNeeded(Audio audio, int token) async {
+    if (RemoteLibrary.isRemotePath(audio.path)) return;
     try {
       final libraryRoot = _supportPath ??= (await getAppDataDir()).path;
       if (_closed || token != _skipLeadingSilenceToken || nowPlaying != audio) {
@@ -1047,6 +1053,7 @@ class PlaybackService extends ChangeNotifier {
       if (currentPosition.isFinite &&
           sampledLength.isFinite &&
           sampledLength > 1) {
+        _learnRemoteDuration(sampledLength);
         _diagAt = nextDiagnosticAt(
           previous: _diagAt,
           sample: currentPosition,
@@ -1060,6 +1067,18 @@ class PlaybackService extends ChangeNotifier {
     _smartTransitions.onPositionTick(currentPosition, length);
     final progress = (currentPosition * 1000).round();
     unawaited(_smtc.updateTimeProperties(progress));
+  }
+
+  void _learnRemoteDuration(double sampledLength) {
+    final audio = nowPlaying;
+    if (audio == null || audio.duration > 0) return;
+    if (!RemoteLibrary.isRemotePath(audio.path)) return;
+    final seconds = sampledLength.round();
+    if (seconds <= 0) return;
+    audio.duration = seconds;
+    unawaited(
+      RemoteLibrary.instance.updateTrackDuration(audio.path, seconds),
+    );
   }
 
   void _syncSmtcPositionTimer() {
@@ -1250,7 +1269,7 @@ class PlaybackService extends ChangeNotifier {
     );
     _pendingGaplessTransition = pending;
     final prepared = _player.prepareGaplessSource(
-      target.incoming.path,
+      _playbackPathFor(target.incoming),
       transitionId: pending.id,
       transitionMode: TransitionMode.crossfade,
     );
@@ -1366,7 +1385,10 @@ class PlaybackService extends ChangeNotifier {
       unawaited(_prepareSacdGaplessSource(pending));
       return;
     }
-    if (!_player.prepareGaplessSource(audio.path, transitionId: pending.id)) {
+    if (!_player.prepareGaplessSource(
+      _playbackPathFor(audio),
+      transitionId: pending.id,
+    )) {
       _pendingGaplessTransition = null;
       return;
     }
@@ -1598,7 +1620,9 @@ class PlaybackService extends ChangeNotifier {
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
     try {
-      var sourcePath = audio.filePath;
+      var sourcePath = RemoteLibrary.isRemotePath(audio.path)
+          ? _playbackPathFor(audio)
+          : audio.filePath;
       var startMs = audio.segmentStartMs;
       var endMs = audio.segmentEndMs;
       if (audio.isSacdTrack) {
@@ -1979,11 +2003,15 @@ class PlaybackService extends ChangeNotifier {
     _listenRecordingToken = sessionToken;
 
     try {
-      final supportPath = _supportPath ??= (await getAppDataDir()).path;
-      await rust_library_db.incrementPlayCount(
-        indexPath: supportPath,
-        path: audioPath,
-      );
+      if (RemoteLibrary.isRemotePath(audioPath)) {
+        await RemoteLibrary.instance.recordPlay(audioPath);
+      } else {
+        final supportPath = _supportPath ??= (await getAppDataDir()).path;
+        await rust_library_db.incrementPlayCount(
+          indexPath: supportPath,
+          path: audioPath,
+        );
+      }
       audio.playCount++;
       if (sessionToken == _listenTracker.sessionToken) {
         _listenTracker.markListenRecorded();
@@ -2553,10 +2581,13 @@ class PlaybackService extends ChangeNotifier {
     session = _sessionStore.snapshot;
     lastPath = session.lastAudioPath;
     if (lastPath.isEmpty) return;
-    final pathToAudio = {
+    final pathToAudio = <String, Audio>{
       for (final audio in AudioLibrary.instance.audioCollection)
         audio.path: audio,
     };
+    for (final audio in RemoteLibrary.instance.audios) {
+      pathToAudio.putIfAbsent(audio.path, () => audio);
+    }
     final restoredPlaylist = _playlistFromSessionPaths(
       session.lastPlaylistPaths,
       pathToAudio,
@@ -2569,10 +2600,14 @@ class PlaybackService extends ChangeNotifier {
 
   Future<bool> _waitForLibraryAudios() async {
     for (int i = 0; i < 10; i++) {
-      if (AudioLibrary.instance.audioCollection.isNotEmpty) return true;
+      if (AudioLibrary.instance.audioCollection.isNotEmpty ||
+          RemoteLibrary.instance.audios.isNotEmpty) {
+        return true;
+      }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    return AudioLibrary.instance.audioCollection.isNotEmpty;
+    return AudioLibrary.instance.audioCollection.isNotEmpty ||
+        RemoteLibrary.instance.audios.isNotEmpty;
   }
 
   List<Audio> _playlistFromSessionPaths(
@@ -2647,7 +2682,9 @@ class PlaybackService extends ChangeNotifier {
   ) async {
     try {
       final restored = nowPlaying!;
-      var sourcePath = restored.filePath;
+      var sourcePath = RemoteLibrary.isRemotePath(restored.path)
+          ? _playbackPathFor(restored)
+          : restored.filePath;
       var startMs = restored.segmentStartMs;
       var endMs = restored.segmentEndMs;
       if (restored.isSacdTrack) {

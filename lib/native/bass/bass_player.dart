@@ -15,6 +15,7 @@ import 'package:pure_music/native/bass/bass.dart' as bass;
 import 'package:pure_music/native/bass/bass_fx.dart';
 import 'package:pure_music/native/bass/bass_mix.dart';
 import 'package:pure_music/native/bass/bass_wasapi.dart' as bass_wasapi;
+import 'package:pure_music/native/bass/bass_url.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as path;
@@ -242,6 +243,7 @@ class BassPlayer {
 
   late final ffi.DynamicLibrary _bassLib;
   late final bass.Bass _bass;
+  late final BassUrl _bassUrl;
   late final bass_wasapi.BassWasapi _bassWasapi;
   ffi.DynamicLibrary? _bassFxLib;
   BassFx? _bassFx;
@@ -2720,6 +2722,7 @@ class BassPlayer {
     }
     _bassLib = bassLib;
     _bass = bass.Bass(bassLib);
+    _bassUrl = BassUrl(bassLib);
     try {
       _bassChannelGetData = bassLib
           .lookupFunction<
@@ -2936,7 +2939,12 @@ class BassPlayer {
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    var handle = _createFileStream(audioPath, flags);
+    var handle = _isUrl(audioPath)
+        ? _createUrlStream(
+            audioPath,
+            flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+          )
+        : _createFileStream(audioPath, flags);
     if (handle == 0) return 0;
 
     // 默认速率与音高下不套 tempo：少一层 DSP，整轨文件定位更快。
@@ -2987,8 +2995,6 @@ class BassPlayer {
 
   int _createDirectSharedStream(String audioPath) {
     _applyDsdFreqConfig();
-    const playableFlags =
-        bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
 
     final needsTempo =
         _bassFx != null &&
@@ -3028,6 +3034,12 @@ class BassPlayer {
       }
     }
 
+    if (_isUrl(audioPath)) {
+      return _createUrlStream(audioPath, flags: bass.BASS_SAMPLE_FLOAT);
+    }
+
+    const playableFlags =
+        bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
     return _createFileStream(audioPath, playableFlags);
   }
 
@@ -4150,8 +4162,39 @@ class BassPlayer {
     }
   }
 
+  static bool _isUrl(String value) {
+    final lower = value.toLowerCase();
+    return lower.startsWith('http://') || lower.startsWith('https://');
+  }
+
+  int _createUrlStream(String url, {required int flags}) {
+    final handle = _bassUrl.streamCreateUrl(url, flags: flags);
+    if (handle == 0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] URL stream failed: ${_redactUrlForLog(url)}',
+      );
+    }
+    return handle;
+  }
+
+  static String _redactUrlForLog(String url) {
+    final newline = url.indexOf('\r\n');
+    final address = newline < 0 ? url : url.substring(0, newline);
+    final uri = Uri.tryParse(address);
+    if (uri == null || uri.host.isEmpty) return '<url>';
+    final port = uri.hasPort ? ':${uri.port}' : '';
+    return '${uri.scheme}://${uri.host}$port${uri.path}';
+  }
+
   int _createDecodeStream(String path) {
     _applyDsdFreqConfig();
+    if (_isUrl(path)) {
+      return _createUrlStream(
+        path,
+        flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+      );
+    }
     const flags =
         bass.BASS_UNICODE |
         bass.BASS_SAMPLE_FLOAT |
