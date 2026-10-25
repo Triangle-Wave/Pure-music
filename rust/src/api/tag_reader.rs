@@ -28,6 +28,7 @@ use windows::{
         Streams::{DataReader, IInputStream},
     },
     Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
+    Win32::{Storage::FileSystem::GetDriveTypeW, System::WindowsProgramming::DRIVE_REMOTE},
 };
 
 use crate::frb_generated::StreamSink;
@@ -66,9 +67,9 @@ mod symphonia;
 use symphonia::read_symphonia_metadata;
 
 mod midi;
-use midi::read_midi_metadata;
 #[cfg(test)]
 use midi::parse_midi_metadata;
+use midi::read_midi_metadata;
 
 pub mod extra_metadata;
 use extra_metadata::should_show_recording_date;
@@ -648,6 +649,58 @@ const MAX_TAG_READER_WORKERS: usize = 4;
 const RESERVED_LOGICAL_CORES: usize = 2;
 const INDEX_PROGRESS_MIN_BATCH: usize = 16;
 const INDEX_PROGRESS_TARGET_UPDATES: usize = 200;
+const MAX_REMOTE_DIRECTORIES: usize = 10_000;
+const NETWORK_FOLDER_ERROR: &str = "网络共享文件夹不能作为本地曲库文件夹，请通过远程音乐添加";
+const REMOTE_FOLDER_ERROR: &str = "SMB 远程来源必须使用 Windows 网络共享路径";
+
+fn is_network_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with(r"\\?") {
+        return lower.starts_with(r"\\?\unc");
+    }
+    if lower.starts_with(r"\\") || lower.starts_with("//") {
+        return true;
+    }
+
+    let bytes = lower.as_bytes();
+    if bytes.len() < 3 || bytes[1] != b':' || !matches!(bytes[2], b'\\' | b'/') {
+        return false;
+    }
+    let Some(drive) = raw.chars().next() else {
+        return false;
+    };
+    let root = HSTRING::from(format!("{drive}:\\"));
+    unsafe { GetDriveTypeW(&root) == DRIVE_REMOTE }
+}
+
+fn reject_network_folder(path: &Path) -> io::Result<()> {
+    if is_network_path(path) {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            NETWORK_FOLDER_ERROR,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_scan_roots(folders: &[String], remote: bool) -> io::Result<()> {
+    for folder in folders {
+        let path = Path::new(folder);
+        if remote {
+            if !is_network_path(path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    REMOTE_FOLDER_ERROR,
+                ));
+            }
+        } else {
+            reject_network_folder(path)?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 struct Audio {
@@ -1366,10 +1419,7 @@ pub fn get_picture_from_path(path: String, width: u32, height: u32) -> Option<Ve
 
             let mut output = Cursor::new(Vec::new());
             let rgb = image::DynamicImage::ImageRgba8(resized_img).to_rgb8();
-            if rgb
-                .write_to(&mut output, image::ImageFormat::Jpeg)
-                .is_ok()
-            {
+            if rgb.write_to(&mut output, image::ImageFormat::Jpeg).is_ok() {
                 let out = output.into_inner();
                 if let Ok(mut cache) = PICTURE_CACHE
                     .get_or_init(|| Mutex::new(VecDeque::new()))
@@ -2090,10 +2140,19 @@ fn collect_audio_files_by_folder(
     cue_by_folder: &mut HashMap<String, Vec<PathBuf>>,
     sacd_by_folder: &mut HashMap<String, Vec<PathBuf>>,
     seen: &mut HashSet<String>,
+    directory_count: &mut usize,
+    max_directories: Option<usize>,
 ) -> io::Result<()> {
     let folder_str = folder.as_ref().to_string_lossy().to_string();
     if !seen.insert(folder_str.clone()) {
         return Ok(());
+    }
+    *directory_count += 1;
+    if max_directories.is_some_and(|limit| *directory_count > limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SMB 远程曲库目录数量超过限制",
+        ));
     }
     for entry in fs::read_dir(folder.as_ref())? {
         let entry = entry?;
@@ -2106,6 +2165,8 @@ fn collect_audio_files_by_folder(
                 cue_by_folder,
                 sacd_by_folder,
                 seen,
+                directory_count,
+                max_directories,
             )?;
         } else if file_type.is_file() {
             let path = entry.path();
@@ -2140,11 +2201,32 @@ pub fn build_index_from_folders_recursively(
     index_path: String,
     sink: StreamSink<IndexActionState>,
 ) -> Result<(), io::Error> {
+    build_index_from_folders(folders, index_path, sink, false)
+}
+
+/// for Flutter
+/// SMB 远程来源专用入口：只接受 Windows 网络路径，并限制目录数量。
+pub fn build_remote_index_from_folders_recursively(
+    folders: Vec<String>,
+    index_path: String,
+    sink: StreamSink<IndexActionState>,
+) -> Result<(), io::Error> {
+    build_index_from_folders(folders, index_path, sink, true)
+}
+
+fn build_index_from_folders(
+    folders: Vec<String>,
+    index_path: String,
+    sink: StreamSink<IndexActionState>,
+    remote: bool,
+) -> Result<(), io::Error> {
+    validate_scan_roots(&folders, remote)?;
     let index_dir = PathBuf::from(&index_path);
     let mut audio_folders: Vec<AudioFolder> = vec![];
     let mut scanned: u64 = 0;
     let mut unreadable_total: u64 = 0;
     let mut seen: HashSet<String> = HashSet::new();
+    let mut directory_count = 0_usize;
     let mut total: u64 = 0;
     let mut by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut cue_by_folder: HashMap<String, Vec<PathBuf>> = HashMap::new();
@@ -2157,6 +2239,8 @@ pub fn build_index_from_folders_recursively(
             &mut cue_by_folder,
             &mut sacd_by_folder,
             &mut seen,
+            &mut directory_count,
+            remote.then_some(MAX_REMOTE_DIRECTORIES),
         )?;
     }
 
@@ -2325,6 +2409,7 @@ fn _update_index_below_1_1_0(
         let path = item["path"]
             .as_str()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing 'path' field"))?;
+        reject_network_folder(Path::new(path))?;
         let _ = sink.add(IndexActionState {
             progress: audio_folders_json.len() as f64 / folders.len() as f64,
             message: String::from("正在扫描 ") + path,
@@ -3414,6 +3499,9 @@ pub fn update_index(
     let sqlite_snapshot_current = sqlite_snapshot.is_some();
     if !force_metadata_check {
         if let Some(snapshot) = sqlite_snapshot.as_ref() {
+            for folder in &snapshot.folders {
+                reject_network_folder(Path::new(&folder.path))?;
+            }
             if snapshot.version == CURRENT_INDEX_VERSION
                 && index_folder_snapshots_unchanged(&snapshot.folders)
             {
@@ -3453,6 +3541,7 @@ pub fn update_index(
             ));
             break;
         };
+        reject_network_folder(Path::new(path))?;
         if let Err(error) = probe_indexed_path(fs::metadata(path)) {
             folder_probe_error = Some(error);
             break;
@@ -3479,6 +3568,7 @@ pub fn update_index(
             Some(p) => p.to_string(),
             None => continue,
         };
+        reject_network_folder(Path::new(&folder_path))?;
         let latest = folder_item["latest"].as_u64().unwrap_or(0);
         let old_folder_modified = folder_item["modified"].as_u64().unwrap_or(0);
 
@@ -3763,4 +3853,21 @@ pub fn update_index(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_network_path;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_windows_network_paths() {
+        assert!(is_network_path(Path::new(r"\\server\share")));
+        assert!(is_network_path(Path::new(r"\\?\UNC\server\share")));
+    }
+
+    #[test]
+    fn keeps_extended_local_paths_out_of_network_paths() {
+        assert!(!is_network_path(Path::new(r"\\?\C:\Music")));
+    }
 }
