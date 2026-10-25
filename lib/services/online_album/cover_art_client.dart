@@ -52,15 +52,20 @@ class CoverArtImage {
       return null;
     }
 
-    final url =
-        thumbnail('500') ??
-        thumbnail('large') ??
-        thumbnail('1200') ??
-        thumbnail('250') ??
-        thumbnail('small') ??
-        (data['image'] is String ? (data['image'] as String).trim() : null);
+    final rawUrl = data['url'];
+    final url = rawUrl is String && rawUrl.trim().isNotEmpty
+        ? rawUrl.trim()
+        : thumbnail('500') ??
+              thumbnail('large') ??
+              thumbnail('1200') ??
+              thumbnail('250') ??
+              thumbnail('small') ??
+              (data['image'] is String ? (data['image'] as String).trim() : null);
     if (url == null || url.isEmpty) return null;
-    final largeUrl = thumbnail('1200') ?? thumbnail('large');
+    final rawLargeUrl = data['largeUrl'];
+    final largeUrl = rawLargeUrl is String && rawLargeUrl.trim().isNotEmpty
+        ? rawLargeUrl.trim()
+        : thumbnail('1200') ?? thumbnail('large');
     return CoverArtImage(
       url: url,
       largeUrl: largeUrl,
@@ -92,10 +97,16 @@ class CoverArtSet {
     'booklets': booklets.map((image) => image.toJson()).toList(),
   };
 
+  /// 兼容两种结构：Cover Art Archive 接口的 `{images: [...]}`，以及
+  /// [toJson] 写出的 `{front, back, booklets}` 快照。
   static CoverArtSet fromJson(Object? data) {
     if (data is! Map<dynamic, dynamic>) return CoverArtSet.empty;
     final rawImages = data['images'];
-    if (rawImages is! List<dynamic>) return CoverArtSet.empty;
+    if (rawImages is List<dynamic>) return _fromApiImages(rawImages);
+    return _fromCachedImages(data);
+  }
+
+  static CoverArtSet _fromApiImages(List<dynamic> rawImages) {
     CoverArtImage? front;
     CoverArtImage? back;
     final booklets = <CoverArtImage>[];
@@ -111,6 +122,27 @@ class CoverArtSet {
         continue;
       }
       if (image.types.contains('booklet')) booklets.add(image);
+    }
+    return CoverArtSet(
+      front: front,
+      back: back,
+      booklets: List.unmodifiable(booklets),
+    );
+  }
+
+  static CoverArtSet _fromCachedImages(Map<dynamic, dynamic> data) {
+    final front = CoverArtImage.fromJson(data['front']);
+    final back = CoverArtImage.fromJson(data['back']);
+    final booklets = <CoverArtImage>[];
+    final rawBooklets = data['booklets'];
+    if (rawBooklets is List<dynamic>) {
+      for (final raw in rawBooklets) {
+        final image = CoverArtImage.fromJson(raw);
+        if (image != null) booklets.add(image);
+      }
+    }
+    if (front == null && back == null && booklets.isEmpty) {
+      return CoverArtSet.empty;
     }
     return CoverArtSet(
       front: front,

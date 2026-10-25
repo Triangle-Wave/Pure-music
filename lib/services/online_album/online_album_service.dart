@@ -218,10 +218,7 @@ class OnlineAlbumService {
     _pendingLookups.clear();
     _artworkMemory.clear();
     try {
-      final root = await _root();
-      final legacy = await _legacyRoot();
-      final roots = <Directory>[root];
-      if (!path.equals(root.path, legacy.path)) roots.add(legacy);
+      final roots = <Directory>[await _root(), ...await _legacyRoots()];
       for (final directoryRoot in roots) {
         for (final name in const ['candidates', 'info']) {
           final directory = Directory(path.join(directoryRoot.path, name));
@@ -288,9 +285,11 @@ class OnlineAlbumService {
     try {
       final file = await _candidateFile(key);
       if (await file.exists()) return _readCandidateFile(file);
-      final legacy = await _legacyCandidateFile(key);
-      if (legacy == null) return null;
-      return _readCandidateFile(legacy);
+      for (final legacy in await _legacyCandidateFiles(key)) {
+        final cache = await _readCandidateFile(legacy);
+        if (cache != null) return cache;
+      }
+      return null;
     } catch (error) {
       log.library.warn(
         'online_album_cache_read_failed',
@@ -389,12 +388,14 @@ class OnlineAlbumService {
     final trackCount = album.works.length;
     final yearHint = extractAlbumYearHint(album);
 
-    final cnCandidates = await _fetchCnCandidates(
-      title: title,
-      artist: artist,
-      trackCount: trackCount,
-      yearHint: yearHint,
-    );
+    final cnCandidates = <OnlineAlbumCandidate>[
+      ...await _fetchCnCandidates(
+        title: title,
+        artist: artist,
+        trackCount: trackCount,
+        yearHint: yearHint,
+      ),
+    ];
     cnCandidates.sort((a, b) => b.score.compareTo(a.score));
     final bestCn = cnCandidates.isEmpty ? null : cnCandidates.first;
     if (bestCn != null && bestCn.score >= minimumOnlineAlbumScore) {
@@ -430,7 +431,7 @@ class OnlineAlbumService {
         '国内音乐源搜索失败',
         fields: {'error': error.runtimeType.toString()},
       );
-      return const <OnlineAlbumCandidate>[];
+      return <OnlineAlbumCandidate>[];
     }
     final aliases = AppSettings.instance.artistAliases;
     final result = <OnlineAlbumCandidate>[];
@@ -681,9 +682,28 @@ class OnlineAlbumService {
     return dir;
   }
 
-  Future<Directory> _legacyRoot() async {
-    final appData = await _appDataDirectory();
-    return Directory(path.join(appData.path, 'online_album'));
+  Future<List<Directory>> _legacyRoots() async {
+    try {
+      final appData = await _appDataDirectory();
+      final current = await _root();
+      final candidates = <Directory>[
+        Directory(path.join(appData.path, 'online_album')),
+        Directory(path.join(appData.path, 'cache', 'online_album')),
+      ];
+      final result = <Directory>[];
+      for (final candidate in candidates) {
+        if (path.equals(candidate.path, current.path)) continue;
+        result.add(candidate);
+      }
+      return result;
+    } catch (error) {
+      log.library.debug(
+        'online_album_cache_read_failed',
+        '旧在线专辑缓存目录不可用',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return const <Directory>[];
+    }
   }
 
   Future<File> _candidateFile(String key) async {
@@ -692,20 +712,21 @@ class OnlineAlbumService {
     return File(path.join(dir.path, '$key.json'));
   }
 
-  Future<File?> _legacyCandidateFile(String key) async {
+  Future<List<File>> _legacyCandidateFiles(String key) async {
     try {
-      final legacy = await _legacyRoot();
-      final current = await _root();
-      if (path.equals(legacy.path, current.path)) return null;
-      final file = File(path.join(legacy.path, 'candidates', '$key.json'));
-      return await file.exists() ? file : null;
+      final files = <File>[];
+      for (final root in await _legacyRoots()) {
+        final file = File(path.join(root.path, 'candidates', '$key.json'));
+        if (await file.exists()) files.add(file);
+      }
+      return files;
     } catch (error) {
       log.library.debug(
         'online_album_cache_read_failed',
         '旧在线专辑缓存不可用',
         fields: {'error': error.runtimeType.toString()},
       );
-      return null;
+      return const <File>[];
     }
   }
 

@@ -132,6 +132,60 @@ void main() {
       expect(first['info'], isA<Map<String, dynamic>>());
     });
 
+    test('旧缓存位置可读且新写入落在当前缓存根', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_album');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      final album = _abbeyRoad();
+      final seed = OnlineAlbumService.createForTest(
+        cnMusic: _FakeCnMusicClient(const [_netease]),
+        appDataDirectory: () async => dir,
+      );
+      await seed.loadCandidates(album);
+      final key = seed.cacheKeyForAlbum(album);
+      final recentLegacy = File(
+        p.join(dir.path, 'online_album', 'candidates', '$key.json'),
+      );
+      expect(await recentLegacy.exists(), isTrue);
+
+      final customRoot = Directory(p.join(dir.path, 'custom_cache'));
+      final recentClient = _FakeCnMusicClient(const []);
+      final fromRecent = OnlineAlbumService.createForTest(
+        cnMusic: recentClient,
+        musicBrainz: _FakeMusicBrainzClient(),
+        appDataDirectory: () async => dir,
+        cacheDirectory: () async => customRoot,
+      );
+      final recentCache = await fromRecent.loadCandidates(album);
+      expect(recentCache, isNotNull);
+      expect(recentCache!.candidates, hasLength(1));
+      expect(recentClient.calls, 0);
+
+      final earlyLegacy = File(
+        p.join(dir.path, 'cache', 'online_album', 'candidates', '$key.json'),
+      );
+      await earlyLegacy.parent.create(recursive: true);
+      await recentLegacy.copy(earlyLegacy.path);
+      await recentLegacy.delete();
+
+      final earlyClient = _FakeCnMusicClient(const []);
+      final fromEarly = OnlineAlbumService.createForTest(
+        cnMusic: earlyClient,
+        musicBrainz: _FakeMusicBrainzClient(),
+        appDataDirectory: () async => dir,
+        cacheDirectory: () async => customRoot,
+      );
+      final earlyCache = await fromEarly.loadCandidates(album);
+      expect(earlyCache, isNotNull);
+      expect(earlyCache!.candidates, hasLength(1));
+      expect(earlyClient.calls, 0);
+
+      await fromEarly.updateSelection(album, candidateId: 'cn:netease:1');
+      final written = File(p.join(customRoot.path, 'candidates', '$key.json'));
+      expect(await written.exists(), isTrue);
+    });
+
     test('选择候选后重启仍使用该候选且不重新请求', () async {
       final dir = await Directory.systemTemp.createTemp('pure_music_album');
       addTearDown(() async {

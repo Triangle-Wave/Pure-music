@@ -213,11 +213,9 @@ class OnlineArtistImageService {
     _cacheDir = null;
     _selectionRevision++;
     try {
-      final directory = await _root();
-      if (await directory.exists()) await directory.delete(recursive: true);
-      final legacy = await _legacyRoot();
-      if (!path.equals(directory.path, legacy.path) && await legacy.exists()) {
-        await legacy.delete(recursive: true);
+      final directories = <Directory>[await _root(), ...await _legacyRoots()];
+      for (final directory in directories) {
+        if (await directory.exists()) await directory.delete(recursive: true);
       }
     } catch (error) {
       log.library.warn(
@@ -384,9 +382,30 @@ class OnlineArtistImageService {
     return dir;
   }
 
-  Future<Directory> _legacyRoot() async {
-    final appData = await _appDataDirectory();
-    return Directory(path.join(appData.path, 'online_album', 'artist'));
+  /// 旧缓存位置：`<数据根>/online_album/artist` 与更早的
+  /// `<数据根>/cache/online_album/artist`；新写入始终落在当前缓存根。
+  Future<List<Directory>> _legacyRoots() async {
+    try {
+      final appData = await _appDataDirectory();
+      final current = await _root();
+      final candidates = <Directory>[
+        Directory(path.join(appData.path, 'online_album', 'artist')),
+        Directory(path.join(appData.path, 'cache', 'online_album', 'artist')),
+      ];
+      final result = <Directory>[];
+      for (final candidate in candidates) {
+        if (path.equals(candidate.path, current.path)) continue;
+        result.add(candidate);
+      }
+      return result;
+    } catch (error) {
+      log.library.debug(
+        'online_artist_image_cache_read_failed',
+        '旧艺术家头像缓存目录不可用',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return const <Directory>[];
+    }
   }
 
   Future<File> _cacheFile(String key) async {
@@ -394,20 +413,21 @@ class OnlineArtistImageService {
     return File(path.join(dir.path, '$key.json'));
   }
 
-  Future<File?> _legacyCacheFile(String key) async {
+  Future<List<File>> _legacyCacheFiles(String key) async {
     try {
-      final legacy = await _legacyRoot();
-      final current = await _root();
-      if (path.equals(legacy.path, current.path)) return null;
-      final file = File(path.join(legacy.path, '$key.json'));
-      return await file.exists() ? file : null;
+      final files = <File>[];
+      for (final root in await _legacyRoots()) {
+        final file = File(path.join(root.path, '$key.json'));
+        if (await file.exists()) files.add(file);
+      }
+      return files;
     } catch (error) {
       log.library.debug(
         'online_artist_image_cache_read_failed',
         '旧艺术家头像缓存不可用',
         fields: {'error': error.runtimeType.toString()},
       );
-      return null;
+      return const <File>[];
     }
   }
 
@@ -415,9 +435,11 @@ class OnlineArtistImageService {
     try {
       final file = await _cacheFile(key);
       if (await file.exists()) return _readCacheFile(file);
-      final legacy = await _legacyCacheFile(key);
-      if (legacy == null) return null;
-      return _readCacheFile(legacy);
+      for (final legacy in await _legacyCacheFiles(key)) {
+        final cache = await _readCacheFile(legacy);
+        if (cache != null) return cache;
+      }
+      return null;
     } catch (error) {
       log.library.warn(
         'online_artist_image_cache_read_failed',
