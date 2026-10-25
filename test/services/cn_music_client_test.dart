@@ -1,9 +1,19 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/services/online_album/album_match.dart';
 import 'package:pure_music/services/online_album/cn_music_client.dart';
 import 'package:pure_music/services/online_album/online_album_service.dart';
 
 void main() {
+  group('客户端选择', () {
+    test('国内音乐源使用统一代理 Dio', () {
+      final client = CnMusicClient();
+
+      expect(identical(client.clientForTest, AppHttp.instance.dio), isTrue);
+      addTearDown(AppHttp.instance.rebuild);
+    });
+  });
+
   group('国内专辑响应解析', () {
     test('网易专辑搜索解析封面、艺术家与曲目数', () {
       final albums = CnMusicClient.parseNeteaseAlbums({

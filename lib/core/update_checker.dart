@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:github/github.dart' as gh;
 import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
@@ -13,7 +14,7 @@ enum UpdateChannel {
   static const supported = UpdateChannel.github;
 
   String get label => switch (this) {
-    UpdateChannel.github => 'GitHub 直连',
+    UpdateChannel.github => 'GitHub',
     UpdateChannel.gitee => 'Gitee 镜像',
   };
 
@@ -534,6 +535,7 @@ class UpdateChecker {
 
   static Future<UpdateInfo?> checkForUpdate() async {
     const channel = UpdateChannel.supported;
+    _logProxyContext();
     final slug = AppPreference.instance.updateRepoSlug;
     final apiUrl = '$_githubApiBase/$slug/releases/latest';
     final fromApi = await _checkReleaseApi(apiUrl, channel, slug);
@@ -546,6 +548,20 @@ class UpdateChecker {
     if (fromApi != null) return fromApi.withFallbackChecksums(fallback);
     if (fallback != null) return fallback;
     throw const UpdateCheckException(UpdateChannel.supported);
+  }
+
+  /// 记录本次更新检查使用的代理目标，便于定位代理连接与请求失败。
+  static void _logProxyContext() {
+    final proxy = NetworkProxy.instance.config;
+    log.update.debug(
+      'legacy',
+      '[UpdateChecker] 检查更新，代理模式 ${proxy.mode.name}',
+      fields: {
+        'mode': proxy.mode.name,
+        if (proxy.mode == ProxyMode.manual)
+          'target': '${proxy.normalizedHost}:${proxy.resolvedPort}',
+      },
+    );
   }
 
   static Future<UpdateInfo?> _firstFallbackInfo(UpdateChannel channel) async {
@@ -590,7 +606,9 @@ class UpdateChecker {
     } catch (error) {
       log.update.warn(
         'legacy',
-        '[UpdateChecker] ${channel.name} release API failed: ${error.runtimeType}',
+        '[UpdateChecker] ${channel.name} release API failed: '
+        '${_describeNetworkError(error)}',
+        fields: {'error': _describeNetworkError(error)},
       );
       return null;
     }
@@ -624,7 +642,9 @@ class UpdateChecker {
     } catch (error) {
       log.update.warn(
         'legacy',
-        '[UpdateChecker] ${channel.name} fallback failed: ${error.runtimeType}',
+        '[UpdateChecker] ${channel.name} fallback failed: '
+        '${_describeNetworkError(error)}',
+        fields: {'error': _describeNetworkError(error)},
       );
       return null;
     }
@@ -650,6 +670,17 @@ class UpdateChecker {
         remoteTag != lastSeen &&
         hasNewVersion(remoteTag, AppSettings.version);
   }
+}
+
+/// 网络错误只保留类型与状态码，便于判断是代理不通、超时还是限流。
+String _describeNetworkError(Object error) {
+  if (error is DioException) {
+    final status = error.response?.statusCode;
+    return status == null
+        ? 'DioException(${error.type.name})'
+        : 'DioException(${error.type.name}, status=$status)';
+  }
+  return error.runtimeType.toString();
 }
 
 class _SemVer implements Comparable<_SemVer> {

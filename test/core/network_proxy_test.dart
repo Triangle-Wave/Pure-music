@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/settings.dart';
@@ -47,7 +49,7 @@ void main() {
       );
 
       expect(
-        config.findProxyFor(Uri.parse('https://music.163.com/api')),
+        config.findProxyFor(Uri.parse('https://api.github.com/repos/x/y')),
         'PROXY 127.0.0.1:7890',
       );
       expect(config.findProxyFor(Uri.parse('http://localhost/a')), 'DIRECT');
@@ -83,6 +85,83 @@ void main() {
       );
 
       expect(config.findProxyFor(Uri.parse('https://example.com')), 'DIRECT');
+    });
+
+    test('手动代理下所有公网域名统一走代理', () {
+      const config = ProxyConfig(
+        mode: ProxyMode.manual,
+        host: '127.0.0.1',
+        port: 7890,
+      );
+
+      for (final url in const [
+        'https://music.163.com/api/cloudsearch/pc',
+        'https://p1.music.126.net/cover.jpg',
+        'https://u.y.qq.com/cgi-bin/musicu.fcg',
+        'https://y.gtimg.cn/music/photo_new/T001.jpg',
+        'https://mobilecdn.kugou.com/api/v3/search/album',
+        'https://imge.kugou.com/stdmusic/cover.jpg',
+        'https://api.github.com/repos/a/b/releases/latest',
+        'https://raw.githubusercontent.com/a/b/main/version.json',
+        'https://coverartarchive.org/release/x',
+      ]) {
+        expect(
+          config.findProxyFor(Uri.parse(url)),
+          'PROXY 127.0.0.1:7890',
+          reason: url,
+        );
+      }
+    });
+
+    test('系统模式沿用环境变量代理设置', () {
+      const config = ProxyConfig(mode: ProxyMode.system);
+      final uri = Uri.parse('https://music.163.com/api');
+
+      expect(
+        config.findProxyFor(uri),
+        HttpClient.findProxyFromEnvironment(uri),
+      );
+    });
+
+    test('host 附带端口时以该端口生成代理规则', () {
+      const config = ProxyConfig(
+        mode: ProxyMode.manual,
+        host: 'http://127.0.0.1:7890/',
+      );
+
+      expect(config.normalizedHost, '127.0.0.1');
+      expect(config.resolvedPort, 7890);
+      expect(config.proxyRule, 'PROXY 127.0.0.1:7890');
+      expect(
+        config.findProxyFor(Uri.parse('https://api.github.com/x')),
+        'PROXY 127.0.0.1:7890',
+      );
+    });
+
+    test('IPv6 主机附带端口时正确拆分', () {
+      const config = ProxyConfig(mode: ProxyMode.manual, host: '[::1]:7890');
+
+      expect(config.normalizedHost, '::1');
+      expect(config.resolvedPort, 7890);
+      expect(config.rustHost, '[::1]');
+      expect(config.proxyRule, 'PROXY [::1]:7890');
+      expect(config.hasValidManualTarget, isTrue);
+    });
+
+    test('Rust bypass 只保留用户配置并去重', () {
+      const config = ProxyConfig(
+        mode: ProxyMode.manual,
+        host: '127.0.0.1',
+        bypass: 'localhost, internal.example; localhost',
+      );
+
+      final rules = config.rustBypass.split(',');
+
+      expect(rules, ['localhost', 'internal.example']);
+      expect(rules, isNot(contains('music.163.com')));
+      expect(rules, isNot(contains('y.qq.com')));
+      const defaults = ProxyConfig(mode: ProxyMode.manual, host: '127.0.0.1');
+      expect(defaults.rustBypass, defaultProxyBypass);
     });
 
     test('手动配置非法时回退直连', () {

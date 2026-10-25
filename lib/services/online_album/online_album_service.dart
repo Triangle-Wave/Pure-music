@@ -763,11 +763,13 @@ class OnlineAlbumService {
 
   Future<Uint8List?> _downloadBytes(String url) async {
     try {
+      // 封面下载与接口请求统一使用全局代理客户端。
       final response = await AppHttp.instance.dio.get<List<int>>(
         url,
         options: Options(
           headers: _artworkHeaders(url),
           responseType: ResponseType.bytes,
+          connectTimeout: const Duration(seconds: 15),
           sendTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
           validateStatus: (status) =>

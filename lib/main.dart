@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' show FlutterView, PlatformDispatcher;
 
 import 'package:pure_music/core/application_log.dart';
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/setting_action_state.dart';
 import 'package:pure_music/core/settings.dart';
@@ -317,13 +318,15 @@ void _installNetworkProxy() {
     final stored = ProxyConfig.fromSettings(AppSettings.instance);
     final effective = stored.effective;
     NetworkProxy.instance.apply(effective);
+    // 启动早期可能已有客户端按旧配置创建，统一重建一次。
+    AppHttp.instance.rebuild();
     unawaited(NetworkProxy.instance.applyToRust(effective));
     if (stored.mode == ProxyMode.manual && !stored.hasValidManualTarget) {
       log.app.warn('legacy', '[network] 代理配置不完整，已回退直连');
     } else if (effective.mode == ProxyMode.manual) {
       log.app.info(
         'legacy',
-        '[network] 手动代理 ${effective.normalizedHost}:${effective.port}',
+        '[network] 手动代理 ${effective.normalizedHost}:${effective.resolvedPort}',
       );
     } else {
       log.app.info('legacy', '[network] 代理模式 ${effective.mode.name}');

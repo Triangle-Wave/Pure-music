@@ -82,7 +82,7 @@ const Map<String, String> _kugouHeaders = {
 
 /// 国内音乐源元数据客户端。
 ///
-/// 请求统一走 [AppHttp] 的 Dio，因此跟随全局代理配置。三个源的失败
+/// 请求统一使用 [AppHttp] 的共享客户端，跟随全局代理配置。三个源的失败
 /// 相互独立，任何一个源超时或返回异常结构都只降级为该源没有结果。
 class CnMusicClient {
   CnMusicClient({
@@ -94,6 +94,10 @@ class CnMusicClient {
   final Duration timeout;
 
   Dio get _client => _dio ?? AppHttp.instance.dio;
+
+  /// 当前使用的 Dio，供测试确认使用统一客户端。
+  @visibleForTesting
+  Dio get clientForTest => _client;
 
   Future<List<CnAlbumCandidate>> searchAlbums({
     required String title,
@@ -340,6 +344,7 @@ class CnMusicClient {
         options: Options(
           headers: headers,
           responseType: ResponseType.json,
+          connectTimeout: timeout,
           sendTimeout: timeout,
           receiveTimeout: timeout,
           validateStatus: (status) =>
@@ -369,6 +374,7 @@ class CnMusicClient {
         options: Options(
           headers: headers,
           responseType: ResponseType.json,
+          connectTimeout: timeout,
           sendTimeout: timeout,
           receiveTimeout: timeout,
           validateStatus: (status) =>

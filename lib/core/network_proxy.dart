@@ -89,11 +89,17 @@ class ProxyConfig {
     final target = normalizedHost;
     if (target.isEmpty) return false;
     if (target.contains(RegExp(r'[\s/\\]'))) return false;
+    final port = resolvedPort;
     return port >= 1 && port <= 65535;
   }
 
-  /// 去掉协议前缀与路径，输入 `http://127.0.0.1:7890` 也能用。
-  String get normalizedHost {
+  /// 去掉协议前缀、路径与端口，输入 `http://127.0.0.1:7890` 也能用。
+  String get normalizedHost => _hostAndPort.host;
+
+  /// 手动代理实际使用的端口；`host` 中附带端口时以该端口为准。
+  int get resolvedPort => _hostAndPort.port ?? port;
+
+  String get _hostWithoutScheme {
     var value = host.trim();
     final lower = value.toLowerCase();
     if (lower.startsWith('http://')) {
@@ -106,12 +112,35 @@ class ProxyConfig {
     return value.trim();
   }
 
+  _HostAndPort get _hostAndPort => _parseHostAndPort(_hostWithoutScheme);
+
+  /// 拆分 `host:port` 与 `[v6]:port`，裸 IPv6 地址整体作为主机。
+  static _HostAndPort _parseHostAndPort(String value) {
+    if (value.startsWith('[')) {
+      final end = value.indexOf(']');
+      if (end <= 0) return const _HostAndPort('', null);
+      final host = value.substring(1, end);
+      final rest = value.substring(end + 1).trim();
+      if (rest.isEmpty) return _HostAndPort(host, null);
+      if (!rest.startsWith(':')) return const _HostAndPort('', null);
+      final parsed = int.tryParse(rest.substring(1));
+      if (parsed == null) return _HostAndPort(host, null);
+      return _HostAndPort(host, parsed);
+    }
+    final separator = value.indexOf(':');
+    if (separator < 0) return _HostAndPort(value, null);
+    if (separator != value.lastIndexOf(':')) return _HostAndPort(value, null);
+    final parsed = int.tryParse(value.substring(separator + 1));
+    if (parsed == null) return const _HostAndPort('', null);
+    return _HostAndPort(value.substring(0, separator), parsed);
+  }
+
   /// `PROXY host:port` 形式的 PAC 规则。
   String get proxyRule {
     final target = normalizedHost;
     final authority = target.contains(':') && !target.startsWith('[')
-        ? '[$target]:$port'
-        : '$target:$port';
+        ? '[$target]:$resolvedPort'
+        : '$target:$resolvedPort';
     return 'PROXY $authority';
   }
 
@@ -121,7 +150,22 @@ class ProxyConfig {
       .where((rule) => rule.isNotEmpty)
       .toList(growable: false);
 
+  /// 传给 Rust 的绕过列表：只保留用户规则（含默认 loopback），去重并保持顺序。
+  String get rustBypass {
+    final seen = <String>{};
+    final merged = <String>[];
+    for (final entry in bypass.split(RegExp(r'[,;\s]+'))) {
+      final value = entry.trim();
+      if (value.isEmpty || !seen.add(value.toLowerCase())) continue;
+      merged.add(value);
+    }
+    return merged.join(',');
+  }
+
   /// 返回给 `HttpClient.findProxy` 的规则。
+  ///
+  /// [ProxyMode.manual] 下除 loopback 与用户 bypass 外一律走代理，由代理
+  /// 软件自行决定国内直连或境外转发。
   String findProxyFor(Uri uri) {
     switch (mode) {
       case ProxyMode.direct:
@@ -189,6 +233,13 @@ class ProxyConfig {
     return 'ProxyConfig(mode: ${mode.name}, host: $host, port: $port, '
         'user: $user, bypass: $bypass)';
   }
+}
+
+class _HostAndPort {
+  const _HostAndPort(this.host, this.port);
+
+  final String host;
+  final int? port;
 }
 
 /// 把代理配置应用到单个 [HttpClient]。
@@ -265,8 +316,9 @@ class NetworkProxy {
     final isManual = effective.mode == ProxyMode.manual;
     final username = isManual ? effective.username.trim() : '';
     final host = isManual ? effective.rustHost : '';
-    final port = isManual ? effective.port : 0;
-    final bypass = isManual ? effective.bypass : '';
+    final port = isManual ? effective.resolvedPort : 0;
+    // Rust 的网易云、QQ、酷狗请求共用这份 bypass，只排除用户配置的地址。
+    final bypass = isManual ? effective.rustBypass : '';
     // Rust 拒绝无用户名的密码，Dart 侧同样不使用该密码。
     final password = username.isEmpty ? '' : effective.password;
     final signature = [
@@ -301,5 +353,12 @@ class NetworkProxy {
 
   HttpClient createHttpClient({SecurityContext? context}) {
     return AppHttpOverrides(config: _config).createHttpClient(context);
+  }
+
+  /// 强制直连的客户端，作为代理连接失败后的回退。
+  HttpClient createDirectHttpClient({SecurityContext? context}) {
+    return AppHttpOverrides(
+      config: const ProxyConfig(mode: ProxyMode.direct),
+    ).createHttpClient(context);
   }
 }
