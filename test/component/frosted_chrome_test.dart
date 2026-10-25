@@ -99,4 +99,26 @@ void main() {
     expect(find.byKey(contentKey), findsOneWidget);
     expect(_inChrome(find.byType(RepaintBoundary)), findsOneWidget);
   });
+
+  testWidgets('low quality chrome samples the backdrop at lower resolution', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _harness(
+        child: const FrostedChrome(
+          enabled: true,
+          lowQuality: true,
+          child: SizedBox(width: 40, height: 80),
+        ),
+      ),
+    );
+
+    final backdrop = tester.widget<BackdropFilter>(
+      _inChrome(find.byType(BackdropFilter)),
+    );
+    expect(
+      identical(backdrop.filter, FrostedChrome.lowQualityBlurFilter),
+      isTrue,
+    );
+  });
 }

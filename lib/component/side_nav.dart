@@ -81,20 +81,22 @@ class _SideNavState extends State<SideNav> {
           (d) => GoRouterState.of(context).uri.toString().startsWith(d.desPath),
         );
     final isDrawer = Scaffold.maybeOf(context)?.hasDrawer ?? false;
+    // 侧栏按展开宽度布局，不跟随 rail 的实时宽度；开合只由外层裁剪，
+    // 避免每帧重建整棵导航树并重排每个条目。
+    final expandedWidth = isDrawer
+        ? math.min(_expandedWidth, MediaQuery.sizeOf(context).width)
+        : _expandedWidth;
     return ResponsiveBuilder(
-      builder: (context, screenType) => LayoutBuilder(
-        builder: (context, constraints) => _navForConstraints(
-          context,
-          scheme: scheme,
-          navShell: navShell,
-          selectedIndex: selectedIndex,
-          isDrawer: isDrawer,
-          constraints: constraints,
-        ),
+      builder: (context, screenType) => _navForConstraints(
+        context,
+        scheme: scheme,
+        navShell: navShell,
+        selectedIndex: selectedIndex,
+        isDrawer: isDrawer,
+        expandedWidth: expandedWidth,
       ),
     );
   }
-
 
   Widget _navForConstraints(
     BuildContext context, {
@@ -102,11 +104,8 @@ class _SideNavState extends State<SideNav> {
     required StatefulNavigationShell? navShell,
     required int selectedIndex,
     required bool isDrawer,
-    required BoxConstraints constraints,
+    required double expandedWidth,
   }) {
-    final expandedWidth = isDrawer
-        ? constraints.maxWidth
-        : math.min(_expandedWidth, constraints.maxWidth);
     return ValueListenableBuilder(
       valueListenable: sidebarExpanded,
       builder: (context, expanded, _) => _SmoothLargeSideNav(
@@ -204,7 +203,7 @@ class _SmoothLargeSideNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return RepaintBoundary(child: _buildPanel(context));
+    return _buildPanel(context);
   }
 
   Widget _buildPanel(BuildContext context) {
@@ -218,21 +217,26 @@ class _SmoothLargeSideNav extends StatelessWidget {
       width: double.infinity,
       height: double.infinity,
       child: ClipRect(
+        // 内容始终按展开宽度布局并缓存，开合动画只改外层 ClipRect 的裁剪范围，
+        // 侧栏子树不随宽度重绘。
         child: OverflowBox(
           alignment: Alignment.centerLeft,
           minWidth: innerWidth,
           maxWidth: innerWidth,
-          child: panel,
+          child: RepaintBoundary(child: panel),
         ),
       ),
     );
   }
 
   Widget _panelChrome(BuildContext context, double itemWidth) {
+    final sidebarMoving =
+        SidebarMotionScope.maybeOf(context)?.isAnimating ?? false;
     return ListenableBuilder(
       listenable: AppSettings.backgroundNotifier,
       builder: (context, _) => FrostedChrome(
         enabled: AppSettings.instance.enableSidebarFrostedGlass,
+        lowQuality: sidebarMoving,
         borderRadius: AppRadius.mdCircular,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

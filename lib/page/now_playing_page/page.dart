@@ -303,9 +303,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     _songChangeTrimTimer?.cancel();
     _coverRequestToken++;
     NowPlayingPerfProbe.instance.onSongChanged();
-    _applyCachedCoverFrame(path);
+    final appliedCachedCover = _applyCachedCoverFrame(path);
     if (mounted) setState(() {});
-    if (_nowPlayingCoverBytes != null) {
+    if (appliedCachedCover && _nowPlayingCoverBytes != null) {
       NowPlayingPerfProbe.instance.onCoverVisible(fromCache: true);
     }
     _songChangeTrimTimer = Timer(const Duration(seconds: 8), () {
@@ -332,10 +332,10 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     });
   }
 
-  void _applyCachedCoverFrame(String path) {
+  bool _applyCachedCoverFrame(String path) {
     // 首帧优先复用已解码的大封面，否则沿用小封面。
     final aud = playbackService.nowPlaying;
-    if (aud == null) return;
+    if (aud == null) return false;
     final cachedPalette = _colorService.getCachedPaletteForPath(
       path,
       modified: aud.modified,
@@ -358,13 +358,17 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
       _nowPlayingCoverBytes = cachedLargeCover.bytes;
       _coverBytesLevel = 3;
       _backgroundUsesCachedLargeCover = true;
-      return;
+      return true;
     }
     final smallBytes = aud.smallCoverBytes;
-    if (smallBytes != null) {
+    // 切歌时保留上一首背景，等这首歌的 160px 封面就绪后一次替换；
+    // 只有页面首次还没有任何背景时才用缩略图垫一帧。
+    if (smallBytes != null && _nowPlayingCoverBytes == null) {
       _nowPlayingCoverBytes = smallBytes;
       _coverBytesLevel = 1;
+      return true;
     }
+    return false;
   }
 
   void _onViewModeChanged() {
@@ -2797,30 +2801,50 @@ class _PlaybackCoverFrame extends StatelessWidget {
   Widget build(BuildContext context) {
     final circle = AppSettings.instance.circlePlaybackCover;
     final borderRadius = BorderRadius.circular(12.0);
-    return Container(
-      decoration: BoxDecoration(
-        shape: circle ? BoxShape.circle : BoxShape.rectangle,
-        borderRadius: circle ? null : borderRadius,
-        border: circle
-            ? Border.all(
-                color: scheme.onSurface.withValues(alpha: 0.09),
-                width: 1.0,
-              )
-            : null,
-        boxShadow: [
-          BoxShadow(
-            color: scheme.shadow.withValues(alpha: 0.2),
-            spreadRadius: 0,
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
+    // 封面旋转 / 暂停回弹只改这一层的变换，阴影、圆角和图片采样结果留在
+    // 自己的绘制缓存里，不必每帧重绘。
+    return RepaintBoundary(
+      child: Container(
+        decoration: BoxDecoration(
+          shape: circle ? BoxShape.circle : BoxShape.rectangle,
+          borderRadius: circle ? null : borderRadius,
+          border: circle
+              ? Border.all(
+                  color: scheme.onSurface.withValues(alpha: 0.09),
+                  width: 1.0,
+                )
+              : null,
+          boxShadow: [
+            BoxShadow(
+              color: scheme.shadow.withValues(alpha: 0.2),
+              spreadRadius: 0,
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: circle
+            ? ClipOval(child: child)
+            : ClipRRect(borderRadius: borderRadius, child: child),
       ),
-      child: circle
-          ? ClipOval(child: child)
-          : ClipRRect(borderRadius: borderRadius, child: child),
     );
   }
+}
+
+/// 按实际显示像素解码封面，避免切歌/切换封面时把源图按原始分辨率送入采样。
+ImageProvider<Object> _resizedCoverProvider(
+  ImageProvider<Object> provider,
+  double coverSize,
+  double devicePixelRatio,
+) {
+  final pixelWidth = (coverSize * devicePixelRatio).round();
+  if (pixelWidth <= 0) return provider;
+  return ResizeImage(
+    provider,
+    width: pixelWidth,
+    height: pixelWidth,
+    allowUpscaling: false,
+  );
 }
 
 /// title, artist, album, cover
@@ -2847,6 +2871,8 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
   Uint8List? _immediateCover;
   String? _immediateCoverPath;
   MemoryImage? _cachedImmediateCoverImage;
+  double? _coverSizeForPrefetch;
+  String? _prefetchedCoverPath;
 
   bool get _routeReady {
     final animation = ModalRoute.of(context)?.animation;
@@ -2897,7 +2923,12 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
       return;
     }
     _removeRouteAnimationListener();
-    if (cachedLargeCover != null) return;
+    if (cachedLargeCover != null) {
+      // 当前封面已是解码缓存，直接预取下一首；否则等大图就绪后再预取，
+      // 避免两首封面同时解码抢同一帧。
+      _prefetchNextCover(nextAudio);
+      return;
+    }
     _scheduleHiResCover(nextAudio, token, path);
   }
 
@@ -2948,7 +2979,7 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
         if (playbackService.nowPlaying?.path != path) return;
         if (image != null) {
           try {
-            await precacheImage(image, context);
+            await precacheImage(_prefetchProvider(image), context);
           } catch (error) {
             // 预缓存失败记录为 debug 日志，封面由 Image 的 errorBuilder 兜底。
             log.app.debug(
@@ -2963,8 +2994,61 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
           _hiResCover = image;
           _hiResCoverPath = image == null ? null : path;
         });
+        _prefetchNextCover(nextAudio);
       });
     });
+  }
+
+  /// 预取当前显示尺寸的解码缓存，命中后再交给 [ResizeImage] 直接复用。
+  ImageProvider<Object> _prefetchProvider(ImageProvider<Object> provider) {
+    return _resizedCoverProvider(
+      provider,
+      _coverSizeForPrefetch ?? 420.0,
+      MediaQuery.devicePixelRatioOf(context),
+    );
+  }
+
+  /// 队列下一首的封面先解码进 ImageCache，下一次切歌不再在过渡动画里解码。
+  void _prefetchNextCover(Audio current) {
+    if (_prefetchedCoverPath == current.path) return;
+    final playlist = playbackService.playlist.value;
+    if (playlist.length < 2) return;
+    final index = playbackService.playlistIndex;
+    if (index < 0 || index >= playlist.length) return;
+    final int? nextIndex = switch (playbackService.playMode.value) {
+      PlayMode.forward || PlayMode.loop => (index + 1) % playlist.length,
+      PlayMode.singleLoop => index,
+      PlayMode.listOnce => index + 1 < playlist.length ? index + 1 : null,
+    };
+    if (nextIndex == null) return;
+    final next = playlist[nextIndex];
+    if (identical(next, current)) return;
+    _prefetchedCoverPath = current.path;
+    unawaited(
+      next.largeCover
+          .then((image) {
+            if (!mounted || image == null) return;
+            if (playbackService.nowPlaying?.path != current.path) return;
+            unawaited(
+              precacheImage(_prefetchProvider(image), context).catchError((
+                Object error,
+              ) {
+                log.app.debug(
+                  'now_playing_cover_prefetch_failed',
+                  '下一首封面预加载失败',
+                  fields: {'error': error.runtimeType.toString()},
+                );
+              }),
+            );
+          })
+          .catchError((Object error) {
+            log.app.debug(
+              'now_playing_cover_prefetch_failed',
+              '下一首封面读取失败',
+              fields: {'error': error.runtimeType.toString()},
+            );
+          }),
+    );
   }
 
   @override
@@ -3015,6 +3099,7 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
     BoxConstraints constraints,
   ) {
     final coverSize = _coverSizeFor(constraints);
+    _coverSizeForPrefetch = coverSize;
     final textWidth = _textWidthFor(constraints, coverSize);
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 500),
@@ -3086,7 +3171,7 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
                   : Curves.fastOutSlowIn.flipped,
               child: motion,
             )
-          : RepaintBoundary(child: motion),
+          : motion,
     );
   }
 
@@ -3146,13 +3231,18 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
             _immediateCoverPath == nowPlayingPath
         ? _cachedImmediateCoverImage
         : null;
-    final image = currentCover == null && fallbackCover == null
+    final provider = currentCover ?? fallbackCover;
+    final image = provider == null
         ? ColoredBox(
             color: scheme.surfaceContainerHighest.withValues(alpha: 0.28),
             child: Center(child: placeholder),
           )
         : Image(
-            image: currentCover ?? fallbackCover!,
+            image: _resizedCoverProvider(
+              provider,
+              coverSize,
+              MediaQuery.devicePixelRatioOf(context),
+            ),
             fit: BoxFit.cover,
             gaplessPlayback: true,
             filterQuality: _routeReady

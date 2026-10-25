@@ -1595,26 +1595,44 @@ class _HoverableCoverState extends State<_HoverableCover> {
       }
       final fallback = widget.fallbackPic;
       if (fallback == null) return widget.placeholder;
-      return _shapeCover(
+      return RepaintBoundary(
+        child: _shapeCover(
+          Image(
+            image: _resizedCover(fallback),
+            width: widget.size,
+            height: widget.size,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => widget.placeholder,
+          ),
+        ),
+      );
+    }
+    return RepaintBoundary(
+      child: _shapeCover(
         Image(
-          image: fallback,
+          image: _resizedCover(snapshot.data!),
           width: widget.size,
           height: widget.size,
           fit: BoxFit.cover,
           gaplessPlayback: true,
-          errorBuilder: (_, _, _) => widget.placeholder,
+          errorBuilder: (_, _, _) => _errorCover(snapshot.data!),
         ),
-      );
-    }
-    return _shapeCover(
-      Image(
-        image: snapshot.data!,
-        width: widget.size,
-        height: widget.size,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _errorCover(snapshot.data!),
       ),
+    );
+  }
+
+  /// 在线封面按字节缓存原图，这里限制到实际显示像素，切换封面时不再解码整张。
+  ImageProvider<Object> _resizedCover(ImageProvider<Object> provider) {
+    final pixelWidth = (widget.size *
+            MediaQuery.devicePixelRatioOf(context))
+        .round();
+    if (pixelWidth <= 0) return provider;
+    return ResizeImage(
+      provider,
+      width: pixelWidth,
+      height: pixelWidth,
+      allowUpscaling: false,
     );
   }
 
@@ -1625,7 +1643,7 @@ class _HoverableCoverState extends State<_HoverableCover> {
       return widget.placeholder;
     }
     return Image(
-      image: fallback,
+      image: _resizedCover(fallback),
       width: widget.size,
       height: widget.size,
       fit: BoxFit.cover,

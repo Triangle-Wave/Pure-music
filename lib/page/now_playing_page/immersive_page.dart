@@ -368,7 +368,14 @@ class _ImmersiveCoverThumbnailState extends State<_ImmersiveCoverThumbnail> {
       if (image != null) {
         // 预缓存失败记录为 debug 日志，封面由 Image 的 errorBuilder 兜底。
         unawaited(
-          precacheImage(image, context).catchError((Object error) {
+          precacheImage(
+            _resizedCoverProvider(
+              image,
+              widget.size,
+              MediaQuery.devicePixelRatioOf(context),
+            ),
+            context,
+          ).catchError((Object error) {
             log.app.debug(
               'now_playing_cover_precache_failed',
               '沉浸播放封面预加载失败',
@@ -409,7 +416,11 @@ class _ImmersiveCoverThumbnailState extends State<_ImmersiveCoverThumbnail> {
             child: Center(child: placeholder),
           )
         : Image(
-            image: _cover!,
+            image: _resizedCoverProvider(
+              _cover!,
+              widget.size,
+              MediaQuery.devicePixelRatioOf(context),
+            ),
             fit: BoxFit.cover,
             gaplessPlayback: true,
             filterQuality: FilterQuality.high,
