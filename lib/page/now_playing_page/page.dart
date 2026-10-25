@@ -7,6 +7,7 @@ import 'dart:ui';
 
 import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/component/hotkey_ui_feedback.dart';
 import 'package:pure_music/component/motion.dart';
@@ -2946,7 +2947,16 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
         if (!mounted || token != _coverRequestToken) return;
         if (playbackService.nowPlaying?.path != path) return;
         if (image != null) {
-          await precacheImage(image, context);
+          try {
+            await precacheImage(image, context);
+          } catch (error) {
+            // 预缓存失败记录为 debug 日志，封面由 Image 的 errorBuilder 兜底。
+            log.app.debug(
+              'now_playing_cover_precache_failed',
+              '当前播放封面预加载失败',
+              fields: {'error': error.runtimeType.toString()},
+            );
+          }
         }
         if (!mounted || token != _coverRequestToken) return;
         setState(() {

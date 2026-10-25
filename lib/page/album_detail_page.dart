@@ -159,11 +159,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   bool _onlineDone = false;
   bool _onlinePanelClosed = false;
   int _onlineRequestId = 0;
-  late Future<ImageProvider?> _primaryPic = widget.album.cover;
+  late Future<ImageProvider?> _primaryPic;
 
   @override
   void initState() {
     super.initState();
+    _primaryPic = _localCover();
     if (AppSettings.instance.onlineAlbumInfoEnabled) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_loadOnlineInfo());
@@ -182,7 +183,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _selectedArtwork = -1;
       _onlineDone = false;
       _onlinePanelClosed = false;
-      _primaryPic = widget.album.cover;
+      _primaryPic = _localCover();
       if (AppSettings.instance.onlineAlbumInfoEnabled) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) unawaited(_loadOnlineInfo());
@@ -213,13 +214,11 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     if (!mounted) return;
     if (requestId != _onlineRequestId) return;
     final artworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
-    var selected = -1;
-    if (artworks.isNotEmpty) {
-      final previousIndex = previousUrl == null
-          ? -1
-          : artworks.indexWhere((artwork) => artwork.url == previousUrl);
-      selected = previousIndex >= 0 ? previousIndex : 0;
-    }
+    // 默认使用本地专辑封面；只有用户已经选过在线封面、且刷新后该封面
+    // 仍存在时，才继续显示在线图，避免匹配偏差直接覆盖当前专辑封面。
+    final selected = previousUrl == null
+        ? -1
+        : artworks.indexWhere((artwork) => artwork.url == previousUrl);
     setState(() {
       _onlineLoading = false;
       _onlineDone = true;
@@ -229,7 +228,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlinePanelClosed = force ? false : _onlinePanelClosed;
       _primaryPic = selected >= 0
           ? _resolveArtwork(artworks[selected])
-          : widget.album.cover;
+          : _localCover();
     });
   }
 
@@ -237,12 +236,26 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     try {
       final provider = await _onlineAlbum.artwork(artwork.url);
       if (provider != null) return provider;
-      final localCover = await widget.album.cover;
-      return localCover;
+      return _localCover();
     } catch (error) {
       log.library.warn(
         'online_album_artwork_ui_failed',
         '在线封面显示失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return _localCover();
+    }
+  }
+
+  /// 本地专辑封面读取失败时降级为空，避免 Future 错误进入界面。
+  Future<ImageProvider?> _localCover() async {
+    try {
+      final cover = await widget.album.cover;
+      return cover;
+    } catch (error) {
+      log.library.warn(
+        'album_local_cover_failed',
+        '本地专辑封面读取失败',
         fields: {'error': error.runtimeType.toString()},
       );
       return null;
@@ -292,8 +305,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     return _AlbumDetailScaffold(
       album: widget.album,
       primaryPic: _primaryPic,
+      primaryPicFallback: widget.album.cachedDetailCover,
       headerTrailing: _headerTrailing,
-      headerCoverOverlay: _artworks.length > 1
+      headerCoverOverlay: _artworks.isNotEmpty
           ? _ArtworkSwitcher(
               artworks: _artworks,
               selectedIndex: _selectedArtwork,
@@ -308,12 +322,14 @@ class _AlbumDetailScaffold extends StatelessWidget {
   const _AlbumDetailScaffold({
     required this.album,
     required this.primaryPic,
+    this.primaryPicFallback,
     this.headerTrailing,
     this.headerCoverOverlay,
   });
 
   final Album album;
   final Future<ImageProvider?> primaryPic;
+  final ImageProvider? primaryPicFallback;
   final Widget? headerTrailing;
   final Widget? headerCoverOverlay;
 
@@ -332,6 +348,7 @@ class _AlbumDetailScaffold extends StatelessWidget {
       pref: AppPreference.instance.albumDetailPagePref,
       primaryContent: album,
       primaryPic: primaryPic,
+      primaryPicFallback: primaryPicFallback,
       picShape: PicShape.rrect,
       title: album.name,
       subtitle: '${album.works.length} 首作品',
@@ -699,8 +716,10 @@ class _ArtworkSwitcherState extends State<_ArtworkSwitcher> {
   void _move(int delta) {
     final total = widget.artworks.length;
     if (total == 0) return;
-    final current = widget.selectedIndex < 0 ? 0 : widget.selectedIndex;
-    widget.onSelect((current + delta + total) % total);
+    // 未选中在线封面时，右箭头从第一张开始，左箭头从最后一张开始。
+    final current = widget.selectedIndex;
+    final start = current < 0 ? (delta > 0 ? -1 : 0) : current;
+    widget.onSelect((start + delta + total) % total);
   }
 
   @override

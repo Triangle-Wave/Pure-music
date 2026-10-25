@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
@@ -445,13 +446,31 @@ class OnlineAlbumService {
     try {
       final file = await _artworkFile(url);
       if (await file.exists()) {
-        if (!_isExpired(await file.lastModified())) {
-          return MemoryImage(await file.readAsBytes());
+        if (_isExpired(await file.lastModified())) {
+          await _deleteArtworkFile(file, 'expired');
+        } else {
+          final cachedBytes = await file.readAsBytes();
+          if (await canDecodeImageBytes(cachedBytes)) {
+            return MemoryImage(cachedBytes);
+          }
+          log.library.warn(
+            'online_album_artwork_cache_invalid',
+            '在线封面缓存无法解码，已删除并重新下载',
+            fields: {'stage': 'cache'},
+          );
+          await _deleteArtworkFile(file, 'invalid');
         }
-        await file.delete();
       }
       final bytes = await _downloadBytes(url);
       if (bytes == null) return null;
+      if (!await canDecodeImageBytes(bytes)) {
+        log.library.warn(
+          'online_album_artwork_invalid',
+          '在线封面不是可解码的图片，已忽略',
+          fields: {'stage': 'download', 'bytes': bytes.length},
+        );
+        return null;
+      }
       await _writeBytesAtomically(file, bytes);
       return MemoryImage(bytes);
     } catch (error) {
@@ -461,6 +480,18 @@ class OnlineAlbumService {
         fields: {'stage': 'artwork', 'error': error.runtimeType.toString()},
       );
       return null;
+    }
+  }
+
+  Future<void> _deleteArtworkFile(File file, String reason) async {
+    try {
+      await file.delete();
+    } catch (error) {
+      log.library.debug(
+        'online_album_artwork_cleanup_failed',
+        '在线封面缓存清理失败',
+        fields: {'reason': reason, 'error': error.runtimeType.toString()},
+      );
     }
   }
 
@@ -717,6 +748,37 @@ int _levenshtein(String a, String b) {
     previous = current;
   }
   return previous[b.length];
+}
+
+/// 校验字节是否为可解码的图片。
+///
+/// Cover Art Archive 在异常时可能返回 HTML 或截断的图片数据；这些内容
+/// 交给 `Image` 时才报 `Could not decompress image.`。在写入缓存与设置
+/// 主封面之前先解码一次，损坏内容直接丢弃。
+Future<bool> canDecodeImageBytes(Uint8List bytes) async {
+  if (bytes.isEmpty) return false;
+  ui.Codec? codec;
+  ui.FrameInfo? frame;
+  try {
+    final activeCodec = await ui.instantiateImageCodec(bytes);
+    codec = activeCodec;
+    final activeFrame = await activeCodec.getNextFrame();
+    frame = activeFrame;
+    return activeFrame.image.width > 0 && activeFrame.image.height > 0;
+  } catch (error) {
+    log.library.debug(
+      'online_album_artwork_decode_failed',
+      '在线封面解码校验失败',
+      fields: {
+        'bytes': bytes.length,
+        'error': error.runtimeType.toString(),
+      },
+    );
+    return false;
+  } finally {
+    frame?.image.dispose();
+    codec?.dispose();
+  }
 }
 
 String _imageExtension(String url) {

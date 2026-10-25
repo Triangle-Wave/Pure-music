@@ -366,7 +366,16 @@ class _ImmersiveCoverThumbnailState extends State<_ImmersiveCoverThumbnail> {
       if (playbackService.nowPlaying?.path != nextAudio.path) return;
 
       if (image != null) {
-        precacheImage(image, context);
+        // 预缓存失败记录为 debug 日志，封面由 Image 的 errorBuilder 兜底。
+        unawaited(
+          precacheImage(image, context).catchError((Object error) {
+            log.app.debug(
+              'now_playing_cover_precache_failed',
+              '沉浸播放封面预加载失败',
+              fields: {'error': error.runtimeType.toString()},
+            );
+          }),
+        );
       }
 
       if (!mounted || _exiting) return;

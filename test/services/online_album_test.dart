@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/services/online_album/cover_art_client.dart';
@@ -5,6 +8,8 @@ import 'package:pure_music/services/online_album/musicbrainz_client.dart';
 import 'package:pure_music/services/online_album/online_album_service.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('专辑名称与年份匹配', () {
     test('归一化忽略版本后缀与标点', () {
       expect(normalizeForMatch('Abbey Road (Remastered 2009)'), 'abbey road');
@@ -291,6 +296,26 @@ void main() {
       expect(first, same);
       expect(first, isNot(other));
       expect(first, hasLength(40));
+    });
+  });
+
+  group('在线封面字节校验', () {
+    test('拒绝损坏或非图片字节', () async {
+      expect(
+        await canDecodeImageBytes(
+          Uint8List.fromList(utf8.encode('<html>not an image</html>')),
+        ),
+        isFalse,
+      );
+      expect(await canDecodeImageBytes(Uint8List(0)), isFalse);
+    });
+
+    test('接受可解码的 PNG', () async {
+      final bytes = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk'
+        '+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      );
+      expect(await canDecodeImageBytes(bytes), isTrue);
     });
   });
 }

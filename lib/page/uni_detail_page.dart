@@ -66,6 +66,7 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.locateButtonsController,
     this.heroTag,
     this.primaryPicSeed,
+    this.primaryPicFallback,
     this.headerTrailing,
     this.headerCoverOverlay,
   });
@@ -122,6 +123,9 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
 
   /// 列表上已经在显示的封面。飞行动画落地时先画它，避免头图重新加载闪一下。
   final ImageProvider? primaryPicSeed;
+
+  /// 主封面解码失败时回退显示的本地封面。
+  final ImageProvider? primaryPicFallback;
 
   /// 头部附加内容，例如专辑的在线信息面板。宽屏在右侧，中等宽度移到标题下方，
   /// 窄屏不展示。
@@ -511,6 +515,7 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           collapseProgress: collapseProgress,
           heroTag: widget.heroTag,
           initialPic: widget.primaryPicSeed,
+          fallbackPic: widget.primaryPicFallback,
           headerTrailing: widget.headerTrailing,
           headerCoverOverlay: widget.headerCoverOverlay,
         );
@@ -1264,6 +1269,7 @@ class _UniDetailPageHeader extends StatelessWidget {
     this.collapseProgress = 0,
     this.heroTag,
     this.initialPic,
+    this.fallbackPic,
     this.headerTrailing,
     this.headerCoverOverlay,
   });
@@ -1284,19 +1290,14 @@ class _UniDetailPageHeader extends StatelessWidget {
   final double collapseProgress;
   final String? heroTag;
   final ImageProvider? initialPic;
+  final ImageProvider? fallbackPic;
   final Widget? headerTrailing;
   final Widget? headerCoverOverlay;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    if (SidebarMotionScope.hasScope(context)) {
-      return _buildHeaderBody(
-        context,
-        theme,
-        BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width),
-      );
-    }
+    // 头部附加面板按父级实际宽度决定摆放方式；侧栏展开后正文会明显变窄。
     return LayoutBuilder(
       builder: (context, constraints) =>
           _buildHeaderBody(context, theme, constraints),
@@ -1314,10 +1315,17 @@ class _UniDetailPageHeader extends StatelessWidget {
       constraints.maxWidth,
     );
     final compact = layoutWidth < 560;
-    final showTrailing = !compact && headerTrailing != null;
-    final stackTrailing = showTrailing && layoutWidth < 760;
-    final trailingWidth = showTrailing && !stackTrailing
-        ? math.min(340.0, math.max(220.0, layoutWidth * 0.30))
+    // 在线信息面板按头部实际可用宽度摆放：宽屏置右，中等宽度移到
+    // 标题下方，更窄时隐藏，保证标题与操作区有可读宽度。
+    final showSideTrailing =
+        headerTrailing != null && constraints.maxWidth >= 860;
+    final stackTrailing =
+        headerTrailing != null &&
+        !showSideTrailing &&
+        constraints.maxWidth >= 620;
+    final showTrailing = showSideTrailing || stackTrailing;
+    final trailingWidth = showSideTrailing
+        ? math.min(300.0, math.max(220.0, constraints.maxWidth * 0.26))
         : 0.0;
     final expandedCoverSize = compact ? 156.0 : 200.0;
     // Scroll-scrubbed layout stays 1:1 with pixels. Easing the scrub
@@ -1366,6 +1374,7 @@ class _UniDetailPageHeader extends StatelessWidget {
     final image = _HoverableCover(
       futurePic: pic,
       initialPic: initialPic,
+      fallbackPic: fallbackPic,
       picShape: picShape,
       scheme: scheme,
       size: size,
@@ -1416,6 +1425,8 @@ class _UniDetailPageHeader extends StatelessWidget {
       children: [
         Text(
           title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: titleSize,
             color: scheme.onSurface,
@@ -1430,6 +1441,8 @@ class _UniDetailPageHeader extends StatelessWidget {
               opacity: expandedContentOpacity,
               child: Text(
                 subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: AppType.body,
                   color: scheme.onSurfaceVariant,
@@ -1514,6 +1527,7 @@ class _UniDetailPageHeader extends StatelessWidget {
 class _HoverableCover extends StatefulWidget {
   final Future<ImageProvider?> futurePic;
   final ImageProvider? initialPic;
+  final ImageProvider? fallbackPic;
   final PicShape picShape;
   final ColorScheme scheme;
   final double size;
@@ -1523,6 +1537,7 @@ class _HoverableCover extends StatefulWidget {
   const _HoverableCover({
     required this.futurePic,
     this.initialPic,
+    this.fallbackPic,
     required this.picShape,
     required this.scheme,
     required this.size,
@@ -1573,20 +1588,53 @@ class _HoverableCoverState extends State<_HoverableCover> {
   }
 
   Widget _coverSnapshot(AsyncSnapshot<ImageProvider?> snapshot) {
-    if (snapshot.data == null) {
-      if (snapshot.connectionState != ConnectionState.done) {
+    if (snapshot.hasError || snapshot.data == null) {
+      if (!snapshot.hasError &&
+          snapshot.connectionState != ConnectionState.done) {
         return const Center(child: CircularProgressIndicator());
       }
+      final fallback = widget.fallbackPic;
+      if (fallback == null) return widget.placeholder;
+      return _shapeCover(
+        Image(
+          image: fallback,
+          width: widget.size,
+          height: widget.size,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => widget.placeholder,
+        ),
+      );
+    }
+    return _shapeCover(
+      Image(
+        image: snapshot.data!,
+        width: widget.size,
+        height: widget.size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => _errorCover(snapshot.data!),
+      ),
+    );
+  }
+
+  /// 在线封面解码失败时优先回退本地专辑封面；回退图也失败则显示占位。
+  Widget _errorCover(ImageProvider failedProvider) {
+    final fallback = widget.fallbackPic;
+    if (fallback == null || identical(fallback, failedProvider)) {
       return widget.placeholder;
     }
-    final image = Image(
-      image: snapshot.data!,
+    return Image(
+      image: fallback,
       width: widget.size,
       height: widget.size,
       fit: BoxFit.cover,
       gaplessPlayback: true,
       errorBuilder: (_, _, _) => widget.placeholder,
     );
+  }
+
+  Widget _shapeCover(Widget image) {
     return switch (widget.picShape) {
       PicShape.oval => ClipOval(child: image),
       PicShape.rrect => ClipRRect(
