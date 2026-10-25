@@ -49,7 +49,8 @@ LZMAUseSeparateProcess=yes
 SetupLogging=yes
 
 [Languages]
-Name: "zhcn"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 语言文件随仓库提供，相对本脚本所在目录解析，编译不依赖 Inno Setup 安装目录的语言包。
+Name: "zhcn"; MessagesFile: "ChineseSimplified.isl"
 
 [Messages]
 zhcn.TranslatorNote=
