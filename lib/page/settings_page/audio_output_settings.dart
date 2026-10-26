@@ -26,6 +26,7 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
     '44100-24',
     '88200-24',
     '96000-24',
+    '192000-24',
   ];
 
   final _pref = AppPreference.instance.playbackPref;
@@ -388,6 +389,10 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
               DropdownMenuEntry<String>(
                 value: '96000-24',
                 label: '96000 / 24bit',
+              ),
+              DropdownMenuEntry<String>(
+                value: '192000-24',
+                label: '192000 / 24bit',
               ),
             ],
             onSelected: _applying

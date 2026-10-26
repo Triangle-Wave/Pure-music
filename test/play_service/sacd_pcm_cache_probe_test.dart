@@ -67,6 +67,19 @@ void main() {
       );
     });
 
+    test('192000 缓存命中时按原采样率判定为就绪', () async {
+      final dsfPath = await writeReadyCache(sampleRate: 192000);
+
+      expect(
+        await SacdPcmCacheProbe.isReady(
+          dsfPath: dsfPath,
+          sampleRate: 192000,
+          bitDepth: 24,
+        ),
+        isTrue,
+      );
+    });
+
     test('缺少 WAV 时判定为未就绪', () async {
       final dsfPath = await writeReadyCache();
       final wav = File(p.join(dir.path, '2ch-01-44100-24.wav'));

@@ -37,7 +37,13 @@ class PlaybackPreference {
   static const String dsdPlaybackModeDsf = 'dsf';
   static const int defaultSacdPcmSampleRate = 44100;
   static const int defaultSacdPcmBitDepth = 24;
-  static const List<int> sacdPcmSampleRates = [44100, 48000, 88200, 96000];
+  static const List<int> sacdPcmSampleRates = [
+    44100,
+    48000,
+    88200,
+    96000,
+    192000,
+  ];
   static const List<int> sacdPcmBitDepths = [16, 24];
   static const int defaultOutputDeviceId = -1;
   static const String outputModeShared = 'shared';

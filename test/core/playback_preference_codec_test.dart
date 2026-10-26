@@ -72,6 +72,19 @@ void main() {
     expect(preference.sacdPcmBitDepth, 16);
   });
 
+  test('SACD PCM 设置支持 192000Hz 往返', () {
+    final preference = PlaybackPreferenceCodec.decode({
+      'sacdPcmSampleRate': 192000,
+      'sacdPcmBitDepth': 24,
+    });
+    expect(preference.sacdPcmSampleRate, 192000);
+    expect(preference.sacdPcmBitDepth, 24);
+
+    final encoded = PlaybackPreferenceCodec.encode(preference);
+    expect(encoded['sacdPcmSampleRate'], 192000);
+    expect(encoded['sacdPcmBitDepth'], 24);
+  });
+
   test('SACD PCM 设置非法值回退缺省值', () {
     final preference = PlaybackPreferenceCodec.decode({
       'dsdPlaybackMode': 'unknown',
