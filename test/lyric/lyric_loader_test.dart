@@ -95,7 +95,7 @@ void main() {
       '.krc',
       '[1000,1000]<0,1000,0>第一行\n'
           '[2000,1000]<0,1000,0>第二行',
-      '[00:01.00][00:02.00]重复译',
+      transContent: '[00:01.00][00:02.00]重复译',
     );
 
     expect(lyric, isNotNull);
@@ -107,7 +107,7 @@ void main() {
     final lyric = parseKaraokToPureLyric(
       '.krc',
       '[1000,1000]<0,1000,0>第一行',
-      '[00:01]译文',
+      transContent: '[00:01]译文',
     );
 
     expect(lyric, isNotNull);

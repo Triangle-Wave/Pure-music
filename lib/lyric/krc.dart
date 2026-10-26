@@ -106,7 +106,7 @@ class Krc extends Lyric {
         }
         if (tokens == null || tokens.isEmpty) continue;
 
-        lines[i].romanLyric = tokens.join();
+        lines[i].romanLyric = tokens.join(' ');
         lines[i].romanWords = mapRomanWords(
           romanText: tokens.join(' '),
           words: lines[i].words,

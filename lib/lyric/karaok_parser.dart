@@ -168,10 +168,9 @@ List<_LineData> _parseTimedTextLines(String text) {
 /// [romanizationText] 可选的罗马音文本，需带行时间戳
 Lyric? parseKaraokToPureLyric(
   String ext,
-  String content, [
+  String content, {
   String? transContent,
   bool? keepMetadata,
-], {
   String? romanizationText,
 }) {
   final shouldKeepMetadata =

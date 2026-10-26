@@ -32,7 +32,7 @@ void main() {
     );
 
     final line = lyric.lines.single as SyncLyricLine;
-    expect(line.romanLyric, 'kimi');
+    expect(line.romanLyric, 'ki mi');
     expect(line.romanWords, isNotNull);
     expect(line.romanWords, hasLength(2));
     expect(line.romanWords![0].content, 'ki');
@@ -85,10 +85,10 @@ void main() {
 
     final lines = lyric.lines.cast<SyncLyricLine>();
     expect(lines, hasLength(2));
-    expect(lines[0].romanLyric, 'burusukai');
+    expect(lines[0].romanLyric, 'bu ru su ka i');
     expect(lines[0].romanWords, isNotNull);
     expect(lines[0].translation, isNull);
-    expect(lines[1].romanLyric, 'kimino');
+    expect(lines[1].romanLyric, 'ki mi no');
     expect(lines[1].romanWords, hasLength(3));
     expect(lines[1].translation, '你的');
   });
@@ -112,7 +112,7 @@ void main() {
 
     final line = lyric.lines.single as SyncLyricLine;
     expect(line.translation, '你的');
-    expect(line.romanLyric, 'kimi');
+    expect(line.romanLyric, 'ki mi');
     expect(line.romanWords, hasLength(2));
   });
 
@@ -137,7 +137,7 @@ void main() {
 
     final line = lyric.lines.single as SyncLyricLine;
     expect(line.translation, '你的');
-    expect(line.romanLyric, 'kimi');
+    expect(line.romanLyric, 'ki mi');
   });
 
   test('language 行按主歌词序号对齐，空行不影响后续关联', () {
@@ -167,11 +167,11 @@ void main() {
 
     final lines = lyric.lines.cast<SyncLyricLine>();
     expect(lines, hasLength(3));
-    expect(lines[0].romanLyric, 'kimi');
+    expect(lines[0].romanLyric, 'ki mi');
     expect(lines[0].translation, '你的');
     expect(lines[1].words, isEmpty);
     expect(lines[1].romanLyric, isNull);
-    expect(lines[2].romanLyric, 'san');
+    expect(lines[2].romanLyric, 'sa n');
     expect(lines[2].translation, '三');
   });
 }

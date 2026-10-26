@@ -321,7 +321,7 @@ Lyric? _parseExternalToPureLyric(
       return parseKaraokToPureLyric(
         result.ext,
         result.content,
-        transContent,
+        transContent: transContent,
         romanizationText: result.ext == '.krc'
             ? krcLanguage?.romanization
             : null,
