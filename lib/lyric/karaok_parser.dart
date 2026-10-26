@@ -1,6 +1,7 @@
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/lyric/lrc.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 
 // ──────────────────────────────────────────────
 // KaraOK 格式（YRC/QRC/KRC）解析器
@@ -101,8 +102,9 @@ SyncLyricLine _buildLine(
   Duration lineStart,
   Duration lineLength,
   List<_Word> words,
-  String? translation,
-) {
+  String? translation, {
+  String? romanization,
+}) {
   final syncWords = words
       .map(
         (w) => SyncLyricWord(
@@ -113,7 +115,45 @@ SyncLyricLine _buildLine(
       )
       .toList();
 
-  return SyncLyricLine(lineStart, lineLength, syncWords, translation);
+  final line = SyncLyricLine(lineStart, lineLength, syncWords, translation);
+  if (romanization != null && romanization.isNotEmpty && syncWords.isNotEmpty) {
+    line.romanLyric = romanization;
+    line.romanWords = mapRomanWords(
+      romanText: romanization,
+      words: syncWords,
+      lineStart: lineStart,
+      lineLength: lineLength,
+    );
+  }
+  return line;
+}
+
+/// 解析带时间戳的翻译或罗马音文本，按行序返回。
+List<_LineData> _parseTimedTextLines(String text) {
+  final lines = <_LineData>[];
+  for (final rawLine in text.split(RegExp(r'\r?\n'))) {
+    final timestamps = _translationTimestampRe
+        .allMatches(rawLine)
+        .toList(growable: false);
+    final textStart = timestamps.isEmpty ? 0 : timestamps.last.end;
+    for (final timestamp in timestamps) {
+      final startMs = timestamp.group(1) != null
+          ? int.parse(timestamp.group(1)!)
+          : (((int.parse(timestamp.group(2)!) * 60) +
+                        double.parse(timestamp.group(3)!)) *
+                    1000)
+                .round();
+      lines.add(
+        _LineData(
+          start: Duration(milliseconds: startMs),
+          length: Duration.zero,
+          words: [],
+          rawText: rawLine.substring(textStart).trim(),
+        ),
+      );
+    }
+  }
+  return lines;
 }
 
 // ──────────────────────────────────────────────
@@ -125,12 +165,15 @@ SyncLyricLine _buildLine(
 /// [ext] 扩展名（.yrc / .qrc / .krc）
 /// [content] 已解密/解码的歌词文本
 /// [transContent] 可选的翻译文本（QRC/YRC 配对的 .lrc）
+/// [romanizationText] 可选的罗马音文本，需带行时间戳
 Lyric? parseKaraokToPureLyric(
   String ext,
   String content, [
   String? transContent,
   bool? keepMetadata,
-]) {
+], {
+  String? romanizationText,
+}) {
   final shouldKeepMetadata =
       keepMetadata ?? AppSettings.instance.keepLyricMetadata;
   final cfg = _configFor(ext);
@@ -166,37 +209,20 @@ Lyric? parseKaraokToPureLyric(
   if (lines.isEmpty) return null;
 
   // 合并翻译
-  final transLines = <_LineData>[];
-  if (transContent != null && transContent.isNotEmpty) {
-    for (final rawLine in transContent.split(RegExp(r'\r?\n'))) {
-      final timestamps = _translationTimestampRe
-          .allMatches(rawLine)
-          .toList(growable: false);
-      final textStart = timestamps.isEmpty ? 0 : timestamps.last.end;
-      for (var i = 0; i < timestamps.length; i++) {
-        final timestamp = timestamps[i];
-        final startMs = timestamp.group(1) != null
-            ? int.parse(timestamp.group(1)!)
-            : (((int.parse(timestamp.group(2)!) * 60) +
-                          double.parse(timestamp.group(3)!)) *
-                      1000)
-                  .round();
-        transLines.add(
-          _LineData(
-            start: Duration(milliseconds: startMs),
-            length: Duration.zero,
-            words: [],
-            rawText: rawLine.substring(textStart).trim(),
-          ),
-        );
-      }
-    }
-  }
+  final transLines = transContent != null && transContent.isNotEmpty
+      ? _parseTimedTextLines(transContent)
+      : <_LineData>[];
 
-  // 构建最终的 SyncLyricLine 列表（两指针法匹配翻译）
+  // 合并罗马音
+  final romanLines = romanizationText != null && romanizationText.isNotEmpty
+      ? _parseTimedTextLines(romanizationText)
+      : <_LineData>[];
+
+  // 构建最终的 SyncLyricLine 列表（两指针法匹配翻译与罗马音）
   final resultLines = <SyncLyricLine>[];
   const toleranceMs = 300;
   int transIdx = 0;
+  int romanIdx = 0;
 
   for (int i = 0; i < lines.length; i++) {
     final l = lines[i];
@@ -219,7 +245,32 @@ Lyric? parseKaraokToPureLyric(
       }
     }
 
-    final line = _buildLine(l.start, l.length, l.words, translation);
+    String? romanization;
+    while (romanIdx < romanLines.length) {
+      final r = romanLines[romanIdx];
+      final diff = l.start.inMilliseconds - r.start.inMilliseconds;
+
+      if (diff.abs() <= toleranceMs) {
+        final text = r.rawText?.trim();
+        if (text != null && text.isNotEmpty && text != '//') {
+          romanization = text;
+        }
+        romanIdx++;
+        break;
+      } else if (diff < 0) {
+        break;
+      } else {
+        romanIdx++;
+      }
+    }
+
+    final line = _buildLine(
+      l.start,
+      l.length,
+      l.words,
+      translation,
+      romanization: romanization,
+    );
     resultLines.add(line);
   }
 

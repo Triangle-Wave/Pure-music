@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:pure_music/lyric/krc_language_content.dart';
 import 'package:pure_music/lyric/metadata_detector.dart';
 
 /// 从 KRC 解密后的内容中提取翻译和罗马音
@@ -78,14 +79,22 @@ KrcLanguageData? _extractFromJson(Map<String, dynamic> json,
     lineInfo = _extractKrcLineInfo(krcContent);
   }
 
+  final entries = <Map<String, dynamic>?>[];
   for (final content in contentList) {
-    final type = content['type'];
-    final lyricContent = content['lyricContent'];
+    entries.add(content is Map ? Map<String, dynamic>.from(content) : null);
+  }
+  final roles = resolveKrcLanguageRoles(entries);
+
+  for (var i = 0; i < entries.length; i++) {
+    final entry = entries[i];
+    final role = roles[i];
+    if (entry == null || role == null) continue;
+    final lyricContent = entry['lyricContent'];
     if (lyricContent is! List) continue;
 
-    if (type == 1) {
+    if (role == KrcLanguageRole.translation) {
       translation = _formatKrcTranslation(lyricContent, lineInfo);
-    } else if (type == 0) {
+    } else {
       romanization = _formatKrcRomanization(lyricContent, lineInfo);
     }
   }

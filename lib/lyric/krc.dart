@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:pure_music/core/log/app_log.dart';
+import 'package:pure_music/lyric/krc_language_content.dart';
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/metadata_detector.dart';
 import 'package:pure_music/lyric/roman_word_mapper.dart';
@@ -19,6 +21,8 @@ class Krc extends Lyric {
     final shouldKeepMetadata =
         keepMetadata ?? AppSettings.instance.keepLyricMetadata;
     final List<KrcLine> lines = [];
+    final List<int> sourceLineIndexes = [];
+    var karaokeLineCount = 0;
     String? languageFrame;
 
     final splited = krc.split('\n');
@@ -45,7 +49,7 @@ class Krc extends Lyric {
         final tag = item.substring(bracketStart + 1, bracketEnd);
         var splitedTag = tag.split(':');
         final tagName = splitedTag.firstOrNull;
-        if (tagName?.contains('language') == true) {
+        if (tagName?.contains('language') == true && splitedTag.length > 1) {
           languageFrame = splitedTag[1];
         }
       }
@@ -53,6 +57,8 @@ class Krc extends Lyric {
       final krcLine = KrcLine.fromLine(item, null, offset);
 
       if (krcLine == null) continue;
+
+      final sourceLineIndex = karaokeLineCount++;
 
       // 过滤主歌词中的元数据行（作曲、作词等）
       final lineContent = krcLine.words.map((w) => w.content).join();
@@ -63,65 +69,50 @@ class Krc extends Lyric {
       }
 
       lines.add(krcLine);
+      sourceLineIndexes.add(sourceLineIndex);
     }
 
     if (languageFrame != null) {
-      final Map<String, dynamic> languageMap =
-          json.decode(utf8.decode(base64.decode(languageFrame)));
-      List<String> trans = [];
-      List<String> romas = [];
-      final List<List<String>> romaTokenLines = [];
-      for (var item in languageMap['content']) {
-        if (item['type'] == 1) {
-          final List<dynamic> transContent = item['lyricContent'];
-          for (final List<dynamic> transLine in transContent) {
-            final text = transLine.first;
-            // 过滤元数据行（作曲、作词、编曲等）
-            if (!_isMetadataLine(text)) {
-              trans.add(text);
-            }
-          }
-        } else if (item['type'] == 0) {
-          // type=0 是注音（罗马音），数组内每个元素对应一个主词的读音。
-          final List<dynamic> romaContent = item['lyricContent'];
-          for (final List<dynamic> romaLine in romaContent) {
-            final tokens = romaLine
-                .map((token) => token?.toString().trim() ?? '')
-                .where((token) => token.isNotEmpty)
-                .toList();
-            romaTokenLines.add(tokens);
-            romas.add(tokens.join());
-          }
-        }
-      }
+      final language = _parseLanguageFrame(languageFrame);
+      final alignedByLine = language.lineCount == karaokeLineCount;
+      final translationList = language.translations.values.toList(
+        growable: false,
+      );
+      final romanizationList = language.romanizations.values.toList(
+        growable: false,
+      );
+      var translationCursor = 0;
+      var romanizationCursor = 0;
 
-      // 关联翻译到歌词行，跳过空歌词行
-      int transIt = 0;
-      for (int i = 0; i < lines.length; i++) {
+      for (var i = 0; i < lines.length; i++) {
         if (lines[i].words.isEmpty) continue;
-        if (transIt < trans.length) {
-          lines[i].translation = trans[transIt];
-          transIt++;
-        }
-      }
+        final sourceLineIndex = sourceLineIndexes[i];
 
-      // 关联罗马音到歌词行，跳过空歌词行
-      int romaIt = 0;
-      for (int i = 0; i < lines.length; i++) {
-        if (lines[i].words.isEmpty) continue;
-        if (romaIt < romas.length) {
-          lines[i].romanLyric = romas[romaIt];
-          final tokens = romaTokenLines[romaIt];
-          if (tokens.isNotEmpty) {
-            lines[i].romanWords = mapRomanWords(
-              romanText: tokens.join(' '),
-              words: lines[i].words,
-              lineStart: lines[i].start,
-              lineLength: lines[i].length,
-            );
-          }
-          romaIt++;
+        String? translation;
+        if (alignedByLine) {
+          translation = language.translations[sourceLineIndex];
+        } else if (translationCursor < translationList.length) {
+          translation = translationList[translationCursor++];
         }
+        if (translation != null && translation.isNotEmpty) {
+          lines[i].translation = translation;
+        }
+
+        List<String>? tokens;
+        if (alignedByLine) {
+          tokens = language.romanizations[sourceLineIndex];
+        } else if (romanizationCursor < romanizationList.length) {
+          tokens = romanizationList[romanizationCursor++];
+        }
+        if (tokens == null || tokens.isEmpty) continue;
+
+        lines[i].romanLyric = tokens.join();
+        lines[i].romanWords = mapRomanWords(
+          romanText: tokens.join(' '),
+          words: lines[i].words,
+          lineStart: lines[i].start,
+          lineLength: lines[i].length,
+        );
       }
     }
 
@@ -144,7 +135,24 @@ class Krc extends Lyric {
       fommatedLines.add(lastLine);
     }
 
-    return Krc(fommatedLines);
+    return Krc(fommatedLines, LyricFormat.local, krc);
+  }
+
+  /// 解码 `[language:...]` 帧；帧损坏时按无翻译无注音处理。
+  static KrcLanguageContent _parseLanguageFrame(String frame) {
+    try {
+      final decoded = json.decode(utf8.decode(base64.decode(frame)));
+      if (decoded is! Map<String, dynamic>) return emptyKrcLanguageContent;
+      return parseKrcLanguageContent(decoded['content']);
+    } catch (error, trace) {
+      log.lyric.warn(
+        'lyric.parse',
+        'KRC language 帧解析失败',
+        error: error,
+        stackTrace: trace,
+      );
+      return emptyKrcLanguageContent;
+    }
   }
 
   @override
@@ -156,7 +164,12 @@ class Krc extends Lyric {
 class KrcLine extends SyncLyricLine {
   KrcLine(super.start, super.length, super.words, [super.translation]);
 
+  static final RegExp _headerRe = RegExp(r'^\[(\d+),(\d+)\]');
+
   static KrcLine? fromLine(String line, [String? translation, int offset = 0]) {
+    // 只接受 KRC 行头，避免把 [ti:...]、[language:...] 等标签当成歌词行。
+    if (!_headerRe.hasMatch(line)) return null;
+
     final splitedLine = line.split(']');
     final from = splitedLine[0].indexOf('[') + 1;
     final splitedTime = splitedLine[0].substring(from).split(',');

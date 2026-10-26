@@ -138,4 +138,37 @@ void main() {
       expect(third.romanization, 'sa n');
     },
   );
+
+  test('detects romanization and translation when type is absent', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'lyricContent': [
+                ['kyo ku', 'sa ku'],
+                ['i chi'],
+              ],
+            },
+            {
+              'lyricContent': [
+                ['曲译'],
+                ['一译'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final main =
+        '[language:$language]\n'
+        '[1000,900]<0,900,0>第一行\n'
+        '[2000,900]<0,900,0>第二行';
+    final languageData = extractKrcLanguage(main)!;
+
+    expect(languageData.romanization, contains('kyo ku sa ku'));
+    expect(languageData.romanization, contains('i chi'));
+    expect(languageData.translation, contains('曲译'));
+    expect(languageData.translation, contains('一译'));
+  });
 }

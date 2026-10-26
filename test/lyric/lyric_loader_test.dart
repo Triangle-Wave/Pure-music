@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/lyric/karaok_parser.dart';
+import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/lyric_loader.dart';
 
 void main() {
@@ -111,5 +112,71 @@ void main() {
 
     expect(lyric, isNotNull);
     expect(lyric!.lines.single.translation, '译文');
+  });
+
+  test('restores romanization embedded in a local KRC file', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'type': 0,
+              'lyricContent': [
+                ['ki', 'mi'],
+              ],
+            },
+            {
+              'type': 1,
+              'lyricContent': [
+                ['你的'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final lyric = parseExternalLyricText(
+      '[language:$language]\n'
+          '[1000,1000]<0,500,0>君<500,500,0>の',
+      '.krc',
+    );
+
+    expect(lyric, isNotNull);
+    final line = lyric!.lines.single as SyncLyricLine;
+    expect(line.romanLyric, 'ki mi');
+    expect(line.romanWords, hasLength(2));
+    expect(line.translation, '你的');
+  });
+
+  test('restores romanization when language entries have no type', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'lyricContent': [
+                ['ki', 'mi'],
+              ],
+            },
+            {
+              'lyricContent': [
+                ['你的'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final lyric = parseExternalLyricText(
+      '[language:$language]\n'
+          '[1000,1000]<0,500,0>君<500,500,0>の',
+      '.krc',
+    );
+
+    expect(lyric, isNotNull);
+    final line = lyric!.lines.single as SyncLyricLine;
+    expect(line.romanLyric, 'ki mi');
+    expect(line.romanWords, hasLength(2));
+    expect(line.translation, '你的');
   });
 }
