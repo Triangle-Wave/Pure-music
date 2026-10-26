@@ -73,6 +73,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
   final OnlineArtistImageService _online = OnlineArtistImageService.instance;
 
   OnlineArtistCandidateCache? _candidateCache;
+  OnlineQueryStatus? _onlineStatus;
   bool _onlineLoading = false;
   int _onlineRequestId = 0;
   late Future<ImageProvider?> _primaryPic;
@@ -95,6 +96,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       _onlineRequestId++;
       _onlineLoading = false;
       _candidateCache = null;
+      _onlineStatus = null;
       _primaryPic = _artistPicture(widget.artist);
       if (AppSettings.instance.onlineArtistImageEnabled) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -129,6 +131,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     setState(() {
       _onlineLoading = false;
       _candidateCache = cache;
+      _onlineStatus = _online.queryStatusFor(widget.artist.name);
       if (force) _primaryPic = _artistPicture(widget.artist);
     });
   }
@@ -216,6 +219,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       source: cache?.activeCandidate?.source,
       candidateCount: cache?.candidates.length ?? 0,
       disabled: cache?.disabled ?? false,
+      status: _onlineStatus,
       loading: _onlineLoading,
       onChoose: _chooseCandidate,
       onRefresh: _onlineLoading
@@ -291,12 +295,14 @@ class _ArtistOnlinePanel extends StatelessWidget {
     required this.loading,
     required this.onChoose,
     required this.onRefresh,
+    this.status,
   });
 
   final String? source;
   final int candidateCount;
   final bool disabled;
   final bool loading;
+  final OnlineQueryStatus? status;
   final VoidCallback? onChoose;
   final VoidCallback? onRefresh;
 
@@ -365,11 +371,7 @@ class _ArtistOnlinePanel extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                disabled
-                    ? '在线头像已隐藏，使用本地图片或占位图。'
-                    : candidateCount > 1
-                    ? '$candidateCount 个候选，可手动切换来源。'
-                    : '仅使用最佳匹配的头像来源。',
+                _statusText(),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -382,6 +384,18 @@ class _ArtistOnlinePanel extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _statusText() {
+    if (disabled) return '在线头像已隐藏，使用本地图片或占位图。';
+    if (loading) return '正在读取在线艺术家头像…';
+    return switch (status) {
+      OnlineQueryStatus.failed => '在线源请求失败，可点刷新重试',
+      OnlineQueryStatus.noMatch => '没有匹配的艺术家头像，可点刷新重试',
+      _ => candidateCount > 1
+          ? '$candidateCount 个候选，可手动切换来源。'
+          : '仅使用最佳匹配的头像来源。',
+    };
   }
 
   Widget _panelButton(

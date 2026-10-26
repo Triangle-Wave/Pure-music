@@ -1,6 +1,9 @@
 import 'package:pure_music/services/online_album/album_match.dart';
 import 'package:pure_music/services/online_album/cover_art_client.dart';
 
+/// 一次在线查询的结果状态，用于面板区分“没有匹配”和“请求失败”。
+enum OnlineQueryStatus { success, noMatch, failed }
+
 class OnlineAlbumArtwork {
   const OnlineAlbumArtwork({
     required this.url,

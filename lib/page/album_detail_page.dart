@@ -156,6 +156,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
   OnlineAlbumCandidateCache? _candidateCache;
   OnlineAlbumInfo? _onlineInfo;
+  OnlineQueryStatus? _onlineStatus;
   List<OnlineAlbumArtwork> _artworks = const [];
   int _selectedArtwork = -1;
   bool _onlineLoading = false;
@@ -184,6 +185,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlineRequestId++;
       _onlineLoading = false;
       _onlineInfo = null;
+      _onlineStatus = null;
       _candidateCache = null;
       _artworks = const [];
       _selectedArtwork = -1;
@@ -266,6 +268,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlineDone = true;
       _candidateCache = cache;
       _onlineInfo = info;
+      _onlineStatus = _onlineAlbum.queryStatusFor(widget.album);
       _artworks = artworks;
       _selectedArtwork = selected;
       _primaryPic = Future<ImageProvider?>.value(cover);
@@ -412,6 +415,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       info: _onlineInfo,
       loading: _onlineLoading,
       disabled: _onlineDisabled,
+      status: _onlineStatus,
       onChoose: _chooseCandidate,
       onRefresh: _onlineLoading ? null : _refreshOnlineInfo,
       onClose: _closeOnlinePanel,
@@ -557,6 +561,7 @@ class OnlineAlbumPanel extends StatelessWidget {
     required this.info,
     required this.loading,
     this.disabled = false,
+    this.status,
     this.onRefresh,
     this.onChoose,
     this.onClose,
@@ -565,6 +570,7 @@ class OnlineAlbumPanel extends StatelessWidget {
   final OnlineAlbumInfo? info;
   final bool loading;
   final bool disabled;
+  final OnlineQueryStatus? status;
   final VoidCallback? onRefresh;
   final VoidCallback? onChoose;
   final VoidCallback? onClose;
@@ -664,7 +670,12 @@ class OnlineAlbumPanel extends StatelessWidget {
   String _statusText(OnlineAlbumInfo? current) {
     if (disabled) return '在线信息已隐藏，封面使用本地图片；可通过“选择来源”恢复。';
     if (current == null) {
-      return loading ? '正在读取专辑信息…' : '暂无在线信息';
+      if (loading) return '正在读取专辑信息…';
+      return switch (status) {
+        OnlineQueryStatus.failed => '在线源请求失败，可点刷新重试',
+        OnlineQueryStatus.noMatch => '在线源无匹配结果，可点刷新重试',
+        _ => '暂无在线信息',
+      };
     }
     final parts = <String>[
       if (current.year != null) '${current.year}',

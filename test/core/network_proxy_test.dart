@@ -265,12 +265,12 @@ void main() {
     });
   });
 
-  test('全局覆盖关闭自动解压', () {
+  test('全局覆盖保留自动解压', () {
     final client = AppHttpOverrides(
       config: const ProxyConfig(mode: ProxyMode.direct),
     ).createHttpClient(null);
 
-    expect(client.autoUncompress, isFalse);
+    expect(client.autoUncompress, isTrue);
     client.close(force: true);
   });
 }

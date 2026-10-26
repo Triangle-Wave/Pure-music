@@ -282,8 +282,9 @@ class AppHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
     final client = super.createHttpClient(context);
-    // 与 Dio 默认适配器、更新下载与图片加载行为保持一致。
-    client.autoUncompress = false;
+    // Dio 的 IO 适配器直接转发响应流，不做解压；关闭自动解压会让 gzip
+    // 响应以压缩字节进入 JSON 与图片解析，最终表现为 DioException(unknown)。
+    client.autoUncompress = true;
     applyProxyToHttpClient(client, config);
     return client;
   }

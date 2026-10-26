@@ -236,6 +236,36 @@ void main() {
       expect(cache.info, isNull);
     });
 
+    test('空候选缓存不会阻止下次重新查询', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_album');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      final album = _abbeyRoad();
+      final emptyClient = _FakeCnMusicClient(const []);
+      final first = OnlineAlbumService.createForTest(
+        cnMusic: emptyClient,
+        musicBrainz: _FakeMusicBrainzClient(),
+        appDataDirectory: () async => dir,
+      );
+      final empty = await first.loadCandidates(album);
+      expect(empty, isNull);
+      expect(emptyClient.calls, 1);
+      expect(first.queryStatusFor(album), OnlineQueryStatus.noMatch);
+
+      final client = _FakeCnMusicClient(const [_netease]);
+      final second = OnlineAlbumService.createForTest(
+        cnMusic: client,
+        musicBrainz: _FakeMusicBrainzClient(),
+        appDataDirectory: () async => dir,
+      );
+      final cache = await second.loadCandidates(album);
+      expect(client.calls, 1);
+      expect(cache!.candidates, hasLength(1));
+      expect(cache.info?.title, 'Abbey Road');
+      expect(second.queryStatusFor(album), OnlineQueryStatus.success);
+    });
+
     test('缓存损坏时删除文件并重新查询', () async {
       final dir = await Directory.systemTemp.createTemp('pure_music_album');
       addTearDown(() async {
@@ -297,6 +327,7 @@ void main() {
       expect(failingMb.calls, 1);
       expect(cache!.candidates, hasLength(1));
       expect(cache.info?.title, 'Abbey Road');
+      expect(second.queryStatusFor(album), OnlineQueryStatus.failed);
     });
 
     test('低分候选不自动展示，但可以手动选择', () async {

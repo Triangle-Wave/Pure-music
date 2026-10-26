@@ -17,10 +17,11 @@ import 'package:pure_music/services/online_album/online_album_service.dart';
 /// 艺术家头像服务。
 ///
 /// 按艺术家名搜索网易云、QQ 音乐与酷狗音乐的歌手头像，把全部候选与当前
-/// 选择写入缓存根下的 `online_album/artist/<sha1>.json`。旧位置
+/// 选择写入缓存根下的 `online_album/artist/<sha1>.json`。命中非空缓存时不再
+/// 搜索，空候选缓存会在下次访问时重新搜索。旧位置
 /// `<数据根>/online_album/artist` 的文件可继续作为只读回退命中。图片本身由
 /// [OnlineAlbumService.artwork] 写入缓存根下的 `covers/` 并返回 `FileImage`，
-/// 重启后仍直接读盘。选择“不使用”时不再请求在线图片；所有失败都静默降级为
+/// 重启后仍直接读盘。选择“不使用”时不再请求在线图片；所有失败都降级为
 /// 占位图。
 class OnlineArtistImageService {
   OnlineArtistImageService._({
@@ -76,17 +77,25 @@ class OnlineArtistImageService {
   final Future<void> Function(String url) _artworkInvalidator;
   final Duration cacheTtl;
 
-  /// 空候选只保留一天，避免新上架的歌手长期没有头像。
+  /// 空候选缓存只保留一天；读取到空缓存时仍会重新搜索。
   static const Duration _emptyCacheTtl = Duration(days: 1);
 
   final Map<String, Future<ImageProvider?>> _memory = {};
   final Map<String, OnlineArtistCandidateCache> _candidateMemory = {};
+  final Map<String, OnlineQueryStatus> _queryStatuses = {};
   final Map<String, Future<OnlineArtistCandidateCache?>> _pendingCandidates =
       {};
   final List<Completer<void>> _searchWaiters = [];
   Directory? _cacheDir;
   int _activeSearches = 0;
   int _selectionRevision = 0;
+
+  /// 最近一次查询的状态；页面据此区分“无匹配”与“请求失败”。
+  OnlineQueryStatus? queryStatusFor(String artistName) {
+    final name = artistName.trim();
+    if (name.isEmpty) return null;
+    return _queryStatuses[cacheKeyForArtist(name)];
+  }
 
   /// 选择变化计数；列表项用它作为图片请求标识，保证跨页面同步刷新。
   int get selectionRevision => _selectionRevision;
@@ -209,6 +218,7 @@ class OnlineArtistImageService {
   Future<void> clearCache() async {
     _memory.clear();
     _candidateMemory.clear();
+    _queryStatuses.clear();
     _pendingCandidates.clear();
     _cacheDir = null;
     _selectionRevision++;
@@ -284,18 +294,27 @@ class OnlineArtistImageService {
       );
       previous = null;
     }
-    if (!force && previous != null) return previous;
+    if (!force && previous != null && previous.candidates.isNotEmpty) {
+      _queryStatuses[key] = OnlineQueryStatus.success;
+      return previous;
+    }
 
     List<CnArtistCandidate> candidates;
+    final stopwatch = Stopwatch()..start();
     try {
       candidates = await _withSearchSlot(
         () => _cnMusic.searchArtists(name: name),
       );
     } catch (error) {
+      _queryStatuses[key] = OnlineQueryStatus.failed;
       log.library.warn(
         'online_artist_image_search_failed',
         '艺术家头像搜索失败',
-        fields: {'error': error.runtimeType.toString()},
+        fields: {
+          'cacheKey': key,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+          'error': error.runtimeType.toString(),
+        },
       );
       return previous;
     }
@@ -323,7 +342,30 @@ class OnlineArtistImageService {
     }
     ranked.sort((a, b) => b.score.compareTo(a.score));
 
-    if (ranked.isEmpty && previous != null) return previous;
+    if (ranked.isEmpty) {
+      _queryStatuses[key] = OnlineQueryStatus.noMatch;
+      log.library.info(
+        'online_artist_image_search_empty',
+        '艺术家头像搜索没有结果',
+        fields: {
+          'cacheKey': key,
+          'candidates': candidates.length,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+        },
+      );
+      if (previous != null && previous.candidates.isNotEmpty) return previous;
+    } else {
+      _queryStatuses[key] = OnlineQueryStatus.success;
+      log.library.info(
+        'online_artist_image_search',
+        '艺术家头像搜索完成',
+        fields: {
+          'cacheKey': key,
+          'count': ranked.length,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+        },
+      );
+    }
 
     final selectedId = previous?.selectedCandidateId;
     final stillExists =

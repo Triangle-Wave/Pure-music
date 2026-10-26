@@ -24,18 +24,21 @@ import 'package:pure_music/services/online_album/online_album_models.dart';
 export 'package:pure_music/services/online_album/album_match.dart';
 export 'package:pure_music/services/online_album/online_album_models.dart';
 
-/// 专辑信息与候选默认长期保留；只有用户主动刷新或清理缓存才重新请求。
+/// 专辑信息与候选默认长期保留；非空缓存只有用户主动刷新或清理缓存才重新请求，
+/// 空候选缓存会在下次访问时重新查询。
 const Duration onlineAlbumCacheTtl = Duration(days: 365);
 
 /// 在线专辑信息服务。
 ///
 /// 每次查询把全部候选写入缓存根下的
 /// `online_album/candidates/<sha1>.json`，同文件记录当前选择
-/// （`selectedCandidateId` 或 `disabled`）。命中缓存时不再发网络请求，只有
-/// [loadCandidates] / [lookup] 传入 `force: true` 才重新查询并保留用户选择。
+/// （`selectedCandidateId` 或 `disabled`）。命中非空缓存时不再发网络请求，
+/// 空候选缓存会在下次访问时重新查询；只有 [loadCandidates] / [lookup]
+/// 传入 `force: true` 才强制重新查询并保留用户选择。
 /// 封面图片由 [CoverDiskCache] 统一写入缓存根下的 `covers/`，同一进程与磁盘
 /// 有效期内都不再下载。旧位置 `<数据根>/online_album` 的文件可继续作为只读
-/// 回退命中。网络、文件与 JSON 错误都降级为“暂无信息”，不会把错误抛到界面。
+/// 回退命中。网络、文件与 JSON 错误都降级为空结果，不会把错误抛到界面；
+/// [queryStatusFor] 记录最近一次查询是成功、无匹配还是请求失败。
 class OnlineAlbumService {
   OnlineAlbumService._({
     MusicBrainzClient? musicBrainz,
@@ -93,8 +96,13 @@ class OnlineAlbumService {
 
   final Map<String, Future<OnlineAlbumCandidateCache?>> _pendingLookups = {};
   final Map<String, OnlineAlbumCandidateCache> _albumMemory = {};
+  final Map<String, OnlineQueryStatus> _queryStatuses = {};
   final Map<String, Future<ImageProvider?>> _artworkMemory = {};
   Directory? _rootDir;
+
+  /// 最近一次查询的状态；页面据此区分“无匹配”与“请求失败”。
+  OnlineQueryStatus? queryStatusFor(Album album) =>
+      _queryStatuses[cacheKeyForAlbum(album)];
 
   /// 缓存根设置变化后调用，下一次访问重新解析目录。
   void invalidateCacheRoot() {
@@ -216,6 +224,7 @@ class OnlineAlbumService {
   Future<void> clearCache() async {
     _albumMemory.clear();
     _pendingLookups.clear();
+    _queryStatuses.clear();
     _artworkMemory.clear();
     try {
       final roots = <Directory>[await _root(), ...await _legacyRoots()];
@@ -259,13 +268,51 @@ class OnlineAlbumService {
       );
       previous = null;
     }
-    if (!force && previous != null) return previous;
+    if (!force && previous != null && previous.candidates.isNotEmpty) {
+      final hasMatch = previous.candidates.any(
+        (candidate) => candidate.score >= minimumOnlineAlbumScore,
+      );
+      _queryStatuses[key] = hasMatch
+          ? OnlineQueryStatus.success
+          : OnlineQueryStatus.noMatch;
+      return previous;
+    }
 
     final fetched = await _fetchCandidatesSafely(album);
-    if (fetched == null || fetched.isEmpty) {
+    if (fetched == null) {
+      _queryStatuses[key] = OnlineQueryStatus.failed;
+      log.library.warn(
+        'online_album_query_failed',
+        '在线专辑查询失败',
+        fields: {'cacheKey': key, 'hasCache': previous != null},
+      );
       // 网络失败或没有结果时继续使用旧缓存，避免刷新把已有信息清空。
       return previous;
     }
+    if (fetched.isEmpty) {
+      _queryStatuses[key] = OnlineQueryStatus.noMatch;
+      log.library.info(
+        'online_album_query_empty',
+        '在线专辑查询没有结果',
+        fields: {'cacheKey': key, 'hasCache': previous != null},
+      );
+      return previous;
+    }
+    final hasMatch = fetched.any(
+      (candidate) => candidate.score >= minimumOnlineAlbumScore,
+    );
+    _queryStatuses[key] = hasMatch
+        ? OnlineQueryStatus.success
+        : OnlineQueryStatus.noMatch;
+    log.library.info(
+      'online_album_query',
+      '在线专辑查询完成',
+      fields: {
+        'cacheKey': key,
+        'count': fetched.length,
+        'hasMatch': hasMatch,
+      },
+    );
     final selectedId = previous?.selectedCandidateId;
     final stillExists =
         selectedId != null &&
@@ -426,7 +473,7 @@ class OnlineAlbumService {
     try {
       candidates = await _cnMusic.searchAlbums(title: title, artist: artist);
     } catch (error) {
-      log.library.debug(
+      log.library.warn(
         'online_album_cn_search_failed',
         '国内音乐源搜索失败',
         fields: {'error': error.runtimeType.toString()},
@@ -506,7 +553,7 @@ class OnlineAlbumService {
         artist: artist,
       );
     } catch (error) {
-      log.library.debug(
+      log.library.warn(
         'online_album_musicbrainz_search_failed',
         'MusicBrainz 搜索失败',
         fields: {'error': error.runtimeType.toString()},
@@ -783,7 +830,12 @@ class OnlineAlbumService {
       log.library.warn(
         'online_album_artwork_failed',
         '在线封面下载失败',
-        fields: {'stage': 'download', 'error': error.type.name},
+        fields: {
+          'stage': 'download',
+          'host': Uri.tryParse(url)?.host ?? '',
+          'status': error.response?.statusCode ?? 0,
+          'error': error.type.name,
+        },
       );
       return null;
     }

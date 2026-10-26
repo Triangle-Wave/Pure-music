@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:github/github.dart' as gh;
 import 'package:pure_music/core/app_http.dart';
@@ -25,13 +27,50 @@ enum UpdateChannel {
   };
 }
 
+/// 更新检查失败的可区分原因，设置页据此给出可操作的提示。
+enum UpdateCheckFailure { rateLimited, timeout, connection, server, unknown }
+
 class UpdateCheckException implements Exception {
-  const UpdateCheckException(this.channel);
+  const UpdateCheckException(
+    this.channel, {
+    this.failure = UpdateCheckFailure.unknown,
+    this.statusCode,
+  });
 
   final UpdateChannel channel;
+  final UpdateCheckFailure failure;
+  final int? statusCode;
+
+  String get message => switch (failure) {
+    UpdateCheckFailure.rateLimited => 'GitHub 接口限流，请稍后再试',
+    UpdateCheckFailure.timeout => '连接更新源超时，请检查代理设置后重试',
+    UpdateCheckFailure.connection => '无法连接更新源，请检查代理设置后重试',
+    UpdateCheckFailure.server =>
+      '更新源返回异常（HTTP ${statusCode ?? '未知'}），请稍后再试',
+    UpdateCheckFailure.unknown => '检查更新失败，请稍后再试',
+  };
 
   @override
-  String toString() => '无法连接${channel.label}更新源';
+  String toString() => message;
+}
+
+/// 从 GitHub `releases/latest` 的 `Location` 头解析标签名。
+///
+/// 支持绝对地址与相对路径：`.../releases/tag/v2.3.7`。
+String? latestTagFromReleaseLocation(String? location) {
+  final raw = location?.trim();
+  if (raw == null || raw.isEmpty) return null;
+  final uri = Uri.tryParse(raw);
+  if (uri == null) return null;
+  final segments = uri.pathSegments
+      .where((segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  for (var i = segments.length - 3; i >= 0; i--) {
+    if (segments[i] != 'releases' || segments[i + 1] != 'tag') continue;
+    final tag = segments[i + 2].trim();
+    return tag.isEmpty ? null : tag;
+  }
+  return null;
 }
 
 /// 版本更新信息（来源无关的数据模型）
@@ -538,16 +577,32 @@ class UpdateChecker {
     _logProxyContext();
     final slug = AppPreference.instance.updateRepoSlug;
     final apiUrl = '$_githubApiBase/$slug/releases/latest';
-    final fromApi = await _checkReleaseApi(apiUrl, channel, slug);
+    final api = await _checkReleaseApi(apiUrl, channel, slug);
+    final fromApi = api.info;
     if (fromApi != null &&
         fromApi.hasChecksum(channel: channel, portableBuild: portableBuild)) {
       return fromApi;
     }
 
+    final tagInfo = api.rateLimited
+        ? await _checkLatestTagFromReleasePage(slug)
+        : null;
     final fallback = await _firstFallbackInfo(channel);
     if (fromApi != null) return fromApi.withFallbackChecksums(fallback);
+    if (tagInfo != null) {
+      log.update.info(
+        'legacy',
+        '[UpdateChecker] GitHub API 限流，已从发布页解析最新版本 '
+        '${tagInfo.tagName}',
+      );
+      return tagInfo.withFallbackChecksums(fallback);
+    }
     if (fallback != null) return fallback;
-    throw const UpdateCheckException(UpdateChannel.supported);
+    throw UpdateCheckException(
+      channel,
+      failure: api.failure,
+      statusCode: api.statusCode,
+    );
   }
 
   /// 记录本次更新检查使用的代理目标，便于定位代理连接与请求失败。
@@ -572,7 +627,7 @@ class UpdateChecker {
     return null;
   }
 
-  static Future<UpdateInfo?> _checkReleaseApi(
+  static Future<_ReleaseApiResult> _checkReleaseApi(
     String url,
     UpdateChannel channel,
     String repositorySlug,
@@ -595,18 +650,82 @@ class UpdateChecker {
         ),
       );
       final data = response.data;
-      if (data == null) return null;
+      if (data == null) {
+        return _ReleaseApiResult(statusCode: response.statusCode);
+      }
       final info = UpdateInfo.fromReleaseJson(
         data,
         channel: channel,
         repositorySlug: repositorySlug,
       );
-      if (info.tagName.isEmpty) return null;
-      return info;
+      if (info.tagName.isEmpty) {
+        return _ReleaseApiResult(statusCode: response.statusCode);
+      }
+      return _ReleaseApiResult(
+        info: info,
+        statusCode: response.statusCode,
+      );
     } catch (error) {
+      final status = error is DioException
+          ? error.response?.statusCode
+          : null;
       log.update.warn(
         'legacy',
         '[UpdateChecker] ${channel.name} release API failed: '
+        '${_describeNetworkError(error)}',
+        fields: {'error': _describeNetworkError(error)},
+      );
+      return _ReleaseApiResult(
+        statusCode: status,
+        rateLimited: status == 403 || status == 429,
+        errorType: error is DioException ? error.type : null,
+      );
+    }
+  }
+
+  /// API 限流时读取 GitHub 发布页的 302 `Location`，仅用于取版本号。
+  static Future<UpdateInfo?> _checkLatestTagFromReleasePage(
+    String repositorySlug,
+  ) async {
+    final url = 'https://github.com/$repositorySlug/releases/latest';
+    try {
+      final response = await AppHttp.instance.dio.get<void>(
+        url,
+        options: Options(
+          followRedirects: false,
+          responseType: ResponseType.plain,
+          connectTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+          headers: const {
+            'User-Agent': 'Pure-Music-Updater',
+            'Accept': 'text/html,application/xhtml+xml',
+          },
+          validateStatus: (status) =>
+              status != null && status >= 200 && status < 400,
+        ),
+      );
+      final tag = latestTagFromReleaseLocation(
+        response.headers.value('location'),
+      );
+      if (tag == null) {
+        log.update.warn(
+          'legacy',
+          '[UpdateChecker] GitHub 发布页未返回可解析的版本标签',
+          fields: {
+            'host': 'github.com',
+            'status': response.statusCode ?? 0,
+          },
+        );
+        return null;
+      }
+      return UpdateInfo(
+        tagName: tag,
+        htmlUrl: 'https://github.com/$repositorySlug/releases/tag/$tag',
+      );
+    } catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateChecker] GitHub 发布页解析失败: '
         '${_describeNetworkError(error)}',
         fields: {'error': _describeNetworkError(error)},
       );
@@ -626,17 +745,21 @@ class UpdateChecker {
     UpdateChannel channel,
   ) async {
     try {
-      final response = await AppHttp.instance.dio.get<Map<String, dynamic>>(
+      // raw.githubusercontent.com 以 text/plain 返回 JSON；先按文本取回再
+      // 手动解析，避免 Dio 按 Content-Type 返回 String 后与 Map 泛型冲突。
+      final response = await AppHttp.instance.dio.get<String>(
         url,
         options: Options(
           connectTimeout: const Duration(seconds: 8),
           receiveTimeout: const Duration(seconds: 10),
-          responseType: ResponseType.json,
+          responseType: ResponseType.plain,
         ),
       );
-      final data = response.data;
-      if (data == null) return null;
-      final info = UpdateInfo.fromJson(data);
+      final raw = response.data;
+      if (raw == null || raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<dynamic, dynamic>) return null;
+      final info = UpdateInfo.fromJson(Map<String, dynamic>.from(decoded));
       if (info.tagName.isEmpty) return null;
       return info;
     } catch (error) {
@@ -644,7 +767,10 @@ class UpdateChecker {
         'legacy',
         '[UpdateChecker] ${channel.name} fallback failed: '
         '${_describeNetworkError(error)}',
-        fields: {'error': _describeNetworkError(error)},
+        fields: {
+          'host': Uri.tryParse(url)?.host ?? '',
+          'error': _describeNetworkError(error),
+        },
       );
       return null;
     }
@@ -672,13 +798,47 @@ class UpdateChecker {
   }
 }
 
-/// 网络错误只保留类型与状态码，便于判断是代理不通、超时还是限流。
+class _ReleaseApiResult {
+  const _ReleaseApiResult({
+    this.info,
+    this.statusCode,
+    this.rateLimited = false,
+    this.errorType,
+  });
+
+  final UpdateInfo? info;
+  final int? statusCode;
+  final bool rateLimited;
+  final DioExceptionType? errorType;
+
+  UpdateCheckFailure get failure {
+    if (rateLimited) return UpdateCheckFailure.rateLimited;
+    if (errorType == DioExceptionType.connectionTimeout ||
+        errorType == DioExceptionType.receiveTimeout ||
+        errorType == DioExceptionType.sendTimeout) {
+      return UpdateCheckFailure.timeout;
+    }
+    if (errorType == DioExceptionType.connectionError) {
+      return UpdateCheckFailure.connection;
+    }
+    final status = statusCode;
+    if (status != null && status >= 500) return UpdateCheckFailure.server;
+    return UpdateCheckFailure.unknown;
+  }
+}
+
+/// 网络错误只保留类型、主机与状态码，便于判断是代理不通、超时还是限流。
 String _describeNetworkError(Object error) {
   if (error is DioException) {
     final status = error.response?.statusCode;
-    return status == null
-        ? 'DioException(${error.type.name})'
-        : 'DioException(${error.type.name}, status=$status)';
+    final host = error.requestOptions.uri.host;
+    final cause = error.error;
+    return [
+      'DioException(${error.type.name})',
+      'host=$host',
+      if (status != null) 'status=$status',
+      if (cause != null) 'cause=${cause.runtimeType}',
+    ].join(', ');
   }
   return error.runtimeType.toString();
 }

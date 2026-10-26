@@ -350,7 +350,11 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
       }
     } catch (err, trace) {
       log.settings.error('legacy', err.toString(), stackTrace: trace);
-      if (mounted) showTextOnSnackBar('网络异常');
+      if (mounted) {
+        showTextOnSnackBar(
+          err is UpdateCheckException ? err.message : '检查更新失败，请稍后再试',
+        );
+      }
     } finally {
       if (mounted) setState(() => _isChecking = false);
     }

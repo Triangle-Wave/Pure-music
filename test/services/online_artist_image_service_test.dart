@@ -65,7 +65,7 @@ void main() {
       expect(downloads, 2);
     });
 
-    test('没有候选时缓存空结果，避免重复搜索', () async {
+    test('空结果不会阻止下次重新搜索', () async {
       final dir = await Directory.systemTemp.createTemp('pure_music_artist');
       addTearDown(() async {
         if (await dir.exists()) await dir.delete(recursive: true);
@@ -86,7 +86,7 @@ void main() {
         artworkLoader: (String url) async => null,
       );
       expect(await second.imageFor('未知艺术家'), isNull);
-      expect(secondClient.calls, 0);
+      expect(secondClient.calls, 1);
     });
 
     test('过期缓存会重新搜索', () async {

@@ -4,6 +4,50 @@ import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/update_checker.dart';
 
 void main() {
+  test('parses latest tag from GitHub release redirects', () {
+    expect(
+      latestTagFromReleaseLocation(
+        'https://github.com/Triangle-Wave/Pure-music/releases/tag/v2.3.7',
+      ),
+      'v2.3.7',
+    );
+    expect(
+      latestTagFromReleaseLocation(
+        '/Triangle-Wave/Pure-music/releases/tag/v2.3.7?expanded=true',
+      ),
+      'v2.3.7',
+    );
+    expect(
+      latestTagFromReleaseLocation(
+        'https://github.com/Triangle-Wave/Pure-music/releases/latest',
+      ),
+      isNull,
+    );
+    expect(latestTagFromReleaseLocation(null), isNull);
+  });
+
+  test('distinguishes rate limits from other update failures', () {
+    const rateLimited = UpdateCheckException(
+      UpdateChannel.github,
+      failure: UpdateCheckFailure.rateLimited,
+      statusCode: 403,
+    );
+    expect(rateLimited.message, contains('限流'));
+
+    const timeout = UpdateCheckException(
+      UpdateChannel.github,
+      failure: UpdateCheckFailure.timeout,
+    );
+    expect(timeout.message, contains('超时'));
+    expect(timeout.message, isNot(contains('网络异常')));
+
+    const connection = UpdateCheckException(
+      UpdateChannel.github,
+      failure: UpdateCheckFailure.connection,
+    );
+    expect(connection.message, contains('无法连接'));
+  });
+
   test('parses persisted update channel identifiers', () {
     expect(UpdateChannel.parse('github'), UpdateChannel.github);
     expect(UpdateChannel.parse('gitee'), UpdateChannel.gitee);

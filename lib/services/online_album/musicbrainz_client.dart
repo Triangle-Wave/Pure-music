@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/log/app_log.dart';
 
 /// MusicBrainz 要求带可联系的 User-Agent，并限制匿名客户端每秒 1 个请求。
 const String musicBrainzUserAgent =
@@ -47,6 +48,7 @@ class MusicBrainzClient {
   }) async {
     final title = release.trim();
     if (title.isEmpty) return const [];
+    final stopwatch = Stopwatch()..start();
     final clauses = <String>['release:"${_escapeLucene(title)}"'];
     final artistName = artist.trim();
     if (artistName.isNotEmpty) {
@@ -57,8 +59,19 @@ class MusicBrainzClient {
       'fmt': 'json',
       'limit': '$limit',
     });
-    if (data == null) return const [];
-    return MbReleaseGroup.listFromJson(data['release-groups']);
+    final groups = data == null
+        ? const <MbReleaseGroup>[]
+        : MbReleaseGroup.listFromJson(data['release-groups']);
+    log.library.info(
+      'online_album_mb_search',
+      'MusicBrainz 搜索完成',
+      fields: {
+        'host': 'musicbrainz.org',
+        'count': groups.length,
+        'elapsedMs': stopwatch.elapsedMilliseconds,
+      },
+    );
+    return groups;
   }
 
   Future<List<MbRelease>> browseReleases(
@@ -90,8 +103,10 @@ class MusicBrainzClient {
   ) {
     return _enqueue(() async {
       Object? lastError;
+      int? lastStatus;
       for (var attempt = 0; attempt < attempts; attempt++) {
         await _throttle();
+        final stopwatch = Stopwatch()..start();
         try {
           final response = await _client.get<dynamic>(
             '$musicBrainzBaseUrl$path',
@@ -109,11 +124,36 @@ class MusicBrainzClient {
             ),
           );
           final status = response.statusCode ?? 0;
+          log.library.info(
+            'online_album_mb_request',
+            'MusicBrainz 请求完成',
+            fields: {
+              'host': 'musicbrainz.org',
+              'path': path,
+              'status': status,
+              'elapsedMs': stopwatch.elapsedMilliseconds,
+              'attempt': attempt + 1,
+            },
+          );
           if (status == 429 || status == 503) {
+            lastStatus = status;
             await Future<void>.delayed(_retryAfter(response.headers));
             continue;
           }
-          if (status >= 400) return null;
+          if (status >= 400) {
+            lastStatus = status;
+            log.library.warn(
+              'online_album_mb_request_failed',
+              'MusicBrainz 请求返回错误状态',
+              fields: {
+                'host': 'musicbrainz.org',
+                'path': path,
+                'status': status,
+                'elapsedMs': stopwatch.elapsedMilliseconds,
+              },
+            );
+            return null;
+          }
           final data = response.data;
           if (data is Map<String, dynamic>) return data;
           if (data is Map<dynamic, dynamic>) return Map<String, dynamic>.from(data);
@@ -125,6 +165,7 @@ class MusicBrainzClient {
           throw MusicBrainzException('unexpected response body');
         } on DioException catch (error) {
           lastError = error;
+          lastStatus = error.response?.statusCode;
           if (attempt == attempts - 1) break;
           await Future<void>.delayed(Duration(seconds: 2 << attempt));
         } on MusicBrainzException catch (error) {
@@ -132,6 +173,19 @@ class MusicBrainzClient {
           break;
         }
       }
+      log.library.warn(
+        'online_album_mb_request_failed',
+        'MusicBrainz 请求失败',
+        fields: {
+          'host': 'musicbrainz.org',
+          'path': path,
+          'status': lastStatus ?? 0,
+          if (lastError is DioException)
+            'error': (lastError as DioException).type.name
+          else if (lastError != null)
+            'error': lastError.runtimeType.toString(),
+        },
+      );
       throw MusicBrainzException('request failed', lastError);
     });
   }

@@ -54,6 +54,21 @@ class CnArtistCandidate {
   final int? albumCount;
 }
 
+/// 单次请求的结果，保留状态码与耗时供日志与失败判断使用。
+class _HttpResult {
+  const _HttpResult({
+    this.data,
+    this.status,
+    this.error,
+    required this.elapsed,
+  });
+
+  final Map<String, dynamic>? data;
+  final int? status;
+  final Object? error;
+  final Duration elapsed;
+}
+
 const Map<String, String> _neteaseHeaders = {
   'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -151,32 +166,60 @@ class CnMusicClient {
       headers: _neteaseHeaders,
       stage: 'netease_album',
     );
-    final albums = parseNeteaseAlbums(primary);
-    if (albums.isNotEmpty) return albums;
+    final albums = parseNeteaseAlbums(primary.data);
+    if (albums.isNotEmpty) {
+      _logSourceResult(
+        '网易云音乐',
+        'music.163.com',
+        albums.length,
+        status: primary.status,
+        elapsed: primary.elapsed,
+        error: primary.error,
+      );
+      return albums;
+    }
     final fallback = await _getJson(
       'https://music.163.com/api/search/get/web',
       query: {'s': keyword, 'type': '10', 'offset': '0', 'limit': '$limit'},
       headers: _neteaseHeaders,
       stage: 'netease_album_fallback',
     );
-    return parseNeteaseAlbums(fallback);
+    final result = parseNeteaseAlbums(fallback.data);
+    _logSourceResult(
+      '网易云音乐',
+      'music.163.com',
+      result.length,
+      status: fallback.status,
+      elapsed: fallback.elapsed,
+      error: fallback.error,
+    );
+    return result;
   }
 
   Future<List<CnAlbumCandidate>> _qqAlbums(String keyword, int limit) async {
-    final data = await _postJson(
+    final reply = await _postJson(
       'https://u.y.qq.com/cgi-bin/musicu.fcg',
       _qqSearchPayload(keyword: keyword, searchType: 0, limit: limit),
       headers: _qqHeaders,
       stage: 'qq_album',
     );
-    return parseQqAlbums(data);
+    final albums = parseQqAlbums(reply.data);
+    _logSourceResult(
+      'QQ 音乐',
+      'u.y.qq.com',
+      albums.length,
+      status: reply.status,
+      elapsed: reply.elapsed,
+      error: reply.error,
+    );
+    return albums;
   }
 
   Future<List<CnAlbumCandidate>> _kugouAlbums(
     String keyword,
     int limit,
   ) async {
-    final data = await _getJson(
+    final reply = await _getJson(
       'https://mobilecdn.kugou.com/api/v3/search/album',
       query: {
         'format': 'json',
@@ -187,8 +230,18 @@ class CnMusicClient {
       headers: _kugouHeaders,
       stage: 'kugou_album',
     );
-    final albums = parseKugouAlbums(data);
-    if (albums.isNotEmpty) return albums;
+    final albums = parseKugouAlbums(reply.data);
+    if (albums.isNotEmpty) {
+      _logSourceResult(
+        '酷狗音乐',
+        'mobilecdn.kugou.com',
+        albums.length,
+        status: reply.status,
+        elapsed: reply.elapsed,
+        error: reply.error,
+      );
+      return albums;
+    }
     final songs = await _getJson(
       'https://mobilecdn.kugou.com/api/v3/search/song',
       query: {
@@ -200,7 +253,16 @@ class CnMusicClient {
       headers: _kugouHeaders,
       stage: 'kugou_album_song_fallback',
     );
-    return parseKugouSongAlbums(songs);
+    final result = parseKugouSongAlbums(songs.data);
+    _logSourceResult(
+      '酷狗音乐',
+      'mobilecdn.kugou.com',
+      result.length,
+      status: songs.status,
+      elapsed: songs.elapsed,
+      error: songs.error,
+    );
+    return result;
   }
 
   Future<List<CnArtistCandidate>> _neteaseArtists(
@@ -219,32 +281,72 @@ class CnMusicClient {
       headers: _neteaseHeaders,
       stage: 'netease_artist',
     );
-    final artists = parseNeteaseArtists(primary);
-    if (artists.isNotEmpty) return artists;
+    final artists = parseNeteaseArtists(primary.data);
+    if (artists.isNotEmpty) {
+      _logSourceResult(
+        '网易云音乐',
+        'music.163.com',
+        artists.length,
+        status: primary.status,
+        elapsed: primary.elapsed,
+        error: primary.error,
+      );
+      return artists;
+    }
     final fallback = await _getJson(
       'https://music.163.com/api/search/get/web',
       query: {'s': keyword, 'type': '100', 'offset': '0', 'limit': '$limit'},
       headers: _neteaseHeaders,
       stage: 'netease_artist_fallback',
     );
-    return parseNeteaseArtists(fallback);
+    final result = parseNeteaseArtists(fallback.data);
+    _logSourceResult(
+      '网易云音乐',
+      'music.163.com',
+      result.length,
+      status: fallback.status,
+      elapsed: fallback.elapsed,
+      error: fallback.error,
+    );
+    return result;
   }
 
   Future<List<CnArtistCandidate>> _qqArtists(String keyword, int limit) async {
-    final data = await _postJson(
+    final reply = await _postJson(
       'https://u.y.qq.com/cgi-bin/musicu.fcg',
       _qqSearchPayload(keyword: keyword, searchType: 1, limit: limit),
       headers: _qqHeaders,
       stage: 'qq_artist',
     );
-    return parseQqArtists(data);
+    final artists = parseQqArtists(reply.data);
+    _logSourceResult(
+      'QQ 音乐',
+      'u.y.qq.com',
+      artists.length,
+      status: reply.status,
+      elapsed: reply.elapsed,
+      error: reply.error,
+    );
+    final code = reply.data?['req_0']?['code'];
+    if (artists.isEmpty && code != null && code != 0) {
+      log.library.warn(
+        'cn_music_source_empty',
+        'QQ 音乐歌手搜索未返回结果',
+        fields: {
+          'host': 'u.y.qq.com',
+          'status': reply.status ?? 0,
+          'code': code,
+        },
+      );
+    }
+    return artists;
   }
 
   Future<List<CnArtistCandidate>> _kugouArtists(
     String keyword,
     int limit,
   ) async {
-    final data = await _getJson(
+    final reply = await _getJson(
       'https://mobilecdn.kugou.com/api/v3/search/singer',
       query: {
         'format': 'json',
@@ -255,7 +357,16 @@ class CnMusicClient {
       headers: _kugouHeaders,
       stage: 'kugou_artist',
     );
-    return parseKugouArtists(data);
+    final artists = parseKugouArtists(reply.data);
+    _logSourceResult(
+      '酷狗音乐',
+      'mobilecdn.kugou.com',
+      artists.length,
+      status: reply.status,
+      elapsed: reply.elapsed,
+      error: reply.error,
+    );
+    return artists;
   }
 
   /// 三个源都返回空时，复用歌词模块已有的搜索客户端再补一次。
@@ -331,12 +442,13 @@ class CnMusicClient {
     };
   }
 
-  Future<Map<String, dynamic>?> _getJson(
+  Future<_HttpResult> _getJson(
     String url, {
     required Map<String, String> query,
     required Map<String, String> headers,
     required String stage,
   }) async {
+    final stopwatch = Stopwatch()..start();
     try {
       final response = await _client.get<dynamic>(
         url,
@@ -351,22 +463,39 @@ class CnMusicClient {
               status != null && status >= 200 && status < 300,
         ),
       );
-      return asJsonMap(response.data);
+      final parsed = asJsonMap(response.data);
+      final result = _HttpResult(
+        data: parsed,
+        status: response.statusCode,
+        elapsed: stopwatch.elapsed,
+        error: parsed == null
+            ? const FormatException('unexpected response body')
+            : null,
+      );
+      _logRequest(stage, url, result);
+      return result;
     } on DioException catch (error) {
-      _logFailure(stage, error.type.name);
-      return null;
+      final result = _HttpResult(
+        status: error.response?.statusCode,
+        elapsed: stopwatch.elapsed,
+        error: error,
+      );
+      _logRequest(stage, url, result);
+      return result;
     } catch (error) {
-      _logFailure(stage, error);
-      return null;
+      final result = _HttpResult(elapsed: stopwatch.elapsed, error: error);
+      _logRequest(stage, url, result);
+      return result;
     }
   }
 
-  Future<Map<String, dynamic>?> _postJson(
+  Future<_HttpResult> _postJson(
     String url,
     Map<String, dynamic> body, {
     required Map<String, String> headers,
     required String stage,
   }) async {
+    final stopwatch = Stopwatch()..start();
     try {
       final response = await _client.post<dynamic>(
         url,
@@ -381,23 +510,103 @@ class CnMusicClient {
               status != null && status >= 200 && status < 300,
         ),
       );
-      return asJsonMap(response.data);
+      final parsed = asJsonMap(response.data);
+      final result = _HttpResult(
+        data: parsed,
+        status: response.statusCode,
+        elapsed: stopwatch.elapsed,
+        error: parsed == null
+            ? const FormatException('unexpected response body')
+            : null,
+      );
+      _logRequest(stage, url, result);
+      return result;
     } on DioException catch (error) {
-      _logFailure(stage, error.type.name);
-      return null;
+      final result = _HttpResult(
+        status: error.response?.statusCode,
+        elapsed: stopwatch.elapsed,
+        error: error,
+      );
+      _logRequest(stage, url, result);
+      return result;
     } catch (error) {
-      _logFailure(stage, error);
-      return null;
+      final result = _HttpResult(elapsed: stopwatch.elapsed, error: error);
+      _logRequest(stage, url, result);
+      return result;
+    }
+  }
+
+  void _logRequest(String stage, String url, _HttpResult result) {
+    final error = result.error;
+    final fields = <String, Object?>{
+      'stage': stage,
+      'host': Uri.tryParse(url)?.host ?? '',
+      'status': result.status ?? 0,
+      'elapsedMs': result.elapsed.inMilliseconds,
+      if (error is DioException)
+        'error': error.type.name
+      else if (error != null)
+        'error': error.runtimeType.toString(),
+    };
+    if (result.error == null) {
+      log.library.info(
+        'cn_music_request',
+        '国内音乐源请求完成',
+        fields: fields,
+      );
+    } else {
+      log.library.warn(
+        'cn_music_request_failed',
+        '国内音乐源请求失败',
+        fields: fields,
+      );
+    }
+  }
+
+  void _logSourceResult(
+    String source,
+    String host,
+    int count, {
+    int? status,
+    Duration? elapsed,
+    Object? error,
+  }) {
+    final sourceError = error;
+    final fields = <String, Object?>{
+      'source': source,
+      'host': host,
+      'status': status ?? 0,
+      'count': count,
+      if (elapsed != null) 'elapsedMs': elapsed.inMilliseconds,
+      if (sourceError is DioException)
+        'error': sourceError.type.name
+      else if (sourceError != null)
+        'error': sourceError.runtimeType.toString(),
+    };
+    if (sourceError == null) {
+      log.library.info(
+        'cn_music_source',
+        '国内音乐源查询完成',
+        fields: fields,
+      );
+    } else {
+      log.library.warn(
+        'cn_music_source_failed',
+        '国内音乐源查询失败',
+        fields: fields,
+      );
     }
   }
 
   void _logFailure(String stage, Object error) {
-    log.library.debug(
+    log.library.warn(
       'cn_music_request_failed',
       '国内音乐接口请求失败',
       fields: {
         'stage': stage,
-        'error': error.runtimeType.toString(),
+        'error': error is DioException
+            ? error.type.name
+            : error.runtimeType.toString(),
       },
     );
   }

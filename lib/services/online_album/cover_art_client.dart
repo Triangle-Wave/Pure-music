@@ -203,6 +203,9 @@ class CoverArtClient {
   }
 
   Future<Map<String, dynamic>?> _getJson(String url) async {
+    final host = Uri.tryParse(url)?.host ?? 'coverartarchive.org';
+    final stopwatch = Stopwatch()..start();
+    int? lastStatus;
     try {
       final response = await _client.get<dynamic>(
         url,
@@ -218,32 +221,71 @@ class CoverArtClient {
         ),
       );
       final status = response.statusCode ?? 0;
-      if (status < 200 || status >= 300) return null;
-      final data = response.data;
-      if (data is Map<String, dynamic>) return data;
-      if (data is Map<dynamic, dynamic>) {
-        return Map<String, dynamic>.from(data);
+      lastStatus = status;
+      if (status < 200 || status >= 300) {
+        log.library.info(
+          'online_album_caa_request',
+          '封面接口请求完成',
+          fields: {
+            'source': 'Cover Art Archive',
+            'host': host,
+            'status': status,
+            'elapsedMs': stopwatch.elapsedMilliseconds,
+            'count': 0,
+          },
+        );
+        return null;
       }
-      if (data is String) {
+      final data = response.data;
+      Map<String, dynamic>? result;
+      if (data is Map<String, dynamic>) {
+        result = data;
+      } else if (data is Map<dynamic, dynamic>) {
+        result = Map<String, dynamic>.from(data);
+      } else if (data is String) {
         final decoded = jsonDecode(data);
-        if (decoded is Map<String, dynamic>) return decoded;
+        if (decoded is Map<String, dynamic>) result = decoded;
         if (decoded is Map<dynamic, dynamic>) {
-          return Map<String, dynamic>.from(decoded);
+          result = Map<String, dynamic>.from(decoded);
         }
       }
-      return null;
+      final images = result?['images'];
+      log.library.info(
+        'online_album_caa_request',
+        '封面接口请求完成',
+        fields: {
+          'source': 'Cover Art Archive',
+          'host': host,
+          'status': status,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+          'count': images is List<dynamic> ? images.length : 0,
+        },
+      );
+      return result;
     } on DioException catch (error) {
       log.library.warn(
-        'cover_art_request_failed',
+        'online_album_caa_request_failed',
         '封面接口请求失败',
-        fields: {'error': error.type.name},
+        fields: {
+          'source': 'Cover Art Archive',
+          'host': host,
+          'status': error.response?.statusCode ?? lastStatus ?? 0,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+          'error': error.type.name,
+        },
       );
       return null;
     } catch (error) {
       log.library.warn(
-        'cover_art_request_failed',
+        'online_album_caa_request_failed',
         '封面接口解析失败',
-        fields: {'error': error.runtimeType.toString()},
+        fields: {
+          'source': 'Cover Art Archive',
+          'host': host,
+          'status': lastStatus ?? 0,
+          'elapsedMs': stopwatch.elapsedMilliseconds,
+          'error': error.runtimeType.toString(),
+        },
       );
       return null;
     }
