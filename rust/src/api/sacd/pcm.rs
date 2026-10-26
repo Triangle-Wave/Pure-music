@@ -22,7 +22,7 @@ use super::dsf::{DsfWriter, DSF_BLOCK_SIZE_PER_CHANNEL};
 use super::types::SacdError;
 
 /// PCM 转换器版本，参与缓存键；升级解码器或调整输出参数时递增。
-pub(crate) const PCM_CONVERTER_VERSION: &str = "rdsd2pcm-0.5.0-a06475e";
+pub(crate) const PCM_CONVERTER_VERSION: &str = "rdsd2pcm-0.5.0-a06475e-192k";
 
 /// SACD 的 DSD64 采样率（Hz）。
 const DSD64_SAMPLE_RATE: u32 = 2_822_400;
@@ -40,7 +40,7 @@ const DSF_FMT_CHUNK_SIZE: u64 = 52;
 const DSF_DATA_CHUNK_HEADER_SIZE: u64 = 12;
 
 /// 支持的目标采样率。
-const SUPPORTED_SAMPLE_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+const SUPPORTED_SAMPLE_RATES: [u32; 5] = [44_100, 48_000, 88_200, 96_000, 192_000];
 
 /// 支持的目标位深。
 const SUPPORTED_BIT_DEPTHS: [u16; 2] = [16, 24];
@@ -77,9 +77,10 @@ impl DsfAudioInfo {
 
 /// 确保指定 DSF 缓存已有对应的 PCM WAV，并返回 WAV 路径。
 ///
-/// `sample_rate` 只接受 44100/48000/88200/96000，`bit_depth` 只接受 16/24。
+/// `sample_rate` 只接受 44100/48000/88200/96000/192000，`bit_depth` 只接受 16/24。
 /// `rdsd2pcm` 无法把 DSD64 整数抽取到 48kHz 族，请求 48000 时按 44100 输出
-/// 并记录警告。缓存命中要求键文件与 WAV 结构同时完整，否则删除后重新转换。
+/// 并记录警告。192000 走 DSD64 的 ×10 上采样、÷21 与 ÷7 两级抽取通路。
+/// 缓存命中要求键文件与 WAV 结构同时完整，否则删除后重新转换。
 pub(crate) fn ensure_pcm_cached(
     dsf_path: &Path,
     sample_rate: u32,
@@ -140,7 +141,7 @@ pub(crate) fn ensure_pcm_cached(
 fn validate_request(sample_rate: u32, bit_depth: u16) -> Result<(), SacdError> {
     if !SUPPORTED_SAMPLE_RATES.contains(&sample_rate) {
         return Err(SacdError::invalid(format!(
-            "不支持的 PCM 采样率 {sample_rate}，仅支持 44100/48000/88200/96000"
+            "不支持的 PCM 采样率 {sample_rate}，仅支持 44100/48000/88200/96000/192000"
         )));
     }
     if !SUPPORTED_BIT_DEPTHS.contains(&bit_depth) {
@@ -155,6 +156,8 @@ fn validate_request(sample_rate: u32, bit_depth: u16) -> Result<(), SacdError> {
 ///
 /// DSD64 到 48kHz 族的比值不是整数，`rdsd2pcm` 会退回 64:1 抽取并把 WAV
 /// 头写成 48kHz，导致音调与时长错误。48kHz 请求统一回退到 44100Hz。
+/// 192000 原样返回：`compute_decim_and_upsample` 对 DSD64 给出 L=10、M=147，
+/// 由 `LMResampler` 的 ×10 → ÷21 → ÷7 两级通路输出 192kHz。
 fn effective_sample_rate(requested: u32) -> u32 {
     if requested == 48_000 {
         log::warn!("rdsd2pcm 不支持 48kHz 输出，回退到 44100Hz");
@@ -1146,7 +1149,11 @@ mod tests {
     fn rejects_invalid_request() {
         assert!(validate_request(22_050, 24).is_err());
         assert!(validate_request(44_100, 32).is_err());
+        assert!(validate_request(176_400, 24).is_err());
+        assert!(validate_request(384_000, 24).is_err());
         assert!(validate_request(44_100, 24).is_ok());
+        assert!(validate_request(192_000, 24).is_ok());
+        assert!(validate_request(192_000, 16).is_ok());
     }
 
     #[test]
@@ -1155,6 +1162,7 @@ mod tests {
         assert_eq!(effective_sample_rate(44_100), 44_100);
         assert_eq!(effective_sample_rate(88_200), 88_200);
         assert_eq!(effective_sample_rate(96_000), 96_000);
+        assert_eq!(effective_sample_rate(192_000), 192_000);
     }
 
     #[test]
@@ -1190,6 +1198,27 @@ mod tests {
         let bytes = fs::read(&output).expect("读取 WAV");
         assert_eq!(bytes.len(), 44 + 588 * 4);
         assert_eq!(read_u32(&bytes, 40), 588 * 4);
+    }
+
+    #[test]
+    fn converts_stereo_dsf_to_192k_24bit_wav() {
+        let temp = TempDir::new();
+        let dsf = temp.path.join("2ch-01.dsf");
+        build_fixture_dsf(&dsf);
+
+        let output = ensure_pcm_cached(&dsf, 192_000, 24).expect("转换 192kHz PCM");
+        assert!(
+            output.to_string_lossy().ends_with("-192000-24.wav"),
+            "缓存文件名应带 192000 采样率与位深: {}",
+            output.display()
+        );
+        let info = verify_wav(&output, 2, 192_000, 24).expect("校验 192kHz WAV");
+        assert_eq!(info.block_align, 6);
+        assert!(
+            (2_000..=2_560).contains(&info.frames),
+            "192kHz 输出帧数应接近 2560，实际 {}",
+            info.frames
+        );
     }
 
     #[test]
