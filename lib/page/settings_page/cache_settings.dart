@@ -151,8 +151,8 @@ class _CacheDirectorySettingsPanelState
     final confirmed = await showDangerConfirmDialog(
       context: context,
       title: '清理缓存',
-      message: '将删除封面、歌词候选、在线信息、AMLL 索引与 SACD 提取文件。'
-          '设置、数据库与日志不受影响。正在播放的 SACD 缓存可能无法删除。',
+      message: '将删除封面、歌词候选、在线信息、AMLL 索引与 SACD PCM 缓存（WAV、KEY）。'
+          '已提取的 DSF 文件保留；设置、数据库与日志不受影响。正在播放的 SACD 缓存可能无法删除。',
       confirmLabel: '清理',
     );
     if (!confirmed || !mounted) return;
@@ -234,7 +234,7 @@ class _CacheDirectorySettingsPanelState
         const SizedBox(height: 16.0),
         SettingsTile(
           description: '清理缓存',
-          subtitle: '封面、歌词候选、在线信息、AMLL 索引与 SACD 提取缓存',
+          subtitle: '封面、歌词候选、在线信息、AMLL 索引与 SACD PCM 缓存；保留已提取的 DSF',
           action: FilledButton.tonalIcon(
             onPressed: _busy ? null : _clearCache,
             icon: const Icon(Symbols.delete_sweep),

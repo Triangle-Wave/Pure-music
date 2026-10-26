@@ -30,6 +30,12 @@ const String _legacyAmllIndexDirectoryName = 'amll';
 /// 旧版 AMLL 索引文件在缓存根下的相对路径，用于清理早期布局。
 const String _legacyAmllIndexFileName = 'raw-lyrics-index.jsonl';
 
+/// SACD 提取产物后缀；清理 PCM 缓存时保留该后缀。
+const String _dsfFileExtension = '.dsf';
+
+bool _isDsfFile(String path) =>
+    p.extension(path).toLowerCase() == _dsfFileExtension;
+
 Future<Directory>? _cacheRootFuture;
 String? _cacheRootSignature;
 bool _sacdMigrationAttempted = false;
@@ -239,19 +245,27 @@ Future<void> ensureCacheDirectories() async {
 }
 
 /// 清空全部缓存内容，返回删除统计。设置、数据库、日志与更新包不受影响。
+///
+/// SACD 缓存目录只删除 PCM 派生文件与转换临时文件，保留已提取的 DSF，
+/// 清理后无需重新从 ISO 提取。
 Future<CacheClearReport> clearCache() async {
   final root = await getCacheRoot();
   final dataRoot = await _dataRoot();
   final directories = <String, Directory>{};
+  final sacdDirectoryKeys = <String>{};
 
-  void addDirectory(Directory directory) {
+  void addDirectory(Directory directory, {bool sacd = false}) {
     final key = p.normalize(p.absolute(directory.path)).toLowerCase();
     if (key == p.normalize(p.absolute(root.path)).toLowerCase()) return;
     directories[key] = directory;
+    if (sacd) sacdDirectoryKeys.add(key);
   }
 
   for (final name in cacheSubdirectoryNames) {
-    addDirectory(Directory(p.join(root.path, name)));
+    addDirectory(
+      Directory(p.join(root.path, name)),
+      sacd: name == cacheSacdDirectoryName,
+    );
   }
   final legacyCacheRoot = Directory(p.join(dataRoot.path, 'cache'));
   for (final name in const [
@@ -262,12 +276,18 @@ Future<CacheClearReport> clearCache() async {
     cacheSacdDirectoryName,
     cacheLyricIndexDirectoryName,
   ]) {
-    addDirectory(Directory(p.join(legacyCacheRoot.path, name)));
+    addDirectory(
+      Directory(p.join(legacyCacheRoot.path, name)),
+      sacd: name == cacheSacdDirectoryName,
+    );
   }
   addDirectory(
     Directory(p.join(dataRoot.path, cacheOnlineAlbumDirectoryName)),
   );
-  addDirectory(Directory(p.join(dataRoot.path, _legacySacdDirectoryName)));
+  addDirectory(
+    Directory(p.join(dataRoot.path, _legacySacdDirectoryName)),
+    sacd: true,
+  );
 
   final legacyFiles = <File>[
     File(p.join(legacyCacheRoot.path, _legacyAmllIndexFileName)),
@@ -277,8 +297,11 @@ Future<CacheClearReport> clearCache() async {
   var bytes = 0;
   var failed = 0;
 
-  for (final directory in directories.values) {
-    final result = await _clearDirectory(directory);
+  for (final entry in directories.entries) {
+    final result = await _clearDirectory(
+      entry.value,
+      keepDsf: sacdDirectoryKeys.contains(entry.key),
+    );
     files += result.files;
     bytes += result.bytes;
     failed += result.failed;
@@ -303,7 +326,10 @@ Future<CacheClearReport> clearCache() async {
   return CacheClearReport(files: files, bytes: bytes, failed: failed);
 }
 
-Future<CacheClearReport> _clearDirectory(Directory directory) async {
+Future<CacheClearReport> _clearDirectory(
+  Directory directory, {
+  bool keepDsf = false,
+}) async {
   var files = 0;
   var bytes = 0;
   var failed = 0;
@@ -316,6 +342,7 @@ Future<CacheClearReport> _clearDirectory(Directory directory) async {
       followLinks: false,
     )) {
       if (entity is! File) continue;
+      if (keepDsf && _isDsfFile(entity.path)) continue;
       try {
         final length = await entity.length();
         await entity.delete();

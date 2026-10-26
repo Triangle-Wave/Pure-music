@@ -76,6 +76,26 @@ void main() {
     expect(p.equals(root.path, p.join(dataRoot.path, 'cache')), isTrue);
   });
 
+  test('清理缓存保留 SACD 的 DSF，只删除 PCM 缓存', () async {
+    final root = await getCacheRoot();
+    final iso = Directory(p.join(root.path, cacheSacdDirectoryName));
+    await iso.create(recursive: true);
+    final dsf = File(p.join(iso.path, 'track01.dsf'));
+    final wav = File(p.join(iso.path, 'track01-44100-24.wav'));
+    final key = File(p.join(iso.path, 'track01-44100-24.key'));
+    await dsf.writeAsBytes(const [1, 2, 3, 4]);
+    await wav.writeAsBytes(const [5, 6, 7]);
+    await key.writeAsString('key');
+
+    final report = await clearCache();
+
+    expect(report.files, 2);
+    expect(report.bytes, 6);
+    expect(await dsf.exists(), isTrue);
+    expect(await wav.exists(), isFalse);
+    expect(await key.exists(), isFalse);
+  });
+
   test('清理缓存只删除缓存文件，保留设置', () async {
     final root = await getCacheRoot();
     final covers = Directory(p.join(root.path, 'covers'));

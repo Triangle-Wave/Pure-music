@@ -1824,14 +1824,14 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  /// 读取 SACD 播放设置；读取异常时退回 PCM、44.1kHz、24bit。
+  /// 读取 SACD 播放设置；读取异常时退回 DSF、44.1kHz、24bit。
   ({bool preferPcm, int sampleRate, int bitDepth}) _sacdPlaybackSettings() {
     try {
       final preference = AppPreference.instance.playbackPref;
       return (
         preferPcm:
-            preference.dsdPlaybackMode !=
-            PlaybackPreference.dsdPlaybackModeDsf,
+            preference.dsdPlaybackMode ==
+            PlaybackPreference.dsdPlaybackModePcm,
         sampleRate: preference.sacdPcmSampleRate,
         bitDepth: preference.sacdPcmBitDepth,
       );
@@ -1843,7 +1843,7 @@ class PlaybackService extends ChangeNotifier {
         stackTrace: trace,
       );
       return (
-        preferPcm: true,
+        preferPcm: false,
         sampleRate: PlaybackPreference.defaultSacdPcmSampleRate,
         bitDepth: PlaybackPreference.defaultSacdPcmBitDepth,
       );

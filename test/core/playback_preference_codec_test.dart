@@ -41,21 +41,56 @@ void main() {
     );
   });
 
-  test('SACD PCM 设置缺省为 PCM 44.1kHz 24bit', () {
+  test('DSD 播放模式缺省为 DSF 直解', () {
     final preference = PlaybackPreferenceCodec.decode(
       const <String, dynamic>{},
     );
     expect(
       preference.dsdPlaybackMode,
-      PlaybackPreference.dsdPlaybackModePcm,
+      PlaybackPreference.dsdPlaybackModeDsf,
     );
+    expect(preference.dsdPlaybackModeMigratedToDsf, isTrue);
     expect(preference.sacdPcmSampleRate, 44100);
     expect(preference.sacdPcmBitDepth, 24);
 
     final encoded = PlaybackPreferenceCodec.encode(preference);
-    expect(encoded['dsdPlaybackMode'], 'pcm');
+    expect(encoded['dsdPlaybackMode'], 'dsf');
+    expect(encoded['dsdPlaybackModeMigratedToDsf'], isTrue);
     expect(encoded['sacdPcmSampleRate'], 44100);
     expect(encoded['sacdPcmBitDepth'], 24);
+  });
+
+  test('旧配置的默认 PCM 模式一次性迁移到 DSF', () {
+    final preference = PlaybackPreferenceCodec.decode({
+      'dsdPlaybackMode': 'pcm',
+      'sacdPcmSampleRate': 96000,
+      'sacdPcmBitDepth': 24,
+    });
+
+    expect(
+      preference.dsdPlaybackMode,
+      PlaybackPreference.dsdPlaybackModeDsf,
+    );
+    expect(preference.dsdPlaybackModeMigratedToDsf, isTrue);
+    expect(
+      PlaybackPreferenceCodec.encode(preference)['dsdPlaybackMode'],
+      'dsf',
+    );
+  });
+
+  test('迁移后手动选择的 PCM 模式保持不被改回', () {
+    final preference = PlaybackPreferenceCodec.decode({
+      'dsdPlaybackMode': 'pcm',
+      'dsdPlaybackModeMigratedToDsf': true,
+    });
+
+    expect(
+      preference.dsdPlaybackMode,
+      PlaybackPreference.dsdPlaybackModePcm,
+    );
+    final encoded = PlaybackPreferenceCodec.encode(preference);
+    expect(encoded['dsdPlaybackMode'], 'pcm');
+    expect(encoded['dsdPlaybackModeMigratedToDsf'], isTrue);
   });
 
   test('SACD PCM 设置按受支持取值读取', () {
@@ -93,7 +128,7 @@ void main() {
     });
     expect(
       preference.dsdPlaybackMode,
-      PlaybackPreference.dsdPlaybackModePcm,
+      PlaybackPreference.dsdPlaybackModeDsf,
     );
     expect(preference.sacdPcmSampleRate, 44100);
     expect(preference.sacdPcmBitDepth, 24);

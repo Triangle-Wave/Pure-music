@@ -216,6 +216,7 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         : PlaybackPreference.dsdPlaybackModePcm;
     if (_pref.dsdPlaybackMode == normalized) return;
     _pref.dsdPlaybackMode = normalized;
+    _pref.dsdPlaybackModeMigratedToDsf = true;
     setState(() {});
     unawaited(_savePlaybackPreference());
   }
@@ -362,7 +363,7 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         const SizedBox(height: 16.0),
         SettingsTile(
           description: 'PCM 缓存格式',
-          subtitle: 'SACD ISO 转 PCM 时使用；下次加载 SACD 音轨时生效',
+          subtitle: '仅 PCM 缓存模式使用，采样率与位深按此设置；下次加载 SACD 音轨时生效',
           action: DropdownMenu<String>(
             key: ValueKey('pcm-cache-$_pcmCacheSelection'),
             initialSelection: _pcmCacheSelection,
@@ -405,17 +406,18 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         const SizedBox(height: 16.0),
         SettingsTile(
           description: 'DSD 播放模式',
-          subtitle: '直接解出 DSF 与会转换为 PCM 缓存；缓存格式由上方设置决定',
+          subtitle: '推荐 DSF 直解：源 DSF 原样输出，不生成 PCM 缓存，采样率与上方 PCM 缓存格式无关；'
+              'PCM 缓存会生成 WAV，采样率按上方设置，首次转换较慢',
           action: SegmentedButton<String>(
             showSelectedIcon: false,
             segments: const [
               ButtonSegment(
-                value: PlaybackPreference.dsdPlaybackModePcm,
-                label: Text('PCM 缓存'),
-              ),
-              ButtonSegment(
                 value: PlaybackPreference.dsdPlaybackModeDsf,
                 label: Text('DSF 直解'),
+              ),
+              ButtonSegment(
+                value: PlaybackPreference.dsdPlaybackModePcm,
+                label: Text('PCM 缓存'),
               ),
             ],
             selected: {_pref.dsdPlaybackMode},

@@ -25,6 +25,7 @@ class PlaybackPreference {
   int transitionFadeOutMs;
   int transitionFadeInMs;
   String dsdPlaybackMode;
+  bool dsdPlaybackModeMigratedToDsf;
   int sacdPcmSampleRate;
   int sacdPcmBitDepth;
   int outputDeviceId;
@@ -77,7 +78,8 @@ class PlaybackPreference {
     this.transitionMode = TransitionMode.seamless,
     this.transitionFadeOutMs = 300,
     this.transitionFadeInMs = 200,
-    this.dsdPlaybackMode = dsdPlaybackModePcm,
+    this.dsdPlaybackMode = dsdPlaybackModeDsf,
+    this.dsdPlaybackModeMigratedToDsf = true,
     this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
     this.sacdPcmBitDepth = defaultSacdPcmBitDepth,
     this.outputDeviceId = defaultOutputDeviceId,
@@ -112,6 +114,7 @@ class PlaybackPreference {
     'transitionFadeOutMs': transitionFadeOutMs,
     'transitionFadeInMs': transitionFadeInMs,
     'dsdPlaybackMode': dsdPlaybackMode,
+    'dsdPlaybackModeMigratedToDsf': dsdPlaybackModeMigratedToDsf,
     'sacdPcmSampleRate': sacdPcmSampleRate,
     'sacdPcmBitDepth': sacdPcmBitDepth,
     'outputDeviceId': outputDeviceId,
@@ -152,7 +155,8 @@ class PlaybackPreference {
       transitionMode: transition.mode,
       transitionFadeOutMs: transition.fadeOutMs,
       transitionFadeInMs: transition.fadeInMs,
-      dsdPlaybackMode: _dsdPlaybackModeFromStored(map['dsdPlaybackMode']),
+      dsdPlaybackMode: _dsdPlaybackModeFromMap(map),
+      dsdPlaybackModeMigratedToDsf: true,
       sacdPcmSampleRate: _sacdPcmSampleRateFromStored(
         map['sacdPcmSampleRate'],
       ),
@@ -165,11 +169,27 @@ class PlaybackPreference {
     );
   }
 
+  /// 读取 DSD 播放模式，并把旧配置中默认的 PCM 一次性迁移到 DSF。
+  ///
+  /// 迁移标记随播放偏好一起保存：没有标记且存储为 `pcm` 的记录按旧默认值处理，
+  /// 迁移为 `dsf`；带标记的记录完全尊重存储值，用户手动选择的 `pcm` 会保留。
+  static String _dsdPlaybackModeFromMap(Map<String, dynamic> map) {
+    final migrated = _normalizedBool(
+      map['dsdPlaybackModeMigratedToDsf'],
+      defaultValue: false,
+    );
+    final storedMode = _normalizedString(map['dsdPlaybackMode']).toLowerCase();
+    if (!migrated && storedMode == dsdPlaybackModePcm) {
+      return dsdPlaybackModeDsf;
+    }
+    return _dsdPlaybackModeFromStored(map['dsdPlaybackMode']);
+  }
+
   static String _dsdPlaybackModeFromStored(Object? value) {
     final mode = _normalizedString(value).toLowerCase();
-    return mode == dsdPlaybackModeDsf
-        ? dsdPlaybackModeDsf
-        : dsdPlaybackModePcm;
+    return mode == dsdPlaybackModePcm
+        ? dsdPlaybackModePcm
+        : dsdPlaybackModeDsf;
   }
 
   static int _sacdPcmSampleRateFromStored(Object? value) {
