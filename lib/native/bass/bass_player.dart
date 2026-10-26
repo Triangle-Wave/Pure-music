@@ -2772,8 +2772,16 @@ class BassPlayer {
             'legacy',
             '[bass] Plugin load failed: $pluginFullPath (error $errCode)',
           );
+          log.app.warn(
+            'legacy',
+            '[bass] Plugin load failed: path=$pluginFullPath error=$errCode',
+          );
         } else {
           log.bass.debug('legacy', '[bass] Plugin loaded: $name');
+          log.app.debug(
+            'legacy',
+            '[bass] Plugin loaded: $name ($pluginFullPath)',
+          );
         }
         malloc.free(pluginPathP);
       }
@@ -2930,15 +2938,7 @@ class BassPlayer {
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    var handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      flags,
-    );
-    malloc.free(pathPointer);
+    var handle = _createFileStream(audioPath, flags);
     if (handle == 0) return 0;
 
     // 默认速率与音高下不套 tempo：少一层 DSP，整轨文件定位更快。
@@ -3030,16 +3030,7 @@ class BassPlayer {
       }
     }
 
-    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    final handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      playableFlags,
-    );
-    malloc.free(pathPointer);
-    return handle;
+    return _createFileStream(audioPath, playableFlags);
   }
 
   int _createSharedPlaybackSource(
@@ -4099,6 +4090,52 @@ class BassPlayer {
     _logAudioState('_rebuildStream(done)');
   }
 
+  /// 创建文件流。插件格式在 `BASS_ASYNCFILE` 下可能被判定为不支持，
+  /// 首次失败后去掉该标志重试一次；`.tak` 直接按同步方式打开。
+  int _createFileStream(String audioPath, int flags) {
+    final syncFirst = path.extension(audioPath).toLowerCase() == '.tak';
+    final firstFlags = syncFirst ? flags & ~bass.BASS_ASYNCFILE : flags;
+    var handle = _streamCreateFile(audioPath, firstFlags);
+    if (handle != 0) return handle;
+    final firstError = _bass.BASS_ErrorGetCode();
+    if ((firstFlags & bass.BASS_ASYNCFILE) == 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] stream create failed: path=$audioPath '
+            'flags=0x${firstFlags.toRadixString(16)} error=$firstError',
+      );
+      return 0;
+    }
+    final retryFlags = firstFlags & ~bass.BASS_ASYNCFILE;
+    handle = _streamCreateFile(audioPath, retryFlags);
+    if (handle != 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] stream create required sync io: path=$audioPath '
+            'flags=0x${firstFlags.toRadixString(16)} error=$firstError',
+      );
+      return handle;
+    }
+    final retryError = _bass.BASS_ErrorGetCode();
+    log.app.warn(
+      'legacy',
+      '[bass] stream create failed after retry: path=$audioPath '
+          'flags=0x${firstFlags.toRadixString(16)} '
+          'retryFlags=0x${retryFlags.toRadixString(16)} '
+          'error=$firstError retryError=$retryError',
+    );
+    return 0;
+  }
+
+  int _streamCreateFile(String audioPath, int flags) {
+    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
+    try {
+      return _bass.BASS_StreamCreateFile(bass.FALSE, pathPointer, 0, 0, flags);
+    } finally {
+      malloc.free(pathPointer);
+    }
+  }
+
   int _createDecodeStream(String path) {
     _applyDsdFreqConfig();
     const flags =
@@ -4106,16 +4143,7 @@ class BassPlayer {
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    final pathPointer = path.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    final handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      flags,
-    );
-    malloc.free(pathPointer);
-    return handle;
+    return _createFileStream(path, flags);
   }
 
   /// 创建独占模式流
