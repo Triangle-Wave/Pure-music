@@ -1343,7 +1343,11 @@ class LyricService extends ChangeNotifier {
           .where((candidate) => _candidateMatchesSource(candidate, savedSource))
           .firstOrNull;
       if (matched != null) {
-        final lyric = await loadLyricFromCandidate(matched, nowPlaying);
+        final lyric = await loadLyricFromCandidate(
+          matched,
+          nowPlaying,
+          peers: record?.candidates ?? const <LyricCandidate>[],
+        );
         if (requestToken != _lyricRequestToken ||
             _activeLyricPath != audioPath) {
           return null;
@@ -1373,7 +1377,11 @@ class LyricService extends ChangeNotifier {
     } else {
       final candidate = selectedOnlineCandidate ?? record?.activeCandidate;
       if (candidate != null && !(record?.disabled ?? false)) {
-        final lyric = await loadLyricFromCandidate(candidate, nowPlaying);
+        final lyric = await loadLyricFromCandidate(
+          candidate,
+          nowPlaying,
+          peers: record?.candidates ?? const <LyricCandidate>[],
+        );
         if (requestToken != _lyricRequestToken ||
             _activeLyricPath != audioPath) {
           return null;
@@ -1462,7 +1470,11 @@ class LyricService extends ChangeNotifier {
       if (!applyBestIfEmpty || record.disabled || _currLyric != null) return;
       final candidate = record.activeCandidate;
       if (candidate == null) return;
-      final lyric = await loadLyricFromCandidate(candidate, audio);
+      final lyric = await loadLyricFromCandidate(
+        candidate,
+        audio,
+        peers: record.candidates,
+      );
       if (_disposed) return;
       if (lyric == null || _currLyric != null) return;
       if (_getNowPlaying()?.path != audio.path || record.disabled) return;
@@ -1544,7 +1556,11 @@ class LyricService extends ChangeNotifier {
         .where((item) => item.id == candidateId)
         .firstOrNull;
     if (candidate == null) return false;
-    final lyric = await loadLyricFromCandidate(candidate, audio);
+    final lyric = await loadLyricFromCandidate(
+      candidate,
+      audio,
+      peers: record?.candidates ?? const <LyricCandidate>[],
+    );
     if (_disposed || _getNowPlaying()?.path != audio.path) return false;
     if (lyric == null) {
       showTextOnSnackBar('该候选歌词加载失败，已保留原歌词', variant: ToastVariant.error);

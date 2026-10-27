@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/matcher.dart';
 import 'package:pure_music/library/audio_library.dart';
@@ -125,30 +126,51 @@ LyricCandidate? buildLyricCandidate({
 /// 没有翻译或罗马音时对应字段为 null；本地转写生成的罗马音不写入候选。
 ({String? translationText, String? romanizationText})
 lyricCandidateSupplementalText(Lyric lyric) {
-  final translations = StringBuffer();
-  final romanizations = StringBuffer();
-  for (final line in lyric.lines) {
-    final timeTag = _candidateLrcTime(line.start);
-    final translation = line.translation?.trim() ?? '';
-    if (translation.isNotEmpty) {
-      translations.writeln('$timeTag$translation');
-    }
-    if (line.autoRomanized) continue;
-    final romanization = line.romanLyric?.trim() ?? '';
-    if (romanization.isNotEmpty) {
-      romanizations.writeln('$timeTag$romanization');
-    }
-  }
-  final translationText = translations.toString().trim();
-  final romanizationText = romanizations.toString().trim();
+  final supplemental = _supplementalLinesFromLyric(lyric);
   return (
-    translationText: translationText.isEmpty ? null : translationText,
-    romanizationText: romanizationText.isEmpty ? null : romanizationText,
+    translationText: _formatSupplementalLines(supplemental.translation),
+    romanizationText: _formatSupplementalLines(supplemental.romanization),
   );
+}
+
+String? _formatSupplementalLines(List<_CandidateSupplementalLine> lines) {
+  if (lines.isEmpty) return null;
+  final buffer = StringBuffer();
+  for (final line in lines) {
+    buffer.writeln('${_candidateLrcTime(line.start)}${line.text}');
+  }
+  final text = buffer.toString().trim();
+  return text.isEmpty ? null : text;
 }
 
 /// 候选保存的翻译与罗马音与主歌词行时间戳允许的最大偏差。
 const int lyricCandidateSupplementalToleranceMs = 300;
+
+/// 跨候选补齐时其余来源的优先级，数值越小越优先。
+///
+/// 用户选择或最佳分数的候选始终排在第一位，此表只决定其余候选的顺序。
+const Map<String, int> lyricCandidateSourcePriority = {
+  'kugou': 0,
+  'qq': 1,
+  'ne': 2,
+  'amll': 3,
+};
+
+/// 候选文本解析结果的缓存条目上限。
+const int lyricCandidateSupplementalCacheCapacity = 64;
+
+final Map<String, _CandidateSupplemental> _supplementalTextCache = {};
+
+/// 本次运行中候选文本被解析的次数，供测试确认缓存命中。
+@visibleForTesting
+int lyricCandidateSupplementalParseCount = 0;
+
+/// 清空候选文本解析缓存并重置解析计数。
+@visibleForTesting
+void resetLyricCandidateSupplementalCache() {
+  _supplementalTextCache.clear();
+  lyricCandidateSupplementalParseCount = 0;
+}
 
 /// 把候选保存的翻译与罗马音按时间戳补回歌词的空字段。
 ///
@@ -162,26 +184,217 @@ Lyric applyLyricCandidateSupplemental(
   _mergeCandidateSupplemental(
     lyric,
     _parseCandidateSupplemental(translationText),
-    hasValue: (line) => (line.translation?.trim() ?? '').isNotEmpty,
+    hasValue: _hasTranslation,
     apply: (line, text) => line.translation = text,
   );
   _mergeCandidateSupplemental(
     lyric,
     _parseCandidateSupplemental(romanizationText),
-    hasValue: (line) =>
-        !line.autoRomanized && (line.romanLyric?.trim() ?? '').isNotEmpty,
-    apply: (line, text) {
-      line.romanLyric = text;
-      line.autoRomanized = false;
-      line.romanWords = mapRomanWords(
-        romanText: text,
-        words: line is SyncLyricLine ? line.words : null,
-        lineStart: line.start,
-        lineLength: line.length,
-      );
-    },
+    hasValue: _hasRomanization,
+    apply: _applyRomanization,
   );
   return lyric;
+}
+
+/// 用同一记录里的其它候选补齐主歌词缺失的翻译与罗马音。
+///
+/// [candidates] 是同一首歌的全部候选，[primaryId] 是当前显示的候选；
+/// 主歌词已齐全时直接返回，不解析任何候选文本。只填充空字段，已有内容
+/// 不被覆盖，逐字时间轴保持不变。
+Lyric applyCrossCandidateSupplemental(
+  Lyric lyric,
+  Iterable<LyricCandidate> candidates, {
+  String? primaryId,
+}) {
+  final ordered = candidates
+      .where((candidate) => candidate.id.isNotEmpty)
+      .toList(growable: false);
+  if (ordered.isEmpty) return lyric;
+  var needTranslation = _hasMissingTranslation(lyric);
+  var needRomanization = _hasMissingRomanization(lyric);
+  if (!needTranslation && !needRomanization) return lyric;
+
+  final sorted = [...ordered]
+    ..sort((a, b) => _compareCandidatePriority(a, b, primaryId));
+  for (final candidate in sorted) {
+    if (!needTranslation && !needRomanization) break;
+    final supplemental = _supplementalFor(
+      candidate,
+      needTranslation: needTranslation,
+      needRomanization: needRomanization,
+    );
+    if (needTranslation && supplemental.translation.isNotEmpty) {
+      _mergeCandidateSupplemental(
+        lyric,
+        supplemental.translation,
+        hasValue: _hasTranslation,
+        apply: (line, text) => line.translation = text,
+      );
+      needTranslation = _hasMissingTranslation(lyric);
+    }
+    if (needRomanization && supplemental.romanization.isNotEmpty) {
+      _mergeCandidateSupplemental(
+        lyric,
+        supplemental.romanization,
+        hasValue: _hasRomanization,
+        apply: _applyRomanization,
+      );
+      needRomanization = _hasMissingRomanization(lyric);
+    }
+  }
+  return lyric;
+}
+
+int _compareCandidatePriority(
+  LyricCandidate a,
+  LyricCandidate b,
+  String? primaryId,
+) {
+  if (primaryId != null && primaryId.isNotEmpty) {
+    final aPrimary = a.id == primaryId;
+    final bPrimary = b.id == primaryId;
+    if (aPrimary != bPrimary) return aPrimary ? -1 : 1;
+  }
+  final priorityA = lyricCandidateSourcePriority[a.source] ?? 99;
+  final priorityB = lyricCandidateSourcePriority[b.source] ?? 99;
+  if (priorityA != priorityB) return priorityA.compareTo(priorityB);
+  return b.score.compareTo(a.score);
+}
+
+bool _hasTranslation(LyricLine line) {
+  return (line.translation?.trim() ?? '').isNotEmpty;
+}
+
+bool _hasRomanization(LyricLine line) {
+  return !line.autoRomanized && (line.romanLyric?.trim() ?? '').isNotEmpty;
+}
+
+void _applyRomanization(LyricLine line, String text) {
+  line.romanLyric = text;
+  line.autoRomanized = false;
+  line.romanWords = mapRomanWords(
+    romanText: text,
+    words: line is SyncLyricLine ? line.words : null,
+    lineStart: line.start,
+    lineLength: line.length,
+  );
+}
+
+bool _hasMissingTranslation(Lyric lyric) {
+  for (final line in lyric.lines) {
+    if (_candidateLineContent(line).isEmpty) continue;
+    if (!_hasTranslation(line)) return true;
+  }
+  return false;
+}
+
+bool _hasMissingRomanization(Lyric lyric) {
+  for (final line in lyric.lines) {
+    if (_candidateLineContent(line).isEmpty) continue;
+    if (!_hasRomanization(line)) return true;
+  }
+  return false;
+}
+
+/// 候选的翻译与罗马音行；优先使用候选保存的文本，缺失字段再从候选歌词
+/// 文本解析出的内容补齐。
+_CandidateSupplemental _supplementalFor(
+  LyricCandidate candidate, {
+  required bool needTranslation,
+  required bool needRomanization,
+}) {
+  final translation = needTranslation
+      ? _parseCandidateSupplemental(candidate.translationText)
+      : const <_CandidateSupplementalLine>[];
+  final romanization = needRomanization
+      ? _parseCandidateSupplemental(candidate.romanizationText)
+      : const <_CandidateSupplementalLine>[];
+  final needsTextParse =
+      (needTranslation && translation.isEmpty) ||
+      (needRomanization && romanization.isEmpty);
+  if (!needsTextParse || !candidate.hasText) {
+    return _CandidateSupplemental(
+      translation: translation,
+      romanization: romanization,
+    );
+  }
+  final parsed = _parsedSupplementalFor(candidate);
+  return _CandidateSupplemental(
+    translation: translation.isEmpty ? parsed.translation : translation,
+    romanization: romanization.isEmpty ? parsed.romanization : romanization,
+  );
+}
+
+_CandidateSupplemental _parsedSupplementalFor(LyricCandidate candidate) {
+  final key = _supplementalTextCacheKey(candidate);
+  final cached = _supplementalTextCache.remove(key);
+  if (cached != null) {
+    _supplementalTextCache[key] = cached;
+    return cached;
+  }
+  lyricCandidateSupplementalParseCount++;
+  var supplemental = _CandidateSupplemental.empty;
+  try {
+    final lyric = parseLyricCandidateText(candidate.text, candidate.format);
+    if (lyric != null && lyric.lines.isNotEmpty) {
+      supplemental = _supplementalLinesFromLyric(lyric);
+    }
+  } catch (error, trace) {
+    log.lyric.warn(
+      'lyric.cache',
+      '候选补充内容解析失败',
+      fields: {'candidate': candidate.id},
+      error: error,
+      stackTrace: trace,
+    );
+  }
+  _supplementalTextCache[key] = supplemental;
+  while (_supplementalTextCache.length >
+      lyricCandidateSupplementalCacheCapacity) {
+    _supplementalTextCache.remove(_supplementalTextCache.keys.first);
+  }
+  return supplemental;
+}
+
+String _supplementalTextCacheKey(LyricCandidate candidate) {
+  final text = candidate.text;
+  return '${candidate.id}\u0000${candidate.format}\u0000'
+      '${text.length}\u0000${text.hashCode}';
+}
+
+_CandidateSupplemental _supplementalLinesFromLyric(Lyric lyric) {
+  final translation = <_CandidateSupplementalLine>[];
+  final romanization = <_CandidateSupplementalLine>[];
+  for (final line in lyric.lines) {
+    final translated = line.translation?.trim() ?? '';
+    if (translated.isNotEmpty) {
+      translation.add(_CandidateSupplementalLine(line.start, translated));
+    }
+    if (line.autoRomanized) continue;
+    final roman = line.romanLyric?.trim() ?? '';
+    if (roman.isNotEmpty) {
+      romanization.add(_CandidateSupplementalLine(line.start, roman));
+    }
+  }
+  return _CandidateSupplemental(
+    translation: translation,
+    romanization: romanization,
+  );
+}
+
+class _CandidateSupplemental {
+  const _CandidateSupplemental({
+    required this.translation,
+    required this.romanization,
+  });
+
+  static const _CandidateSupplemental empty = _CandidateSupplemental(
+    translation: <_CandidateSupplementalLine>[],
+    romanization: <_CandidateSupplementalLine>[],
+  );
+
+  final List<_CandidateSupplementalLine> translation;
+  final List<_CandidateSupplementalLine> romanization;
 }
 
 class _CandidateSupplementalLine {
@@ -373,18 +586,27 @@ Lyric? parseLyricCandidateText(String text, String format) {
 }
 
 /// 由候选得到可播放的歌词；文本不可用或解析失败时按来源标识重新请求。
+///
+/// [peers] 为同一记录里的其它候选，用于补齐当前候选缺失的翻译与罗马音。
 Future<Lyric?> loadLyricFromCandidate(
   LyricCandidate candidate,
   Audio audio, {
   Future<Lyric?> Function(LyricCandidate candidate)? loader,
+  Iterable<LyricCandidate> peers = const <LyricCandidate>[],
 }) async {
+  final pool = _candidatePool(candidate, peers);
   if (candidate.hasText) {
     final parsed = parseLyricCandidateText(candidate.text, candidate.format);
     if (parsed != null && parsed.lines.isNotEmpty) {
-      return applyLyricCandidateSupplemental(
+      final merged = applyLyricCandidateSupplemental(
         parsed,
         translationText: candidate.translationText,
         romanizationText: candidate.romanizationText,
+      );
+      return applyCrossCandidateSupplemental(
+        merged,
+        pool,
+        primaryId: candidate.id,
       );
     }
     log.lyric.warn(
@@ -394,10 +616,16 @@ Future<Lyric?> loadLyricFromCandidate(
     );
   }
   try {
-    final lyric = await (loader?.call(candidate) ??
-            _requestLyricById(candidate, audio))
-        .timeout(const Duration(seconds: 12), onTimeout: () => null);
-    if (lyric != null && lyric.lines.isNotEmpty) return lyric;
+    final lyric =
+        await (loader?.call(candidate) ?? _requestLyricById(candidate, audio))
+            .timeout(const Duration(seconds: 12), onTimeout: () => null);
+    if (lyric != null && lyric.lines.isNotEmpty) {
+      return applyCrossCandidateSupplemental(
+        lyric,
+        pool,
+        primaryId: candidate.id,
+      );
+    }
   } catch (error, trace) {
     log.lyric.warn(
       'lyric.cache',
@@ -408,6 +636,18 @@ Future<Lyric?> loadLyricFromCandidate(
     );
   }
   return null;
+}
+
+List<LyricCandidate> _candidatePool(
+  LyricCandidate primary,
+  Iterable<LyricCandidate> peers,
+) {
+  final pool = <String, LyricCandidate>{};
+  for (final peer in peers) {
+    pool[peer.id] = peer;
+  }
+  pool[primary.id] = primary;
+  return pool.values.toList(growable: false);
 }
 
 /// 将候选转换为播放器现有的来源记录，供 lyric_sources 持久化。
