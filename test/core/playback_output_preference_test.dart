@@ -97,10 +97,10 @@ void main() {
     preference.setOutputDeviceForMode(false, 2, 'Speakers');
     preference.setOutputDeviceForMode(true, 5, 'USB DAC');
 
-    expect(
-      preference.activeOutputDeviceId,
-      PlaybackPreference.defaultOutputDeviceId,
-    );
+    // 当前仍为共享模式，读到共享槽的 2；写入独占槽的 5 不污染当前模式。
+    expect(preference.activeOutputDeviceId, 2);
+    expect(preference.activeOutputDeviceName, 'Speakers');
+    expect(preference.wasapiOutputDeviceId, 5);
     preference.outputMode = PlaybackPreference.outputModeExclusive;
     expect(preference.activeOutputDeviceId, 5);
     expect(preference.activeOutputDeviceName, 'USB DAC');
