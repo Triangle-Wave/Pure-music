@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/remote/dpapi.dart';
 import 'package:pure_music/remote/navidrome_client.dart';
 import 'package:pure_music/remote/remote_client.dart';
@@ -179,7 +180,11 @@ class RemoteLibrary {
         final unc = _clientFor(
           source,
         ).playbackUrl(source, password, track.trackId);
-        return getPictureFromPath(path: unc, width: size, height: size);
+        return rust_tag_reader.getPictureFromPath(
+          path: unc,
+          width: size,
+          height: size,
+        );
       } catch (_) {
         return null;
       }
