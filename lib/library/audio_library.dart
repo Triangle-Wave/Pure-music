@@ -352,6 +352,32 @@ Future<(List<Audio>, int)> _fillConvertedAudios<T>(
   return (audios, convertedAudioCount);
 }
 
+/// 旧索引可能同时保留 CUE/ISO 整轨条目与其虚拟轨；同目录存在虚拟轨时只保留虚拟轨。
+List<Audio> _dropContainerTracksShadowedByVirtualTracks(List<Audio> audios) {
+  if (audios.length < 2) return audios;
+  final containerKeys = <String>{};
+  for (final audio in audios) {
+    final segment = audio.cueSegment;
+    if (segment != null) {
+      containerKeys.add(_audioPathLookupKey(segment.sourcePath));
+    }
+  }
+  if (containerKeys.isEmpty) return audios;
+  final kept = <Audio>[];
+  for (final audio in audios) {
+    if (!audio.isVirtualTrack && containerKeys.contains(audio._pathLookupKey)) {
+      continue;
+    }
+    kept.add(audio);
+  }
+  if (kept.length == audios.length) return audios;
+  log.library.debug(
+    'legacy',
+    '[library] 剔除被虚拟轨覆盖的整轨条目 ${audios.length - kept.length} 条',
+  );
+  return kept;
+}
+
 Future<_FolderConversionResult> _convertSqliteFolders(
   List<library_db.IndexFolder> dbFolders, {
   required int objectBatchSize,
@@ -371,7 +397,7 @@ Future<_FolderConversionResult> _convertSqliteFolders(
     convertedAudioCount = converted.$2;
     folders.add(
       AudioFolder(
-        converted.$1,
+        _dropContainerTracksShadowedByVirtualTracks(converted.$1),
         folder.path,
         folder.modified.toInt(),
         folder.latest.toInt(),
@@ -411,7 +437,12 @@ Future<_FolderConversionResult> _convertJsonFolders(
       objectBatchSize: objectBatchSize,
     );
     convertedAudioCount = converted.$2;
-    folders.add(AudioFolder.fromMap(map, converted.$1));
+    folders.add(
+      AudioFolder.fromMap(
+        map,
+        _dropContainerTracksShadowedByVirtualTracks(converted.$1),
+      ),
+    );
     map.clear();
   }
   final pooledTextCount = loadPool.textCount;

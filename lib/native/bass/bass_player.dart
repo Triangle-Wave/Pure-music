@@ -274,6 +274,9 @@ class BassPlayer {
   // CUE 虚拟轨的段范围（毫秒）。end 为 0 表示到文件尾，普通曲目两者均为 0。
   int _segmentStartMs = 0;
   int _segmentEndMs = 0;
+  // 段起点 seek 后 BASS 实际报告的位置。部分解码器（如 TTA）定位会偏离请求值，
+  // 进度零点必须用这个真实位置，否则进度条与声音错位。
+  int _segmentStartActualMs = 0;
   double _segmentDurationSeconds = 0;
   bool _mixerUsesQueue = false;
   int? _queuedStream;
@@ -680,8 +683,8 @@ class BassPlayer {
     }
 
     var seconds = _bass.BASS_ChannelBytes2Seconds(_fstream!, finalBytes);
-    if (_segmentStartMs > 0) {
-      seconds -= _segmentStartMs / 1000.0;
+    if (_segmentStartActualMs > 0) {
+      seconds -= _segmentStartActualMs / 1000.0;
     }
     return seconds.clamp(0.0, length);
   }
@@ -2424,6 +2427,10 @@ class BassPlayer {
         _segmentStartMs = savedStartMs;
         _segmentEndMs = savedEndMs;
         _applySegmentRange(handle, startMs: savedStartMs, endMs: savedEndMs);
+        _segmentStartActualMs = _resolveSegmentStartActualMs(
+          handle,
+          savedStartMs,
+        );
         _refreshCachedLength();
         _bassWasapiInit();
         if (savedPosition > 0) seek(savedPosition);
@@ -3061,24 +3068,7 @@ class BassPlayer {
       final source = _createSharedSource(audioPath);
       if (source == 0) return 0;
       // 段起点必须在加入混音器之前定位，混音器按 source 当前位置取数据。
-      if (startMs > 0) {
-        final startBytes = _bass.BASS_ChannelSeconds2Bytes(
-          source,
-          startMs / 1000.0,
-        );
-        if (_bass.BASS_ChannelSetPosition(
-              source,
-              startBytes,
-              bass.BASS_POS_BYTE,
-            ) ==
-            0) {
-          log.bass.warn(
-            'legacy',
-            '[bass] segment source seek failed: start=${startMs}ms '
-                'error=${_bass.BASS_ErrorGetCode()}',
-          );
-        }
-      }
+      _seekSegmentStart(source, startMs);
       final segmentSeconds = segmentDurationSeconds(
         startMs: startMs,
         endMs: endMs,
@@ -3102,44 +3092,111 @@ class BassPlayer {
     return direct;
   }
 
+  /// 读取流当前绝对位置（毫秒）；读不到返回 -1。
+  int _currentPositionMs(int handle) {
+    final posBytes = _bass.BASS_ChannelGetPosition(handle, bass.BASS_POS_BYTE);
+    if (posBytes < 0) return -1;
+    final seconds = _bass.BASS_ChannelBytes2Seconds(handle, posBytes);
+    return seconds < 0 ? -1 : (seconds * 1000).round();
+  }
+
+  /// 把段起点定位到 [startMs]；解码器偏离目标时归零后重试一次。
+  void _seekSegmentStart(int handle, int startMs) {
+    if (startMs <= 0) return;
+    final startBytes = _bass.BASS_ChannelSeconds2Bytes(
+      handle,
+      startMs / 1000.0,
+    );
+    if (startBytes <= 0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment start conversion failed: start=${startMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+      return;
+    }
+    final seeked =
+        _bass.BASS_ChannelSetPosition(
+          handle,
+          startBytes,
+          bass.BASS_POS_BYTE,
+        ) !=
+        0;
+    if (!seeked) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment start seek failed: start=${startMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+    }
+    final firstMs = seeked ? _currentPositionMs(handle) : -1;
+    if (firstMs >= 0 && (firstMs - startMs).abs() <= 50) return;
+    // 部分解码器首次定位会停在旧位置，先归零再定位一次。
+    _bass.BASS_ChannelSetPosition(handle, 0, bass.BASS_POS_BYTE);
+    final retried =
+        _bass.BASS_ChannelSetPosition(
+          handle,
+          startBytes,
+          bass.BASS_POS_BYTE,
+        ) !=
+        0;
+    final retryMs = retried ? _currentPositionMs(handle) : -1;
+    if (retryMs < 0 || (retryMs - startMs).abs() > 50) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment start seek off target: start=${startMs}ms '
+            'first=${firstMs}ms retry=${retryMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+    }
+  }
+
+  /// 段起点 seek 后的真实绝对位置，作为进度零点；读不到时回退请求值。
+  int _resolveSegmentStartActualMs(int handle, int requestedMs) {
+    // 普通曲目没有段偏移，零点必须保持 0。
+    if (requestedMs <= 0) return 0;
+    final actualMs = _currentPositionMs(handle);
+    if (actualMs < 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment start position unavailable: requested=${requestedMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+      return requestedMs;
+    }
+    return actualMs;
+  }
+
   /// 直连/独占流没有混音器，段起点用 BASS_POS_BYTE 定位，段尾用 BASS_POS_END 截断。
   void _applySegmentRange(
     int handle, {
     required int startMs,
     required int endMs,
   }) {
-    if (startMs > 0) {
-      final startBytes = _bass.BASS_ChannelSeconds2Bytes(
-        handle,
-        startMs / 1000.0,
+    _seekSegmentStart(handle, startMs);
+    if (endMs <= startMs) return;
+    final endBytes = _bass.BASS_ChannelSeconds2Bytes(handle, endMs / 1000.0);
+    final totalBytes = _bass.BASS_ChannelGetLength(handle, bass.BASS_POS_BYTE);
+    if (endBytes <= 0 || totalBytes <= 0 || endBytes >= totalBytes) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment end skipped: end=${endMs}ms endBytes=$endBytes '
+            'totalBytes=$totalBytes',
       );
-      if (_bass.BASS_ChannelSetPosition(
-            handle,
-            startBytes,
-            bass.BASS_POS_BYTE,
-          ) ==
-          0) {
-        log.bass.warn(
-          'legacy',
-          '[bass] segment start seek failed: start=${startMs}ms '
-              'error=${_bass.BASS_ErrorGetCode()}',
-        );
-      }
+      return;
     }
-    if (endMs > startMs) {
-      final endBytes = _bass.BASS_ChannelSeconds2Bytes(handle, endMs / 1000.0);
-      if (_bass.BASS_ChannelSetPosition(
-            handle,
-            endBytes,
-            bass.BASS_POS_END,
-          ) ==
-          0) {
-        log.bass.warn(
-          'legacy',
-          '[bass] segment end set failed: end=${endMs}ms '
-              'error=${_bass.BASS_ErrorGetCode()}',
-        );
-      }
+    // BASS_POS_END 表示距流末尾的距离，不是绝对位置。
+    if (_bass.BASS_ChannelSetPosition(
+          handle,
+          totalBytes - endBytes,
+          bass.BASS_POS_END,
+        ) ==
+        0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment end set failed: end=${endMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
     }
   }
 
@@ -3951,6 +4008,10 @@ class BassPlayer {
           startMs: _segmentStartMs,
           endMs: _segmentEndMs,
         );
+        final actualStartMs = _resolveSegmentStartActualMs(
+          decodeHandle,
+          _segmentStartMs,
+        );
 
         // 2) 预初始化 WASAPI，旧流继续通过 BASS 播放
         _positionUpdaterVersion++;
@@ -3987,6 +4048,7 @@ class BassPlayer {
 
         // 4) 启动 WASAPI 输出
         _fstream = decodeHandle;
+        _segmentStartActualMs = actualStartMs;
         _bass.BASS_ChannelSetAttribute(
           decodeHandle,
           bass.BASS_ATTRIB_VOLDSP,
@@ -4228,6 +4290,7 @@ class BassPlayer {
 
     _fstream = handle;
     _streamWasapiExclusive = true;
+    _segmentStartActualMs = _resolveSegmentStartActualMs(handle, startMs);
     _refreshStreamSampleRate();
     _refreshCachedLength();
 
@@ -4261,6 +4324,7 @@ class BassPlayer {
 
     _fstream = handle;
     _streamWasapiExclusive = false;
+    _segmentStartActualMs = _resolveSegmentStartActualMs(handle, startMs);
     _refreshStreamSampleRate();
     _refreshCachedLength();
     if (seekTo > 0.0) {
@@ -4389,6 +4453,7 @@ class BassPlayer {
     final effectiveEnd = segment.endMs;
     _segmentStartMs = 0;
     _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
     _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _replayGainDb = null;
@@ -4448,6 +4513,10 @@ class BassPlayer {
       _fPath = path;
       _segmentStartMs = effectiveStart;
       _segmentEndMs = effectiveEnd;
+      _segmentStartActualMs = _resolveSegmentStartActualMs(
+        handle,
+        effectiveStart,
+      );
       _segmentDurationSeconds = segmentDurationSeconds(
         startMs: effectiveStart,
         endMs: effectiveEnd,
@@ -5181,6 +5250,7 @@ class BassPlayer {
     _pendingOutputRestore = null;
     _segmentStartMs = 0;
     _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
     _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
@@ -5307,6 +5377,7 @@ class BassPlayer {
     _cachedLengthSeconds = null;
     _segmentStartMs = 0;
     _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
     _segmentDurationSeconds = 0;
     _lingeringPath = null;
     _smartOutgoingPath = null;
