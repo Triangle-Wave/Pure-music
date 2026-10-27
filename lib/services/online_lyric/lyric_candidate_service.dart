@@ -7,6 +7,7 @@ import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/lyric_loader.dart';
 import 'package:pure_music/lyric/lyric_source.dart';
 import 'package:pure_music/lyric/qrc.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 import 'package:pure_music/lyric/ttml.dart';
 import 'package:pure_music/services/online_lyric/lyric_candidate_cache.dart';
 import 'package:pure_music/services/online_lyric/models/lyric_candidate.dart';
@@ -99,6 +100,7 @@ LyricCandidate? buildLyricCandidate({
   final sourceId = lyricCandidateSourceId(result);
   if (sourceId == null || sourceId.isEmpty) return null;
   final source = lyricCandidateSourceName(result.source);
+  final supplemental = lyricCandidateSupplementalText(lyric);
   return LyricCandidate(
     id: '$source:$sourceId',
     source: source,
@@ -111,9 +113,163 @@ LyricCandidate? buildLyricCandidate({
     format: lyricCandidateFormat(source, lyric),
     wordByWord: lyric.isWordByWord,
     text: lyric.rawText?.trim() ?? '',
+    translationText: supplemental.translationText,
+    romanizationText: supplemental.romanizationText,
     preview: lyricCandidatePreview(lyric),
     fetchedAtMs: fetchedAtMs,
   );
+}
+
+/// 提取每行的翻译与罗马音，写成与主歌词时间戳对齐的 LRC 文本。
+///
+/// 没有翻译或罗马音时对应字段为 null；本地转写生成的罗马音不写入候选。
+({String? translationText, String? romanizationText})
+lyricCandidateSupplementalText(Lyric lyric) {
+  final translations = StringBuffer();
+  final romanizations = StringBuffer();
+  for (final line in lyric.lines) {
+    final timeTag = _candidateLrcTime(line.start);
+    final translation = line.translation?.trim() ?? '';
+    if (translation.isNotEmpty) {
+      translations.writeln('$timeTag$translation');
+    }
+    if (line.autoRomanized) continue;
+    final romanization = line.romanLyric?.trim() ?? '';
+    if (romanization.isNotEmpty) {
+      romanizations.writeln('$timeTag$romanization');
+    }
+  }
+  final translationText = translations.toString().trim();
+  final romanizationText = romanizations.toString().trim();
+  return (
+    translationText: translationText.isEmpty ? null : translationText,
+    romanizationText: romanizationText.isEmpty ? null : romanizationText,
+  );
+}
+
+/// 候选保存的翻译与罗马音与主歌词行时间戳允许的最大偏差。
+const int lyricCandidateSupplementalToleranceMs = 300;
+
+/// 把候选保存的翻译与罗马音按时间戳补回歌词的空字段。
+///
+/// 只填充空的 [LyricLine.translation] 与 [LyricLine.romanLyric]，
+/// 主歌词解析出的内容优先；罗马音同时映射逐词时间供逐字显示使用。
+Lyric applyLyricCandidateSupplemental(
+  Lyric lyric, {
+  String? translationText,
+  String? romanizationText,
+}) {
+  _mergeCandidateSupplemental(
+    lyric,
+    _parseCandidateSupplemental(translationText),
+    hasValue: (line) => (line.translation?.trim() ?? '').isNotEmpty,
+    apply: (line, text) => line.translation = text,
+  );
+  _mergeCandidateSupplemental(
+    lyric,
+    _parseCandidateSupplemental(romanizationText),
+    hasValue: (line) =>
+        !line.autoRomanized && (line.romanLyric?.trim() ?? '').isNotEmpty,
+    apply: (line, text) {
+      line.romanLyric = text;
+      line.autoRomanized = false;
+      line.romanWords = mapRomanWords(
+        romanText: text,
+        words: line is SyncLyricLine ? line.words : null,
+        lineStart: line.start,
+        lineLength: line.length,
+      );
+    },
+  );
+  return lyric;
+}
+
+class _CandidateSupplementalLine {
+  const _CandidateSupplementalLine(this.start, this.text);
+
+  final Duration start;
+  final String text;
+}
+
+final _candidateSupplementalTimePattern = RegExp(
+  r'^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]\s*(.*)$',
+);
+
+List<_CandidateSupplementalLine> _parseCandidateSupplemental(String? text) {
+  final content = text?.trim() ?? '';
+  if (content.isEmpty) return const [];
+  final parsed = <_CandidateSupplementalLine>[];
+  for (final raw in content.split(RegExp(r'\r?\n'))) {
+    final line = raw.trim();
+    if (line.isEmpty) continue;
+    final match = _candidateSupplementalTimePattern.firstMatch(line);
+    if (match == null) continue;
+    final minutes = int.tryParse(match.group(1) ?? '');
+    final seconds = int.tryParse(match.group(2) ?? '');
+    if (minutes == null || seconds == null) continue;
+    final fraction = match.group(3);
+    final milliseconds = fraction == null || fraction.isEmpty
+        ? 0
+        : int.tryParse(fraction.padRight(3, '0').substring(0, 3)) ?? 0;
+    final body = (match.group(4) ?? '').trim();
+    if (body.isEmpty) continue;
+    parsed.add(
+      _CandidateSupplementalLine(
+        Duration(milliseconds: minutes * 60000 + seconds * 1000 + milliseconds),
+        body,
+      ),
+    );
+  }
+  parsed.sort((a, b) => a.start.compareTo(b.start));
+  return parsed;
+}
+
+void _mergeCandidateSupplemental(
+  Lyric lyric,
+  List<_CandidateSupplementalLine> supplemental, {
+  required bool Function(LyricLine line) hasValue,
+  required void Function(LyricLine line, String text) apply,
+}) {
+  if (supplemental.isEmpty) return;
+  var cursor = 0;
+  for (final line in lyric.lines) {
+    if (_candidateLineContent(line).isEmpty) continue;
+    if (hasValue(line)) continue;
+    final lineMs = line.start.inMilliseconds;
+    while (cursor + 1 < supplemental.length) {
+      final currentMs = supplemental[cursor].start.inMilliseconds;
+      final nextMs = supplemental[cursor + 1].start.inMilliseconds;
+      if ((nextMs - lineMs).abs() >= (currentMs - lineMs).abs()) break;
+      cursor++;
+    }
+    while (cursor > 0) {
+      final currentMs = supplemental[cursor].start.inMilliseconds;
+      final previousMs = supplemental[cursor - 1].start.inMilliseconds;
+      if ((previousMs - lineMs).abs() >= (currentMs - lineMs).abs()) break;
+      cursor--;
+    }
+    final diff = (supplemental[cursor].start.inMilliseconds - lineMs).abs();
+    if (diff > lyricCandidateSupplementalToleranceMs) continue;
+    apply(line, supplemental[cursor].text);
+  }
+}
+
+String _candidateLineContent(LyricLine line) {
+  if (line is SyncLyricLine) {
+    return line.words.map((word) => word.content).join().trim();
+  }
+  if (line is UnsyncLyricLine) return line.content.trim();
+  return '';
+}
+
+String _candidateLrcTime(Duration duration) {
+  final totalMs = duration.inMilliseconds < 0 ? 0 : duration.inMilliseconds;
+  final minutes = totalMs ~/ 60000;
+  final seconds = (totalMs % 60000) ~/ 1000;
+  final milliseconds = totalMs % 1000;
+  return '[${minutes.toString().padLeft(2, '0')}:'
+      '${seconds.toString().padLeft(2, '0')}.'
+      '${milliseconds.toString().padLeft(3, '0')}]';
 }
 
 /// 候选的来源标识。
@@ -224,7 +380,13 @@ Future<Lyric?> loadLyricFromCandidate(
 }) async {
   if (candidate.hasText) {
     final parsed = parseLyricCandidateText(candidate.text, candidate.format);
-    if (parsed != null && parsed.lines.isNotEmpty) return parsed;
+    if (parsed != null && parsed.lines.isNotEmpty) {
+      return applyLyricCandidateSupplemental(
+        parsed,
+        translationText: candidate.translationText,
+        romanizationText: candidate.romanizationText,
+      );
+    }
     log.lyric.warn(
       'lyric.cache',
       '候选歌词文本不可用，改为按来源重新请求',

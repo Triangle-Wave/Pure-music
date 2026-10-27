@@ -5,6 +5,8 @@ LyricCandidate _candidate({
   required String id,
   required double score,
   String format = 'lrc',
+  String? translationText,
+  String? romanizationText,
 }) {
   return LyricCandidate(
     id: id,
@@ -18,6 +20,8 @@ LyricCandidate _candidate({
     format: format,
     wordByWord: format != 'lrc',
     text: '[00:00.00]line',
+    translationText: translationText,
+    romanizationText: romanizationText,
     preview: const ['line'],
     fetchedAtMs: 1,
   );
@@ -35,6 +39,22 @@ void main() {
     expect(decoded.formatLabel, 'KRC 逐字');
     expect(decoded.preview, ['line']);
     expect(decoded.wordByWord, isTrue);
+  });
+
+  test('候选 JSON 往返保留翻译与罗马音文本', () {
+    final candidate = _candidate(
+      id: 'ne:2',
+      score: 86,
+      format: 'yrc',
+      translationText: '[00:00.000]第一行译文\n[00:03.200]第二行译文',
+      romanizationText: '[00:00.000]romaji one\n[00:03.200]romaji two',
+    );
+
+    final decoded = LyricCandidate.fromJson(candidate.toJson());
+
+    expect(decoded, isNotNull);
+    expect(decoded!.translationText, candidate.translationText);
+    expect(decoded.romanizationText, candidate.romanizationText);
   });
 
   test('缺少 id 或 source 的候选被丢弃', () {

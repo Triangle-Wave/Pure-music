@@ -2,7 +2,8 @@
 //
 // 缓存文件位于 `<数据根>/cache/lyrics/<sha1>.json`，键由标题、艺术家、专辑与
 // 时长（按 5 秒取整）归一化后计算。候选保存来源、曲目信息、格式、原始歌词
-// 文本、前几行预览与匹配分数；用户选择单独保存在同一份记录里。
+// 文本、翻译与罗马音文本、前几行预览与匹配分数；用户选择单独保存在同一份
+// 记录里。
 
 /// 候选预览保留的行数。
 const int lyricCandidatePreviewLineCount = 3;
@@ -11,7 +12,7 @@ const int lyricCandidatePreviewLineCount = 3;
 const int lyricCandidateMaxCount = 16;
 
 /// 候选记录的 JSON 结构版本；结构变化时旧文件会被丢弃并重新获取。
-const int lyricCandidateRecordVersion = 1;
+const int lyricCandidateRecordVersion = 2;
 
 /// 候选匹配分数的最小值；低于该值的搜索结果不进入候选列表。
 const double lyricCandidateMinScore = 40.0;
@@ -31,6 +32,8 @@ class LyricCandidate {
     required this.wordByWord,
     required this.text,
     required this.fetchedAtMs,
+    this.translationText,
+    this.romanizationText,
     this.preview = const [],
   });
 
@@ -60,6 +63,12 @@ class LyricCandidate {
 
   /// 原始歌词文本，用于选中后离线重建歌词。
   final String text;
+
+  /// 每行的翻译文本，每行形如 `[mm:ss.mmm]翻译`；重建歌词时按时间戳补回。
+  final String? translationText;
+
+  /// 每行的罗马音文本，每行形如 `[mm:ss.mmm]罗马音`；重建歌词时按时间戳补回。
+  final String? romanizationText;
 
   /// 前几行歌词，供选择界面预览。
   final List<String> preview;
@@ -103,6 +112,8 @@ class LyricCandidate {
       'format': format,
       'wordByWord': wordByWord,
       'text': text,
+      'translationText': translationText,
+      'romanizationText': romanizationText,
       'preview': preview,
       'fetchedAtMs': fetchedAtMs,
     };
@@ -133,12 +144,19 @@ class LyricCandidate {
       format: _asText(json['format']),
       wordByWord: json['wordByWord'] == true,
       text: _asText(json['text']),
+      translationText: _asOptionalText(json['translationText']),
+      romanizationText: _asOptionalText(json['romanizationText']),
       preview: preview,
       fetchedAtMs: _asInt(json['fetchedAtMs']),
     );
   }
 
-  LyricCandidate copyWith({String? text, List<String>? preview}) {
+  LyricCandidate copyWith({
+    String? text,
+    String? translationText,
+    String? romanizationText,
+    List<String>? preview,
+  }) {
     return LyricCandidate(
       id: id,
       source: source,
@@ -151,6 +169,8 @@ class LyricCandidate {
       format: format,
       wordByWord: wordByWord,
       text: text ?? this.text,
+      translationText: translationText ?? this.translationText,
+      romanizationText: romanizationText ?? this.romanizationText,
       preview: preview ?? this.preview,
       fetchedAtMs: fetchedAtMs,
     );
@@ -277,6 +297,12 @@ class LyricCandidateRecord {
 }
 
 String _asText(Object? value) => value is String ? value : '';
+
+String? _asOptionalText(Object? value) {
+  if (value is! String) return null;
+  final text = value.trim();
+  return text.isEmpty ? null : text;
+}
 
 int _asInt(Object? value) {
   if (value is int) return value;
