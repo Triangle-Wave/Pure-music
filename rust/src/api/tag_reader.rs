@@ -2701,6 +2701,96 @@ fn has_virtual_tracks(audios: &[serde_json::Value]) -> bool {
     })
 }
 
+/// 同目录 CUE 的 FILE 源文件路径键集合；只解析 cue 文本，不读音频标签。
+fn cue_referenced_source_keys(folder_path: &Path) -> HashSet<String> {
+    let Ok(entries) = fs::read_dir(folder_path) else {
+        return HashSet::new();
+    };
+    let mut keys = HashSet::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let cue_path = entry.path();
+        if !is_cue_path(&cue_path) {
+            continue;
+        }
+        let Ok(sheet) = parse_cue_file(&cue_path) else {
+            continue;
+        };
+        for file in sheet.files {
+            keys.insert(path_key(&folder_path.join(file.name.as_str())));
+        }
+    }
+    keys
+}
+
+/// 索引里是否还留着被同目录 CUE 引用的整轨条目（旧版本写入的源文件记录）。
+///
+/// 只有已经生成过虚拟轨的目录才继续做磁盘检查：目录戳未变时不新增 CUE，
+/// 普通目录因此在内存里直接返回，不额外访问磁盘。
+fn folder_has_cue_source_residue(folder_path: &Path, audios: &[serde_json::Value]) -> bool {
+    if !has_virtual_tracks(audios) {
+        return false;
+    }
+    let mut plain_paths: HashSet<String> = HashSet::new();
+    for audio in audios {
+        let Some(path) = audio.get("path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if parse_segment_path(path).is_none() {
+            plain_paths.insert(path_key(Path::new(path)));
+        }
+    }
+    if plain_paths.is_empty() {
+        return false;
+    }
+    cue_referenced_source_keys(folder_path)
+        .iter()
+        .any(|key| plain_paths.contains(key))
+}
+
+/// 增量更新对单个已索引目录的处理方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexedFolderScan {
+    /// 目录与容器状态都没变，沿用索引条目。
+    Skip,
+    /// 逐条比较音频的修改时间与大小。
+    Incremental,
+    /// 目录含 CUE/ISO 或索引残留整轨条目，整体重建目录条目。
+    RebuildVirtual,
+}
+
+/// 判断已索引目录在增量更新中的处理方式。
+///
+/// 目录变更戳未变时普通目录直接跳过；含 CUE/ISO 的目录只在索引里仍然留着被
+/// CUE 引用的整轨条目时才重建，重建后条目全是虚拟轨，下一次即回到跳过，
+/// 因此不会每次启动都重扫全部 CUE 目录。
+fn indexed_folder_scan(
+    folder_path: &Path,
+    audios: &[serde_json::Value],
+    old_folder_modified: u64,
+    new_folder_modified: u64,
+    explicit_refresh: bool,
+) -> IndexedFolderScan {
+    if should_scan_indexed_audio_files(
+        old_folder_modified,
+        new_folder_modified,
+        explicit_refresh,
+    ) {
+        return if folder_contains_virtual_container(folder_path) || has_virtual_tracks(audios) {
+            IndexedFolderScan::RebuildVirtual
+        } else {
+            IndexedFolderScan::Incremental
+        };
+    }
+    if folder_has_cue_source_residue(folder_path, audios) {
+        IndexedFolderScan::RebuildVirtual
+    } else {
+        IndexedFolderScan::Skip
+    }
+}
+
 #[cfg(test)]
 mod tag_reader_tests {
     use std::{
@@ -2716,11 +2806,12 @@ mod tag_reader_tests {
     use super::cue::is_cue_path;
     use super::{
         detect_and_encode, drop_invalid_duplicates_by_media_id, folder_contains_virtual_container,
-        has_virtual_tracks, indexed_audio_update_from_parts, is_iso_path, is_lyric_item_key,
-        join_deduped, parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata,
-        read_by_asf, read_cue_folder, read_sacd_folder, should_emit_index_progress,
-        should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
-        Audio, IndexedAudioUpdate, SUPPORTED_FORMATS,
+        folder_has_cue_source_residue, has_virtual_tracks, indexed_audio_update_from_parts,
+        indexed_folder_scan, is_iso_path, is_lyric_item_key, join_deduped, parse_midi_metadata,
+        path_key, probe_indexed_path, read_audio_extra_metadata, read_by_asf, read_cue_folder,
+        read_sacd_folder, should_emit_index_progress, should_scan_indexed_audio_files,
+        should_show_recording_date, tag_reader_worker_count_for, Audio, AudioFolder,
+        IndexedAudioUpdate, IndexedFolderScan, SUPPORTED_FORMATS,
     };
 
     fn asf_object(guid: [u8; 16], data: Vec<u8>) -> Vec<u8> {
@@ -3481,6 +3572,92 @@ mod tag_reader_tests {
 
         assert!(read_sacd_folder(std::slice::from_ref(&iso_path)).is_empty());
     }
+
+    fn cue_folder_with_source() -> (TempCueDir, PathBuf) {
+        let temp = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        let wav_path = temp.0.join("disc.wav");
+        write_test_file(&wav_path, &minimal_wav_bytes());
+        write_test_file(
+            &temp.0.join("album.cue"),
+            b"PERFORMER \"Album Artist\"\nTITLE \"Test Album\"\nFILE \"disc.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:01:00\n",
+        );
+        (temp, wav_path)
+    }
+
+    #[test]
+    fn incremental_scan_rebuilds_cue_folder_with_legacy_full_track_entry() {
+        let (temp, wav_path) = cue_folder_with_source();
+        let source = wav_path.to_string_lossy().to_string();
+        let audios = vec![
+            serde_json::json!({"path": source.clone(), "by": "Lofty", "valid": true}),
+            serde_json::json!({
+                "path": format!("{source}::track=01::start=0::end=1000"),
+                "by": "cue",
+                "valid": true
+            }),
+            serde_json::json!({
+                "path": format!("{source}::track=02::start=1000::end=2000"),
+                "by": "cue",
+                "valid": true
+            }),
+        ];
+
+        assert!(folder_has_cue_source_residue(&temp.0, &audios));
+        assert_eq!(
+            indexed_folder_scan(&temp.0, &audios, 100, 100, false),
+            IndexedFolderScan::RebuildVirtual
+        );
+
+        let rebuilt = match AudioFolder::read_from_folder(&temp.0) {
+            Ok(folder) => folder,
+            Err(error) => panic!("rebuild cue folder failed: {error}"),
+        };
+        let rebuilt_audios: Vec<serde_json::Value> =
+            rebuilt.audios.iter().map(Audio::to_json_value).collect();
+        assert_eq!(rebuilt_audios.len(), 2);
+        assert!(rebuilt_audios.iter().all(|audio| audio["by"] == "cue"));
+        assert_eq!(
+            indexed_folder_scan(&temp.0, &rebuilt_audios, 100, 100, false),
+            IndexedFolderScan::Skip
+        );
+        assert_eq!(
+            indexed_folder_scan(&temp.0, &rebuilt_audios, 100, 100, true),
+            IndexedFolderScan::RebuildVirtual
+        );
+    }
+
+    #[test]
+    fn incremental_scan_keeps_cue_folder_with_unreferenced_tracks() {
+        let (temp, _wav_path) = cue_folder_with_source();
+        write_test_file(&temp.0.join("extra.wav"), &minimal_wav_bytes());
+        let extra = temp.0.join("extra.wav").to_string_lossy().to_string();
+        let virtual_track = format!(
+            "{}::track=01::start=0::end=1000",
+            temp.0.join("disc.wav").to_string_lossy()
+        );
+        let audios = vec![
+            serde_json::json!({"path": virtual_track, "by": "cue", "valid": true}),
+            serde_json::json!({"path": extra, "by": "Lofty", "valid": true}),
+        ];
+
+        assert!(!folder_has_cue_source_residue(&temp.0, &audios));
+        assert_eq!(
+            indexed_folder_scan(&temp.0, &audios, 100, 100, false),
+            IndexedFolderScan::Skip
+        );
+    }
+
+    #[test]
+    fn incremental_scan_skips_unchanged_folder_without_virtual_tracks() {
+        let audios = vec![serde_json::json!({"path": "C:/Music/t.mp3", "by": "Lofty"})];
+        assert_eq!(
+            indexed_folder_scan(Path::new("C:/Music/not-a-real-dir"), &audios, 7, 7, false),
+            IndexedFolderScan::Skip
+        );
+    }
 }
 
 fn index_folder_snapshots_unchanged(folders: &[library_db::IndexFolderSnapshot]) -> bool {
@@ -3503,6 +3680,7 @@ pub fn update_index(
                 reject_network_folder(Path::new(&folder.path))?;
             }
             if snapshot.version == CURRENT_INDEX_VERSION
+                && snapshot.mixed_virtual_folders.is_empty()
                 && index_folder_snapshots_unchanged(&snapshot.folders)
             {
                 log::debug!(target: "library", "index update fast path: unchanged");
@@ -3593,11 +3771,19 @@ pub fn update_index(
             continue;
         }
         let new_folder_modified = folder_change_stamp(Path::new(folder_path.as_str()));
-        if !should_scan_indexed_audio_files(
+        let indexed_audios: &[serde_json::Value] = folder_item
+            .get("audios")
+            .and_then(|value| value.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let folder_scan = indexed_folder_scan(
+            Path::new(&folder_path),
+            indexed_audios,
             old_folder_modified,
             new_folder_modified,
             force_metadata_check || refresh_all_metadata,
-        ) {
+        );
+        if folder_scan == IndexedFolderScan::Skip {
             checked += folder_audio_count;
             skipped_tag_reads += folder_audio_count;
             continue;
@@ -3622,11 +3808,7 @@ pub fn update_index(
 
         // 虚拟轨的 path 是合成路径（容器路径::track=..::start=..::end=..[::sacd=..]），
         // 逐条 fs::metadata 探活必然失败；目录含 CUE/ISO 或已有虚拟轨时整体重建。
-        let needs_rebuild = folder_contains_virtual_container(Path::new(&folder_path))
-            || folder_item["audios"]
-                .as_array()
-                .is_some_and(|audios| has_virtual_tracks(audios));
-        if needs_rebuild {
+        if folder_scan == IndexedFolderScan::RebuildVirtual {
             match AudioFolder::read_from_folder(&folder_path) {
                 Ok(rebuilt) => {
                     let rebuilt_audios: Vec<serde_json::Value> = rebuilt

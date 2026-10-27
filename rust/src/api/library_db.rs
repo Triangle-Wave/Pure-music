@@ -106,6 +106,9 @@ pub(crate) struct IndexFolderSnapshot {
 pub(crate) struct IndexSnapshot {
     pub version: u64,
     pub folders: Vec<IndexFolderSnapshot>,
+    /// 同时含 CUE/ISO 虚拟轨与普通条目的目录：旧版本可能留下整轨源文件记录，
+    /// 即使目录戳未变也需要走一次增量扫描清理。
+    pub mixed_virtual_folders: Vec<String>,
 }
 
 fn sqlite_path(index_dir: &Path) -> PathBuf {
@@ -600,7 +603,39 @@ pub(crate) fn read_current_index_snapshot(index_dir: &Path) -> Result<Option<Ind
         })
     })?;
     let folders = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Some(IndexSnapshot { version, folders }))
+    let mixed_virtual_folders = read_mixed_virtual_folders(&conn)?;
+    Ok(Some(IndexSnapshot {
+        version,
+        folders,
+        mixed_virtual_folders,
+    }))
+}
+
+/// 列出同时含 CUE/ISO 虚拟轨与普通条目的目录。
+///
+/// 库里没有虚拟轨时只做一次 EXISTS 探测，普通音乐库不承担额外扫描成本。
+fn read_mixed_virtual_folders(conn: &Connection) -> Result<Vec<String>> {
+    let has_virtual: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM audios WHERE by IN ('cue', 'sacd'))",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_virtual {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT v.folder_path FROM audios v
+         WHERE v.by IN ('cue', 'sacd')
+           AND EXISTS (
+             SELECT 1 FROM audios p
+             WHERE p.folder_path = v.folder_path
+               AND p.path NOT LIKE '%::track=%'
+               AND p.path NOT LIKE '%::sacd=%'
+           )
+         ORDER BY v.folder_path",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn backfill_audio_identities(conn: &Connection) -> Result<()> {
@@ -1921,6 +1956,47 @@ mod tests {
         std::io::Write::write_all(&mut file, b" ").unwrap();
         drop(file);
         assert!(read_current_index_snapshot(&base).unwrap().is_none());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_lists_folders_with_virtual_and_plain_tracks() {
+        let base = test_dir("snapshot_mixed_virtual");
+        std::fs::create_dir_all(&base).unwrap();
+        let plain_path = base.join("disc.tak");
+        let mut virtual_audio = test_audio(&plain_path);
+        virtual_audio["path"] = serde_json::json!(format!(
+            "{}::track=01::start=0::end=1000",
+            plain_path.to_string_lossy()
+        ));
+        virtual_audio["by"] = serde_json::json!("cue");
+        let index = test_index(&base, vec![virtual_audio, test_audio(&plain_path)]);
+        sync_test_index(&base, &index);
+
+        let snapshot = read_current_index_snapshot(&base).unwrap().unwrap();
+        assert_eq!(
+            snapshot.mixed_virtual_folders,
+            vec![base.to_string_lossy().to_string()]
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_has_no_mixed_folders_when_all_tracks_are_virtual() {
+        let base = test_dir("snapshot_all_virtual");
+        std::fs::create_dir_all(&base).unwrap();
+        let plain_path = base.join("disc.tak");
+        let mut virtual_audio = test_audio(&plain_path);
+        virtual_audio["path"] = serde_json::json!(format!(
+            "{}::track=01::start=0::end=1000",
+            plain_path.to_string_lossy()
+        ));
+        virtual_audio["by"] = serde_json::json!("cue");
+        let index = test_index(&base, vec![virtual_audio]);
+        sync_test_index(&base, &index);
+
+        let snapshot = read_current_index_snapshot(&base).unwrap().unwrap();
+        assert!(snapshot.mixed_virtual_folders.is_empty());
         std::fs::remove_dir_all(base).unwrap();
     }
 
