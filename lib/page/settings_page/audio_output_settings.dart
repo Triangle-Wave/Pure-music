@@ -289,35 +289,39 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
               ? '设备不可用，将使用系统默认'
               : '${state.deviceName} · ${state.exclusive ? '独占' : '共享'} · '
                     '${state.sampleRate}Hz · ${state.formatLabel}',
-          action: DropdownMenu<int>(
-            key: ValueKey('output-device-$_exclusive-$_deviceId'),
-            initialSelection: _deviceId,
-            width: 240,
-            enableFilter: false,
-            requestFocusOnTap: false,
-            onOpened: _applying ? null : () => unawaited(_reloadDevices()),
-            dropdownMenuEntries: [
-              if (_devicesError != null)
-                DropdownMenuEntry<int>(
-                  value: -2,
-                  label: _devicesError!,
-                  enabled: false,
-                ),
-              if (_deviceMissing)
-                DropdownMenuEntry<int>(
-                  value: _deviceId,
-                  label: _deviceName.isEmpty
-                      ? '设备 #$_deviceId（不可用）'
-                      : '$_deviceName（不可用）',
-                  enabled: false,
-                ),
-              for (final device in _devices)
-                DropdownMenuEntry<int>(
-                  value: device.id,
-                  label: device.displayName,
-                ),
-            ],
-            onSelected: _applying ? null : _selectDevice,
+          action: Listener(
+            onPointerDown: _applying
+                ? null
+                : (_) => unawaited(_reloadDevices()),
+            child: DropdownMenu<int>(
+              key: ValueKey('output-device-$_exclusive-$_deviceId'),
+              initialSelection: _deviceId,
+              width: 240,
+              enableFilter: false,
+              requestFocusOnTap: false,
+              dropdownMenuEntries: [
+                if (_devicesError != null)
+                  DropdownMenuEntry<int>(
+                    value: -2,
+                    label: _devicesError!,
+                    enabled: false,
+                  ),
+                if (_deviceMissing)
+                  DropdownMenuEntry<int>(
+                    value: _deviceId,
+                    label: _deviceName.isEmpty
+                        ? '设备 #$_deviceId（不可用）'
+                        : '$_deviceName（不可用）',
+                    enabled: false,
+                  ),
+                for (final device in _devices)
+                  DropdownMenuEntry<int>(
+                    value: device.id,
+                    label: device.displayName,
+                  ),
+              ],
+              onSelected: _applying ? null : _selectDevice,
+            ),
           ),
         ),
         const SizedBox(height: 16.0),
