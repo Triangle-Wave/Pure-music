@@ -60,11 +60,11 @@ IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 // Version
 //
 
-#define VERSION_AS_NUMBER 2,3,8,0
+#define VERSION_AS_NUMBER 2,3,9,0
 
-#define PRODUCT_VERSION "2.3.8"
+#define PRODUCT_VERSION "2.3.9"
 
-#define FILE_VERSION_STR "2.3.8.0"
+#define FILE_VERSION_STR "2.3.9.0"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION VERSION_AS_NUMBER
