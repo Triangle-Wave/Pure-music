@@ -64,6 +64,17 @@ BassOutputFormat bassOutputFormatFromPreference(String value) {
   return BassOutputFormat.float32;
 }
 
+/// 输出重建前的完整快照，用于切换失败时回滚。
+typedef _OutputSnapshot = ({
+  int sharedId,
+  String sharedName,
+  int wasapiId,
+  String wasapiName,
+  bool exclusive,
+  int rate,
+  BassOutputFormat format,
+});
+
 /// 一次输出重建的完整参数。
 class BassOutputConfig {
   const BassOutputConfig({
@@ -287,8 +298,9 @@ class BassPlayer {
   String _wasapiActualFormatLabel = 'float32';
   bool _preferredExclusive = false;
   int _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+  String _sharedOutputDeviceName = '';
   int _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
-  String _outputDeviceName = '';
+  String _wasapiOutputDeviceName = '';
   int _outputSampleRate = 0;
   BassOutputFormat _outputFormat = BassOutputFormat.float32;
   bool _outputRebuildInProgress = false;
@@ -1819,14 +1831,30 @@ class BassPlayer {
 
     _lastInitUsedDefaultDevice = false;
     final requestedDevice = _sharedOutputDeviceId;
-    final device = _validatedSharedDeviceId(requestedDevice);
+    var device = _validatedSharedDeviceId(requestedDevice);
     if (device != requestedDevice) {
-      _lastInitUsedDefaultDevice = true;
-      log.bass.warn(
-        'legacy',
-        '[bass] shared output device $requestedDevice is unavailable, '
-            'falling back to system default',
+      // 设备增删会让编号变化，按保存的设备名精确解析一次。
+      final remapped = _matchDeviceIdByName(
+        _enumerateSharedOutputDevices(),
+        _sharedOutputDeviceName,
+        scope: 'shared',
       );
+      if (remapped >= 0) {
+        device = remapped;
+        _sharedOutputDeviceId = remapped;
+        log.bass.info(
+          'legacy',
+          '[bass] shared output device $requestedDevice remapped to '
+              '$remapped by name "${_sharedOutputDeviceName.trim()}"',
+        );
+      } else {
+        _lastInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output device $requestedDevice is unavailable, '
+              'falling back to system default',
+        );
+      }
     }
 
     final requestedRate = !_preferredExclusive && _outputSampleRate > 0
@@ -2133,28 +2161,26 @@ class BassPlayer {
     return devices;
   }
 
+  /// 按设备名精确匹配设备号：trim 后小写相等，不做包含匹配。
+  ///
+  /// 未命中返回 -1（系统默认），并记录 WARN 便于定位设备被替换或改名的情况。
   int _matchDeviceIdByName(
     List<BassOutputDevice> devices,
-    String name,
-  ) {
+    String name, {
+    required String scope,
+  }) {
     final target = name.trim();
     if (target.isEmpty) return PlaybackPreference.defaultOutputDeviceId;
-    for (final device in devices) {
-      if (device.id < 0) continue;
-      if (device.name == target) return device.id;
-    }
     final lower = target.toLowerCase();
     for (final device in devices) {
       if (device.id < 0) continue;
-      if (device.name.toLowerCase() == lower) return device.id;
+      if (device.name.trim().toLowerCase() == lower) return device.id;
     }
-    for (final device in devices) {
-      if (device.id < 0) continue;
-      final candidate = device.name.toLowerCase();
-      if (candidate.contains(lower) || lower.contains(candidate)) {
-        return device.id;
-      }
-    }
+    log.bass.warn(
+      'legacy',
+      '[bass] $scope output device "$target" not found by exact name, '
+          'using system default',
+    );
     return PlaybackPreference.defaultOutputDeviceId;
   }
 
@@ -2167,12 +2193,16 @@ class BassPlayer {
         : _enumerateSharedOutputDevices();
   }
 
+  String get _activeOutputDeviceName =>
+      _preferredExclusive ? _wasapiOutputDeviceName : _sharedOutputDeviceName;
+
   BassOutputState get outputState {
     final exclusive = wasapiExclusive || _streamWasapiExclusive;
     final usedDefault = exclusive
         ? _lastWasapiInitUsedDefaultDevice
         : _lastInitUsedDefaultDevice;
-    final configuredName = _outputDeviceName.trim();
+    final configuredName =
+        (exclusive ? _wasapiOutputDeviceName : _sharedOutputDeviceName).trim();
     return BassOutputState(
       deviceId: exclusive ? _wasapiOutputDeviceId : _sharedOutputDeviceId,
       deviceName: usedDefault || configuredName.isEmpty
@@ -2200,16 +2230,13 @@ class BassPlayer {
   void _applyStoredOutputPreference() {
     try {
       final pref = AppPreference.instance.playbackPref;
-      _preferredExclusive =
-          pref.outputMode == PlaybackPreference.outputModeExclusive;
+      _preferredExclusive = pref.isExclusiveOutput;
       _outputSampleRate = pref.outputSampleRate;
       _outputFormat = bassOutputFormatFromPreference(pref.outputFormat);
-      _outputDeviceName = pref.outputDeviceName;
-      if (_preferredExclusive) {
-        _wasapiOutputDeviceId = pref.outputDeviceId;
-      } else {
-        _sharedOutputDeviceId = pref.outputDeviceId;
-      }
+      _sharedOutputDeviceId = pref.sharedOutputDeviceId;
+      _sharedOutputDeviceName = pref.sharedOutputDeviceName;
+      _wasapiOutputDeviceId = pref.wasapiOutputDeviceId;
+      _wasapiOutputDeviceName = pref.wasapiOutputDeviceName;
     } catch (err, trace) {
       log.bass.warn(
         'legacy',
@@ -2219,22 +2246,11 @@ class BassPlayer {
       );
       _preferredExclusive = false;
       _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _sharedOutputDeviceName = '';
       _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _wasapiOutputDeviceName = '';
       _outputSampleRate = 0;
       _outputFormat = BassOutputFormat.float32;
-      _outputDeviceName = '';
-    }
-  }
-
-  void _remapCurrentModeDeviceId(bool exclusive) {
-    final devices = exclusive
-        ? _enumerateWasapiOutputDevices()
-        : _enumerateSharedOutputDevices();
-    final matched = _matchDeviceIdByName(devices, _outputDeviceName);
-    if (exclusive) {
-      _wasapiOutputDeviceId = matched;
-    } else {
-      _sharedOutputDeviceId = matched;
     }
   }
 
@@ -2243,31 +2259,30 @@ class BassPlayer {
       deviceId: _preferredExclusive
           ? _wasapiOutputDeviceId
           : _sharedOutputDeviceId,
-      deviceName: _outputDeviceName,
+      deviceName: _activeOutputDeviceName,
       exclusive: _preferredExclusive,
       sampleRate: _outputSampleRate,
       format: _outputFormat,
     );
   }
 
-  ({int shared, int wasapi, String name, bool exclusive, int rate, BassOutputFormat format})
-  _outputSnapshot() {
+  _OutputSnapshot _outputSnapshot() {
     return (
-      shared: _sharedOutputDeviceId,
-      wasapi: _wasapiOutputDeviceId,
-      name: _outputDeviceName,
+      sharedId: _sharedOutputDeviceId,
+      sharedName: _sharedOutputDeviceName,
+      wasapiId: _wasapiOutputDeviceId,
+      wasapiName: _wasapiOutputDeviceName,
       exclusive: _preferredExclusive,
       rate: _outputSampleRate,
       format: _outputFormat,
     );
   }
 
-  void _restoreOutputSnapshot(
-    ({int shared, int wasapi, String name, bool exclusive, int rate, BassOutputFormat format}) snapshot,
-  ) {
-    _sharedOutputDeviceId = snapshot.shared;
-    _wasapiOutputDeviceId = snapshot.wasapi;
-    _outputDeviceName = snapshot.name;
+  void _restoreOutputSnapshot(_OutputSnapshot snapshot) {
+    _sharedOutputDeviceId = snapshot.sharedId;
+    _sharedOutputDeviceName = snapshot.sharedName;
+    _wasapiOutputDeviceId = snapshot.wasapiId;
+    _wasapiOutputDeviceName = snapshot.wasapiName;
     _preferredExclusive = snapshot.exclusive;
     _outputSampleRate = snapshot.rate;
     _outputFormat = snapshot.format;
@@ -2277,19 +2292,13 @@ class BassPlayer {
     _preferredExclusive = config.exclusive;
     _outputSampleRate = config.sampleRate;
     _outputFormat = config.format;
-    _outputDeviceName = config.deviceName.trim();
+    final name = config.deviceName.trim();
     if (config.exclusive) {
       _wasapiOutputDeviceId = config.deviceId;
-      _sharedOutputDeviceId = _matchDeviceIdByName(
-        _enumerateSharedOutputDevices(),
-        _outputDeviceName,
-      );
+      _wasapiOutputDeviceName = name;
     } else {
       _sharedOutputDeviceId = config.deviceId;
-      _wasapiOutputDeviceId = _matchDeviceIdByName(
-        _enumerateWasapiOutputDevices(),
-        _outputDeviceName,
-      );
+      _sharedOutputDeviceName = name;
     }
   }
 
@@ -2462,7 +2471,7 @@ class BassPlayer {
     } catch (err, trace) {
       log.bass.error(
         'legacy',
-        '[bass] output rebuild failed: ${_outputDeviceName.isEmpty ? '默认设备' : _outputDeviceName}',
+        '[bass] output rebuild failed: ${_activeOutputDeviceName.isEmpty ? '默认设备' : _activeOutputDeviceName}',
         error: err,
         stackTrace: trace,
       );
@@ -3907,8 +3916,8 @@ class BassPlayer {
       _preferredExclusive = exclusive;
       return true;
     }
+    // 两种模式各用自己记录的设备；目标模式未记录时按系统默认初始化。
     _preferredExclusive = exclusive;
-    _remapCurrentModeDeviceId(exclusive);
     try {
       if (exclusive && !hasAudioSource) {
         const message = '独占模式未切换：当前没有可用的音频流';
@@ -4711,14 +4720,30 @@ class BassPlayer {
 
     _lastWasapiInitUsedDefaultDevice = false;
     final requestedDevice = _wasapiOutputDeviceId;
-    final device = _validatedWasapiDeviceId(requestedDevice);
+    var device = _validatedWasapiDeviceId(requestedDevice);
     if (device != requestedDevice) {
-      _lastWasapiInitUsedDefaultDevice = true;
-      log.bass.warn(
-        'legacy',
-        '[bass] WASAPI device $requestedDevice is unavailable, '
-            'falling back to system default',
+      // WASAPI 端点编号同样会随设备增删变化，按保存的设备名精确解析一次。
+      final remapped = _matchDeviceIdByName(
+        _enumerateWasapiOutputDevices(),
+        _wasapiOutputDeviceName,
+        scope: 'wasapi',
       );
+      if (remapped >= 0) {
+        device = remapped;
+        _wasapiOutputDeviceId = remapped;
+        log.bass.info(
+          'legacy',
+          '[bass] WASAPI device $requestedDevice remapped to $remapped '
+              'by name "${_wasapiOutputDeviceName.trim()}"',
+        );
+      } else {
+        _lastWasapiInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] WASAPI device $requestedDevice is unavailable, '
+              'falling back to system default',
+        );
+      }
     }
 
     // 添加 AUTOFORMAT 和 BUFFER 标志

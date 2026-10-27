@@ -28,8 +28,15 @@ class PlaybackPreference {
   bool dsdPlaybackModeMigratedToDsf;
   int sacdPcmSampleRate;
   int sacdPcmBitDepth;
-  int outputDeviceId;
-  String outputDeviceName;
+
+  /// 共享模式记录的输出设备。共享与独占使用各自独立的编号空间与设备名。
+  int sharedOutputDeviceId;
+  String sharedOutputDeviceName;
+
+  /// 独占（WASAPI）模式记录的输出设备。
+  int wasapiOutputDeviceId;
+  String wasapiOutputDeviceName;
+
   String outputMode;
   int outputSampleRate;
   String outputFormat;
@@ -82,12 +89,43 @@ class PlaybackPreference {
     this.dsdPlaybackModeMigratedToDsf = true,
     this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
     this.sacdPcmBitDepth = defaultSacdPcmBitDepth,
-    this.outputDeviceId = defaultOutputDeviceId,
-    this.outputDeviceName = '',
+    this.sharedOutputDeviceId = defaultOutputDeviceId,
+    this.sharedOutputDeviceName = '',
+    this.wasapiOutputDeviceId = defaultOutputDeviceId,
+    this.wasapiOutputDeviceName = '',
     this.outputMode = outputModeShared,
     this.outputSampleRate = 0,
     this.outputFormat = outputFormatFloat32,
   });
+
+  bool get isExclusiveOutput => outputMode == outputModeExclusive;
+
+  /// 当前模式记录的输出设备，供播放器与设置页读取。
+  int get activeOutputDeviceId =>
+      isExclusiveOutput ? wasapiOutputDeviceId : sharedOutputDeviceId;
+
+  String get activeOutputDeviceName =>
+      isExclusiveOutput ? wasapiOutputDeviceName : sharedOutputDeviceName;
+
+  int outputDeviceIdFor(bool exclusive) =>
+      exclusive ? wasapiOutputDeviceId : sharedOutputDeviceId;
+
+  String outputDeviceNameFor(bool exclusive) =>
+      exclusive ? wasapiOutputDeviceName : sharedOutputDeviceName;
+
+  void setActiveOutputDevice(int id, String name) =>
+      setOutputDeviceForMode(isExclusiveOutput, id, name);
+
+  void setOutputDeviceForMode(bool exclusive, int id, String name) {
+    final normalized = name.trim();
+    if (exclusive) {
+      wasapiOutputDeviceId = id;
+      wasapiOutputDeviceName = normalized;
+    } else {
+      sharedOutputDeviceId = id;
+      sharedOutputDeviceName = normalized;
+    }
+  }
 
   Map<String, dynamic> toMap() => {
     'playMode': playMode.name,
@@ -117,8 +155,13 @@ class PlaybackPreference {
     'dsdPlaybackModeMigratedToDsf': dsdPlaybackModeMigratedToDsf,
     'sacdPcmSampleRate': sacdPcmSampleRate,
     'sacdPcmBitDepth': sacdPcmBitDepth,
-    'outputDeviceId': outputDeviceId,
-    'outputDeviceName': outputDeviceName,
+    'sharedOutputDeviceId': sharedOutputDeviceId,
+    'sharedOutputDeviceName': sharedOutputDeviceName,
+    'wasapiOutputDeviceId': wasapiOutputDeviceId,
+    'wasapiOutputDeviceName': wasapiOutputDeviceName,
+    // 旧版本只认识这一对键，写入当前模式那份以保持向后兼容。
+    'outputDeviceId': activeOutputDeviceId,
+    'outputDeviceName': activeOutputDeviceName,
     'outputMode': outputMode,
     'outputSampleRate': outputSampleRate,
     'outputFormat': outputFormat,
@@ -131,6 +174,7 @@ class PlaybackPreference {
     final session = _sessionFromMap(map);
     final eq = _eqFromMap(map);
     final transition = _transitionFromMap(map);
+    final outputDevices = _outputDevicesFromMap(map);
     return PlaybackPreference(
       _playModeFromStoredValue(map['playMode']) ?? PlayMode.forward,
       _normalizedVolumeDsp(map['volumeDsp']),
@@ -161,8 +205,10 @@ class PlaybackPreference {
         map['sacdPcmSampleRate'],
       ),
       sacdPcmBitDepth: _sacdPcmBitDepthFromStored(map['sacdPcmBitDepth']),
-      outputDeviceId: _outputDeviceIdFromStored(map['outputDeviceId']),
-      outputDeviceName: _normalizedString(map['outputDeviceName']),
+      sharedOutputDeviceId: outputDevices.sharedId,
+      sharedOutputDeviceName: outputDevices.sharedName,
+      wasapiOutputDeviceId: outputDevices.wasapiId,
+      wasapiOutputDeviceName: outputDevices.wasapiName,
       outputMode: _outputModeFromStored(map['outputMode']),
       outputSampleRate: _outputSampleRateFromStored(map['outputSampleRate']),
       outputFormat: _outputFormatFromStored(map['outputFormat']),
@@ -204,6 +250,43 @@ class PlaybackPreference {
     return depth != null && sacdPcmBitDepths.contains(depth)
         ? depth
         : defaultSacdPcmBitDepth;
+  }
+
+  /// 读取两种模式各自的输出设备，并把旧配置的单份设备迁移到当时记录的模式。
+  ///
+  /// 缺少分模式键时，按 `outputMode` 把 `outputDeviceId/outputDeviceName` 并入
+  /// 该模式；另一模式保持系统默认，由用户在该模式下重新选择。
+  static ({
+    int sharedId,
+    String sharedName,
+    int wasapiId,
+    String wasapiName,
+  })
+  _outputDevicesFromMap(Map<String, dynamic> map) {
+    final legacyId = _outputDeviceIdFromStored(map['outputDeviceId']);
+    final legacyName = _normalizedString(map['outputDeviceName']);
+    final legacyExclusive =
+        _outputModeFromStored(map['outputMode']) == outputModeExclusive;
+    final hasShared =
+        map.containsKey('sharedOutputDeviceId') ||
+        map.containsKey('sharedOutputDeviceName');
+    final hasWasapi =
+        map.containsKey('wasapiOutputDeviceId') ||
+        map.containsKey('wasapiOutputDeviceName');
+    return (
+      sharedId: hasShared
+          ? _outputDeviceIdFromStored(map['sharedOutputDeviceId'])
+          : (legacyExclusive ? defaultOutputDeviceId : legacyId),
+      sharedName: hasShared
+          ? _normalizedString(map['sharedOutputDeviceName'])
+          : (legacyExclusive ? '' : legacyName),
+      wasapiId: hasWasapi
+          ? _outputDeviceIdFromStored(map['wasapiOutputDeviceId'])
+          : (legacyExclusive ? legacyId : defaultOutputDeviceId),
+      wasapiName: hasWasapi
+          ? _normalizedString(map['wasapiOutputDeviceName'])
+          : (legacyExclusive ? legacyName : ''),
+    );
   }
 
   static int _outputDeviceIdFromStored(Object? value) {

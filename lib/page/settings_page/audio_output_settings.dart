@@ -29,20 +29,31 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
     '192000-24',
   ];
 
-  final _pref = AppPreference.instance.playbackPref;
-  late bool _exclusive;
-  late int _deviceId;
-  late String _deviceName;
-  late int _sampleRate;
-  late BassOutputFormat _format;
-  List<BassOutputDevice> _devices = const [
+  static const _defaultDevices = <BassOutputDevice>[
     BassOutputDevice(
       id: PlaybackPreference.defaultOutputDeviceId,
       name: '系统默认',
       isDefault: true,
     ),
   ];
+
+  final _pref = AppPreference.instance.playbackPref;
+  late bool _exclusive;
+  late int _deviceId;
+  late String _deviceName;
+  late int _sampleRate;
+  late BassOutputFormat _format;
+  List<BassOutputDevice> _devices = _defaultDevices;
   bool _applying = false;
+
+  /// 已保存的设备当前是否可用。不可用时只置标记，不改写偏好中的设备。
+  bool _deviceMissing = false;
+
+  /// 设备枚举失败或列表为空时的说明，显示在下拉菜单内。
+  String? _devicesError;
+
+  /// 防止并发枚举的结果乱序覆盖。
+  int _deviceLoadToken = 0;
 
   @override
   void initState() {
@@ -52,27 +63,31 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
   }
 
   void _syncFromPreference() {
-    _exclusive = _pref.outputMode == PlaybackPreference.outputModeExclusive;
-    _deviceId = _pref.outputDeviceId;
-    _deviceName = _pref.outputDeviceName;
+    _exclusive = _pref.isExclusiveOutput;
+    _deviceId = _pref.activeOutputDeviceId;
+    _deviceName = _pref.activeOutputDeviceName;
     _sampleRate = _pref.outputSampleRate;
     _format = bassOutputFormatFromPreference(_pref.outputFormat);
   }
 
-  Future<List<BassOutputDevice>> _loadDevices(bool exclusive) async {
+  Future<void> _reloadDevices() async {
+    final token = ++_deviceLoadToken;
+    final exclusive = _exclusive;
     try {
       final devices = await PlayService.instance.playbackService
           .enumerateOutputDevices(exclusive: exclusive);
-      if (devices.isEmpty) {
-        return const [
-          BassOutputDevice(
-            id: PlaybackPreference.defaultOutputDeviceId,
-            name: '系统默认',
-            isDefault: true,
-          ),
-        ];
-      }
-      return devices;
+      if (!mounted || token != _deviceLoadToken) return;
+      setState(() {
+        if (devices.isEmpty) {
+          _devices = _defaultDevices;
+          _devicesError = '未发现可用的输出设备';
+          _deviceMissing = false;
+        } else {
+          _devices = devices;
+          _devicesError = null;
+          _normalizeSelection();
+        }
+      });
     } catch (err, trace) {
       log.settings.warn(
         'audio-output',
@@ -80,37 +95,33 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         error: err,
         stackTrace: trace,
       );
-      return const [
-        BassOutputDevice(
-          id: PlaybackPreference.defaultOutputDeviceId,
-          name: '系统默认',
-          isDefault: true,
-        ),
-      ];
+      if (!mounted || token != _deviceLoadToken) return;
+      setState(() {
+        _devices = _defaultDevices;
+        _devicesError = '设备列表读取失败，请重新展开下拉重试';
+        _deviceMissing = false;
+      });
     }
   }
 
-  Future<void> _reloadDevices() async {
-    final devices = await _loadDevices(_exclusive);
-    if (!mounted) return;
-    setState(() {
-      _devices = devices;
-      _normalizeSelection();
-    });
-  }
-
+  /// 只判定已保存设备是否仍可用；命中同名设备时更新为当前编号。
   void _normalizeSelection() {
+    _deviceMissing = false;
+    if (_deviceId == PlaybackPreference.defaultOutputDeviceId) return;
     for (final device in _devices) {
       if (device.id == _deviceId) return;
     }
-    for (final device in _devices) {
-      if (device.id >= 0 && device.name == _deviceName) {
-        _deviceId = device.id;
-        return;
+    final target = _deviceName.trim().toLowerCase();
+    if (target.isNotEmpty) {
+      for (final device in _devices) {
+        if (device.id < 0) continue;
+        if (device.name.trim().toLowerCase() == target) {
+          _deviceId = device.id;
+          return;
+        }
       }
     }
-    _deviceId = PlaybackPreference.defaultOutputDeviceId;
-    _deviceName = '系统默认';
+    _deviceMissing = true;
   }
 
   Future<void> _apply({
@@ -123,25 +134,33 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
     if (_applying) return;
     setState(() => _applying = true);
     try {
+      final nextExclusive = exclusive ?? _exclusive;
+      final modeChanged = nextExclusive != _exclusive;
+      // 切换输出模式时由播放服务取目标模式自己的设备记录。
+      final applyDeviceId = modeChanged
+          ? null
+          : (deviceId ??
+              (_deviceMissing
+                  ? PlaybackPreference.defaultOutputDeviceId
+                  : _deviceId));
+      final applyDeviceName = modeChanged
+          ? null
+          : (deviceName ?? (_deviceMissing ? '' : _deviceName));
+      // 设备缺失时只改采样率/格式，偏好里保留原设备选择供设备恢复后重解析。
+      final keepStoredDevice =
+          !modeChanged && deviceId == null && _deviceMissing;
       final result = await PlayService.instance.playbackService
           .applyAudioOutputConfig(
-            deviceId: deviceId ?? _deviceId,
-            deviceName: deviceName ?? _deviceName,
-            exclusive: exclusive ?? _exclusive,
+            deviceId: applyDeviceId,
+            deviceName: applyDeviceName,
+            exclusive: nextExclusive,
             sampleRate: sampleRate ?? _sampleRate,
             format: format ?? _format,
+            keepStoredDevice: keepStoredDevice,
           );
       if (!mounted) return;
-      final devices = await _loadDevices(
-        AppPreference.instance.playbackPref.outputMode ==
-            PlaybackPreference.outputModeExclusive,
-      );
-      if (!mounted) return;
-      setState(() {
-        _syncFromPreference();
-        _devices = devices;
-        _normalizeSelection();
-      });
+      setState(_syncFromPreference);
+      await _reloadDevices();
       if (!result.success) {
         log.settings.warn(
           'audio-output',
@@ -174,13 +193,7 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
 
   void _setExclusive(bool exclusive) {
     if (exclusive == _exclusive) return;
-    unawaited(
-      _apply(
-        exclusive: exclusive,
-        deviceId: _deviceId,
-        deviceName: _deviceName,
-      ),
-    );
+    unawaited(_apply(exclusive: exclusive));
   }
 
   String get _pcmCacheSelection {
@@ -272,16 +285,32 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
           ),
         SettingsTile(
           description: '输出设备',
-          subtitle:
-              '${state.deviceName} · ${state.exclusive ? '独占' : '共享'} · '
-              '${state.sampleRate}Hz · ${state.formatLabel}',
+          subtitle: _deviceMissing
+              ? '设备不可用，将使用系统默认'
+              : '${state.deviceName} · ${state.exclusive ? '独占' : '共享'} · '
+                    '${state.sampleRate}Hz · ${state.formatLabel}',
           action: DropdownMenu<int>(
             key: ValueKey('output-device-$_exclusive-$_deviceId'),
             initialSelection: _deviceId,
             width: 240,
             enableFilter: false,
             requestFocusOnTap: false,
+            onOpened: _applying ? null : () => unawaited(_reloadDevices()),
             dropdownMenuEntries: [
+              if (_devicesError != null)
+                DropdownMenuEntry<int>(
+                  value: -2,
+                  label: _devicesError!,
+                  enabled: false,
+                ),
+              if (_deviceMissing)
+                DropdownMenuEntry<int>(
+                  value: _deviceId,
+                  label: _deviceName.isEmpty
+                      ? '设备 #$_deviceId（不可用）'
+                      : '$_deviceName（不可用）',
+                  enabled: false,
+                ),
               for (final device in _devices)
                 DropdownMenuEntry<int>(
                   value: device.id,

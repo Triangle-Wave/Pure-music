@@ -708,9 +708,11 @@ class PlaybackService extends ChangeNotifier {
       _pref.outputMode = exclusive
           ? PlaybackPreference.outputModeExclusive
           : PlaybackPreference.outputModeShared;
-      _pref.outputDeviceId = _player.outputConfig.deviceId;
-      final appliedName = _player.outputConfig.deviceName;
-      if (appliedName.isNotEmpty) _pref.outputDeviceName = appliedName;
+      final appliedConfig = _player.outputConfig;
+      _pref.setActiveOutputDevice(
+        appliedConfig.deviceId,
+        appliedConfig.deviceName,
+      );
       if (disabled.isNotEmpty) {
         unawaited(AppPreference.instance.save());
       }
@@ -733,38 +735,18 @@ class PlaybackService extends ChangeNotifier {
 
   BassOutputState get outputState => _player.outputState;
 
-  int _matchOutputDeviceByName(
-    List<BassOutputDevice> devices,
-    String name,
-  ) {
-    final target = name.trim();
-    if (target.isEmpty) return PlaybackPreference.defaultOutputDeviceId;
-    for (final device in devices) {
-      if (device.id < 0) continue;
-      if (device.name == target) return device.id;
-    }
-    final lower = target.toLowerCase();
-    for (final device in devices) {
-      if (device.id < 0) continue;
-      if (device.name.toLowerCase() == lower) return device.id;
-    }
-    for (final device in devices) {
-      if (device.id < 0) continue;
-      final candidate = device.name.toLowerCase();
-      if (candidate.contains(lower) || lower.contains(candidate)) {
-        return device.id;
-      }
-    }
-    return PlaybackPreference.defaultOutputDeviceId;
-  }
-
   /// 应用完整的音频输出设置。切换失败时播放器回退原输出，偏好保持不变。
+  ///
+  /// [deviceId]/[deviceName] 为空时使用该模式已记录的设备；切换输出模式时不
+  /// 复用另一模式的设备号，直接取目标模式自己的记录。[keepStoredDevice] 为
+  /// true 时只更新采样率与格式，保留偏好中已失效的设备选择。
   Future<BassOutputApplyResult> applyAudioOutputConfig({
-    required int deviceId,
-    required String deviceName,
+    int? deviceId,
+    String? deviceName,
     required bool exclusive,
     required int sampleRate,
     required BassOutputFormat format,
+    bool keepStoredDevice = false,
   }) async {
     if (_audioOutputSwitchInProgress) {
       return const BassOutputApplyResult(
@@ -796,22 +778,20 @@ class PlaybackService extends ChangeNotifier {
       }
     }
 
-    var targetDeviceId = deviceId;
-    final preferenceExclusive =
-        _pref.outputMode == PlaybackPreference.outputModeExclusive;
-    if (exclusive != preferenceExclusive) {
-      // 共享与独占的设备编号空间不同，按设备名映射到目标模式。
-      final devices = await _player.enumerateOutputDevices(
-        exclusive: exclusive,
-      );
-      targetDeviceId = _matchOutputDeviceByName(devices, deviceName);
-    }
+    // 切换输出模式时直接使用目标模式自己的设备记录，两种模式的编号空间不混用。
+    final modeChanged = exclusive != _pref.isExclusiveOutput;
+    final targetDeviceId = modeChanged
+        ? _pref.outputDeviceIdFor(exclusive)
+        : (deviceId ?? _pref.outputDeviceIdFor(exclusive));
+    final targetDeviceName = modeChanged
+        ? _pref.outputDeviceNameFor(exclusive)
+        : (deviceName ?? _pref.outputDeviceNameFor(exclusive));
 
     try {
       final result = await _player.applyOutputConfig(
         BassOutputConfig(
           deviceId: targetDeviceId,
-          deviceName: deviceName,
+          deviceName: targetDeviceName,
           exclusive: exclusive,
           sampleRate: sampleRate,
           format: format,
@@ -831,11 +811,16 @@ class PlaybackService extends ChangeNotifier {
         return result;
       }
 
-      _pref.outputDeviceId = targetDeviceId;
-      _pref.outputDeviceName = deviceName;
       _pref.outputMode = exclusive
           ? PlaybackPreference.outputModeExclusive
           : PlaybackPreference.outputModeShared;
+      if (!keepStoredDevice) {
+        _pref.setOutputDeviceForMode(
+          exclusive,
+          targetDeviceId,
+          targetDeviceName,
+        );
+      }
       _pref.outputSampleRate = sampleRate;
       _pref.outputFormat = format.preferenceValue;
 
