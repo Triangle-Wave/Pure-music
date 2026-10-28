@@ -2,11 +2,18 @@ part of 'preference.dart';
 
 class AppPreference {
   static const defaultUpdateRepoSlug = 'Triangle-Wave/Pure-music';
+
+  /// Gitee 镜像仓库，与 [defaultUpdateRepoSlug] 指向同一项目。
+  ///
+  /// 两个平台各自发布同一份资产，slug 不同：GitHub 为
+  /// `Triangle-Wave/Pure-music`，Gitee 为 `qingyueyin/Pure-music`。
+  static const giteeUpdateRepoSlug = 'qingyueyin/Pure-music';
+
   static const defaultUpdateCheckUrls = [
-    'https://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json',
+    'https://raw.githubusercontent.com/$defaultUpdateRepoSlug/main/update/version.json',
   ];
 
-  /// 上游仓库发布的更新源，只用于识别老配置。
+  /// 上游历史 GitHub 仓库，只用于识别老配置；与 Gitee 镜像同名但平台不同。
   static const legacyUpdateRepoSlug = 'qingyueyin/Pure-music';
   static const legacyUpdateCheckUrls = [
     'https://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json',
@@ -93,6 +100,7 @@ class AppPreference {
   String customCpFeedbackKey = '';
   String updateRepoSlug = defaultUpdateRepoSlug;
   String? updateChannel;
+  UpdateDownloadRoute updateDownloadRoute = UpdateDownloadRoute.auto;
   bool autoCheckUpdate = true;
   String? lastUpdateCheckTime;
   String? lastSeenUpdateTag;
@@ -230,7 +238,7 @@ class AppPreference {
     return result;
   }
 
-  /// Gitee 渠道已下线，历史选择回到 GitHub。
+  /// 历史 Gitee 渠道选择回到 GitHub；下载线路由 updateDownloadRoute 单独设置。
   static String? migrateUpdateChannel(String? stored) {
     if (stored == null) return null;
     return stored.trim().toLowerCase() == 'gitee' ? 'github' : stored;
@@ -238,6 +246,9 @@ class AppPreference {
 
   void _applyUpdatePrefs(Map<String, dynamic> prefMap) {
     customCpFeedbackKey = _normalizedString(prefMap['customCpFeedbackKey']);
+    updateDownloadRoute = UpdateDownloadRoute.parse(
+      prefMap['updateDownloadRoute'],
+    );
     final storedRepoSlug = _normalizedNonEmptyString(
       prefMap['updateRepoSlug'],
       defaultValue: defaultUpdateRepoSlug,
@@ -324,6 +335,7 @@ class AppPreference {
         'customCpFeedbackKey': customCpFeedbackKey,
         'updateRepoSlug': updateRepoSlug,
         'updateChannel': updateChannel,
+        'updateDownloadRoute': updateDownloadRoute.name,
         'autoCheckUpdate': autoCheckUpdate,
         'lastUpdateCheckTime': lastUpdateCheckTime,
         'lastSeenUpdateTag': lastSeenUpdateTag,

@@ -113,7 +113,7 @@ void main() {
     );
   });
 
-  test('reuses a partial file when the package hash matches', () {
+  test('reuses a partial file only within the same source host', () {
     final record = UpdateDownloadRecord(
       tagName: 'v2.4.0',
       portable: false,
@@ -122,6 +122,19 @@ void main() {
       sha256: 'ab' * 32,
       expectedSize: 100,
     );
+    // 同一主机（同一线路）可以续传。
+    expect(
+      record.matches(
+        tagName: 'v2.4.0',
+        portable: false,
+        url: 'https://github.com/example/other/app.exe',
+        fileName: 'app.exe',
+        sha256: 'AB' * 32,
+        expectedSize: 100,
+      ),
+      isTrue,
+    );
+    // 切换线路（GitHub → Gitee）即使 sha 相同，也不得续接上一线路的字节。
     expect(
       record.matches(
         tagName: 'v2.4.0',
@@ -131,7 +144,19 @@ void main() {
         sha256: 'AB' * 32,
         expectedSize: 100,
       ),
-      isTrue,
+      isFalse,
+    );
+    // 切换代理线路同样丢弃部分文件。
+    expect(
+      record.matches(
+        tagName: 'v2.4.0',
+        portable: false,
+        url: 'https://ghfast.top/https://github.com/example/app.exe',
+        fileName: 'app.exe',
+        sha256: 'AB' * 32,
+        expectedSize: 100,
+      ),
+      isFalse,
     );
     expect(
       record.matches(

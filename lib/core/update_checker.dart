@@ -6,13 +6,14 @@ import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 
 enum UpdateChannel {
   github,
   gitee;
 
-  /// 唯一对外提供的渠道；用户仓库没有 Gitee 镜像。
+  /// 清单与校验值的基准渠道；下载线路由设置单独决定。
   static const supported = UpdateChannel.github;
 
   String get label => switch (this) {
@@ -499,7 +500,11 @@ String? _releaseAssetUrl(
   String assetName,
 ) {
   final host = channel == UpdateChannel.github ? 'github.com' : 'gitee.com';
-  return 'https://$host/$repositorySlug/releases/download/'
+  final slug = _mappedRepoSlug(
+    repositorySlug,
+    toGitee: channel == UpdateChannel.gitee,
+  );
+  return 'https://$host/$slug/releases/download/'
       '${Uri.encodeComponent(tagName)}/${Uri.encodeComponent(assetName)}';
 }
 
@@ -509,15 +514,58 @@ String _releasePageUrl(
   String tagName,
 ) {
   final host = channel == UpdateChannel.github ? 'github.com' : 'gitee.com';
-  return 'https://$host/$repositorySlug/releases/tag/'
+  final slug = _mappedRepoSlug(
+    repositorySlug,
+    toGitee: channel == UpdateChannel.gitee,
+  );
+  return 'https://$host/$slug/releases/tag/'
       '${Uri.encodeComponent(tagName)}';
+}
+
+/// GitHub 与 Gitee 是同一项目的两个发布平台，slug 不同。
+///
+/// `repositorySlug` 始终是 GitHub 仓库 slug；生成 Gitee 地址时只映射官方
+/// 仓库 `Triangle-Wave/Pure-music` → `qingyueyin/Pure-music`。自定义仓库
+/// 没有对应镜像，保持原 slug。
+String _mappedRepoSlug(String slug, {required bool toGitee}) {
+  if (!toGitee) return slug;
+  final normalized = slug.trim().toLowerCase();
+  if (normalized == AppPreference.defaultUpdateRepoSlug.toLowerCase()) {
+    return AppPreference.giteeUpdateRepoSlug;
+  }
+  return slug;
 }
 
 String? _replaceHost(String? value, String host) {
   if (value == null || value.isEmpty) return null;
   final uri = Uri.tryParse(value);
   if (uri == null || uri.host.isEmpty) return null;
-  return uri.replace(scheme: 'https', host: host).toString();
+  final target = host.toLowerCase();
+  var path = uri.path;
+  if (target == 'gitee.com') {
+    path = _mapRepoPath(
+      path,
+      from: AppPreference.defaultUpdateRepoSlug,
+      to: AppPreference.giteeUpdateRepoSlug,
+    );
+  } else if (target == 'github.com') {
+    path = _mapRepoPath(
+      path,
+      from: AppPreference.giteeUpdateRepoSlug,
+      to: AppPreference.defaultUpdateRepoSlug,
+    );
+  }
+  return uri.replace(scheme: 'https', host: host, path: path).toString();
+}
+
+/// 只替换路径开头的仓库 slug，保留 release 标签与文件的原始编码。
+String _mapRepoPath(String path, {required String from, required String to}) {
+  final prefix = '/$from';
+  final lowerPath = path.toLowerCase();
+  final lowerPrefix = prefix.toLowerCase();
+  if (lowerPath == lowerPrefix) return '/$to';
+  if (!lowerPath.startsWith('$lowerPrefix/')) return path;
+  return '/$to${path.substring(prefix.length)}';
 }
 
 String? _assetDigest(Map<String, dynamic>? asset) =>
@@ -564,13 +612,15 @@ int? _optionalIntOrFallback(
 
 /// 更新检查服务
 ///
-/// 统一从 GitHub 仓库读取版本与安装包；Gitee 镜像不再提供。
+/// 版本清单与校验值以 GitHub 为基准；下载按设置线路回退到 Gitee 与加速代理。
 class UpdateChecker {
   UpdateChecker._();
 
   static const _githubApiBase = 'https://api.github.com/repos';
   static const _githubFallbackUrl =
-      'https://raw.githubusercontent.com/Triangle-Wave/Pure-music/main/update/version.json';
+      'https://raw.githubusercontent.com/${AppPreference.defaultUpdateRepoSlug}/main/update/version.json';
+  static const _giteeFallbackUrl =
+      'https://gitee.com/${AppPreference.giteeUpdateRepoSlug}/raw/main/update/version.json';
 
   static Future<UpdateInfo?> checkForUpdate() async {
     const channel = UpdateChannel.supported;
@@ -620,8 +670,30 @@ class UpdateChecker {
   }
 
   static Future<UpdateInfo?> _firstFallbackInfo(UpdateChannel channel) async {
-    for (final url in _fallbackUrls()) {
-      final info = await _checkHttpJson(url, channel);
+    final route = AppPreference.instance.updateDownloadRoute;
+    // 清单只从官方源读取，代理不参与元数据请求。
+    final candidates = updateMetadataCandidates(
+      route: route,
+      directUrl: _githubFallbackUrl,
+      giteeUrl: _giteeFallbackUrl,
+      extraUrls: AppPreference.instance.updateCheckUrls,
+    );
+    final seen = <String>{};
+    for (final candidate in candidates) {
+      if (!seen.add(candidate.url)) continue;
+      if (!isAllowedUpdateMetadataUrlForRoute(candidate.url)) {
+        log.update.warn(
+          'legacy',
+          '[UpdateChecker] 跳过不可信的更新清单线路：${candidate.label}',
+          fields: {'host': candidate.host},
+        );
+        continue;
+      }
+      final info = await _checkHttpJson(
+        candidate.url,
+        channel,
+        source: candidate.label,
+      );
       if (info != null) return info;
     }
     return null;
@@ -733,17 +805,11 @@ class UpdateChecker {
     }
   }
 
-  static List<String> _fallbackUrls() {
-    final stored = AppPreference.instance.updateCheckUrls.where(
-      (url) => isAllowedUpdateMetadataUrl(url, UpdateChannel.supported),
-    );
-    return <String>{_githubFallbackUrl, ...stored}.toList(growable: false);
-  }
-
   static Future<UpdateInfo?> _checkHttpJson(
     String url,
-    UpdateChannel channel,
-  ) async {
+    UpdateChannel channel, {
+    String? source,
+  }) async {
     try {
       // raw.githubusercontent.com 以 text/plain 返回 JSON；先按文本取回再
       // 手动解析，避免 Dio 按 Content-Type 返回 String 后与 Map 泛型冲突。
@@ -769,6 +835,7 @@ class UpdateChecker {
         '${_describeNetworkError(error)}',
         fields: {
           'host': Uri.tryParse(url)?.host ?? '',
+          if (source != null) 'source': source,
           'error': _describeNetworkError(error),
         },
       );
@@ -911,9 +978,46 @@ const _githubDownloadCdnHosts = {
 };
 
 bool isAllowedUpdateMetadataUrl(String url, UpdateChannel channel) {
+  if (channel != UpdateChannel.supported) return false;
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) return false;
+  return _isAllowedGithubMetadataUri(uri);
+}
+
+/// 按下载线路校验 version.json 地址：只允许 GitHub 直连与 Gitee 镜像。
+///
+/// 第三方代理能改写清单并伪造其中的校验值，因此元数据地址不接受代理前缀。
+bool isAllowedUpdateMetadataUrlForRoute(String url) {
   final uri = Uri.tryParse(url.trim());
   if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
+  if (_isAllowedGithubMetadataUri(uri)) return true;
+  if (uri.host.toLowerCase() == 'gitee.com') {
+    return _matchesUpdateRepoPath(uri);
+  }
+  return false;
+}
+
+bool isAllowedUpdateDownloadUrl(String url, UpdateChannel channel) {
   if (channel != UpdateChannel.supported) return false;
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) return false;
+  return _isAllowedGithubDownloadUri(uri);
+}
+
+/// 按下载线路校验安装包与便携包地址：GitHub 直连、Gitee 与内置代理。
+bool isAllowedUpdateDownloadUrlForRoute(String url) {
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
+  if (_isAllowedGithubDownloadUri(uri)) return true;
+  if (uri.host.toLowerCase() == 'gitee.com') {
+    return _matchesUpdateRepoPath(uri, releasesOnly: true);
+  }
+  final inner = updateProxyInnerUri(url);
+  return inner != null && _isAllowedGithubDownloadUri(inner);
+}
+
+bool _isAllowedGithubMetadataUri(Uri uri) {
+  if (uri.scheme != 'https' || uri.host.isEmpty) return false;
   final host = uri.host.toLowerCase();
   return switch (host) {
     'raw.githubusercontent.com' || 'github.com' || 'www.github.com' =>
@@ -923,10 +1027,8 @@ bool isAllowedUpdateMetadataUrl(String url, UpdateChannel channel) {
   };
 }
 
-bool isAllowedUpdateDownloadUrl(String url, UpdateChannel channel) {
-  final uri = Uri.tryParse(url.trim());
-  if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
-  if (channel != UpdateChannel.supported) return false;
+bool _isAllowedGithubDownloadUri(Uri uri) {
+  if (uri.scheme != 'https' || uri.host.isEmpty) return false;
   final host = uri.host.toLowerCase();
   if (host == 'github.com' || host == 'www.github.com') {
     return _matchesUpdateRepoPath(uri, releasesOnly: true);
@@ -935,12 +1037,17 @@ bool isAllowedUpdateDownloadUrl(String url, UpdateChannel channel) {
 }
 
 /// 当前配置仓库与默认仓库都放行，用户自定义的其他仓库仍会被拒绝。
-Set<String> _updateRepoSlugs() {
+Set<String> _githubUpdateRepoSlugs() {
   final slugs = <String>{AppPreference.defaultUpdateRepoSlug.toLowerCase()};
   final configured = AppPreference.instance.updateRepoSlug.trim().toLowerCase();
   if (configured.split('/').length == 2) slugs.add(configured);
   return slugs;
 }
+
+/// Gitee 只认官方镜像仓库；GitHub 与 Gitee 的 slug 不混用。
+Set<String> _giteeUpdateRepoSlugs() => {
+  AppPreference.giteeUpdateRepoSlug.toLowerCase(),
+};
 
 bool _matchesUpdateRepoPath(
   Uri uri, {
@@ -952,6 +1059,9 @@ bool _matchesUpdateRepoPath(
       .toList(growable: false);
   if (segments.length < skip + 3) return false;
   final slug = '${segments[skip]}/${segments[skip + 1]}'.toLowerCase();
-  if (!_updateRepoSlugs().contains(slug)) return false;
+  final slugs = uri.host.toLowerCase() == 'gitee.com'
+      ? _giteeUpdateRepoSlugs()
+      : _githubUpdateRepoSlugs();
+  if (!slugs.contains(slug)) return false;
   return !releasesOnly || segments[skip + 2].toLowerCase() == 'releases';
 }

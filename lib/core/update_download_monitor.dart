@@ -116,7 +116,9 @@ class UpdateDownloadMonitor extends ChangeNotifier {
           if (generation != _generation) return;
           _received = received;
           if (total > 0) _total = total;
-          if (_phase != UpdateMonitorPhase.verifying) {
+          // 切换下载线路会重新进入下载阶段，进度要跟着回到下载状态。
+          if (_phase != UpdateMonitorPhase.preparing &&
+              _phase != UpdateMonitorPhase.installing) {
             _phase = UpdateMonitorPhase.downloading;
           }
           notifyListeners();
@@ -128,6 +130,10 @@ class UpdateDownloadMonitor extends ChangeNotifier {
         },
       );
       if (generation != _generation) return;
+      if (_cancelRequested || token.isCancelled) {
+        _clearToIdle(notify: true);
+        return;
+      }
       _savePath = savePath;
       await rememberVerifiedUpdatePackage(
         savePath: savePath,
@@ -143,20 +149,26 @@ class UpdateDownloadMonitor extends ChangeNotifier {
       }
     } on DioException catch (error) {
       if (generation != _generation) return;
-      if (error.type == DioExceptionType.cancel || _cancelRequested) {
+      if (error.type == DioExceptionType.cancel ||
+          _cancelRequested ||
+          token.isCancelled) {
         _clearToIdle(notify: true);
         return;
       }
       _fail(error.message ?? '更新失败');
     } on UpdateInstallException catch (error) {
       if (generation != _generation) return;
-      if (_cancelRequested) {
+      if (_cancelRequested || token.isCancelled) {
         _clearToIdle(notify: true);
         return;
       }
       _fail(error.message);
     } catch (_) {
       if (generation != _generation) return;
+      if (_cancelRequested || token.isCancelled) {
+        _clearToIdle(notify: true);
+        return;
+      }
       _fail('更新失败');
     }
   }

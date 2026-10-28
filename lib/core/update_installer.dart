@@ -6,8 +6,10 @@ import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/update_checker.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/window_lifecycle.dart';
 
@@ -267,6 +269,12 @@ class UpdateDownloadRecord {
         this.fileName != fileName) {
       return false;
     }
+    // 不同线路的残余字节不能续接：代理、Gitee 与直连的主机必须一致。
+    final savedHost = _recordUrlHost(this.url);
+    final nextHost = _recordUrlHost(url);
+    if (savedHost.isEmpty || nextHost.isEmpty || savedHost != nextHost) {
+      return false;
+    }
     if (expectedSize != null &&
         this.expectedSize != null &&
         this.expectedSize != expectedSize) {
@@ -304,6 +312,11 @@ String? _recordString(Object? value) {
   if (value is! String) return null;
   final normalized = value.trim();
   return normalized.isEmpty ? null : normalized;
+}
+
+String _recordUrlHost(String value) {
+  final uri = Uri.tryParse(value.trim());
+  return uri?.host.toLowerCase() ?? '';
 }
 
 String? updatePayloadPath(Directory directory, String fileName) {
@@ -403,7 +416,7 @@ Future<VerifiedUpdateNotice?> readVerifiedUpdateNotice({
   if (info.tagName.isEmpty) return null;
   return VerifiedUpdateNotice(
     info: info,
-    // 历史下载记录可能来自已下线的 Gitee 渠道，统一按 GitHub 处理。
+    // 历史下载记录统一按 GitHub 渠道处理。
     channel: UpdateChannel.supported,
     path: payload,
   );
@@ -450,6 +463,9 @@ class UpdateInstaller {
     return installDownloaded(savePath: savePath, onPhase: onPhase);
   }
 
+  /// 下载并按 version.json 的 SHA256 校验更新包。
+  ///
+  /// [channel] 仅保留调用方语义；实际下载线路由设置决定。
   static Future<String> downloadVerified({
     required UpdateInfo info,
     required UpdateChannel channel,
@@ -457,80 +473,235 @@ class UpdateInstaller {
     required UpdateProgressCallback onProgress,
     required UpdatePhaseCallback onPhase,
   }) async {
-    final url = info.downloadUrl(
-      channel: channel,
-      portableBuild: portableBuild,
+    final candidates = updateDownloadCandidates(
+      route: AppPreference.instance.updateDownloadRoute,
+      directUrl: info.downloadUrl(
+        channel: UpdateChannel.github,
+        portableBuild: portableBuild,
+      ),
+      giteeUrl: info.downloadUrl(
+        channel: UpdateChannel.gitee,
+        portableBuild: portableBuild,
+      ),
     );
-    if (url == null || url.isEmpty) {
+    log.update.debug(
+      'legacy',
+      '[UpdateInstaller] 下载线路 '
+      '${AppPreference.instance.updateDownloadRoute.name}',
+      fields: {
+        'channel': channel.name,
+        'candidates': candidates.length,
+      },
+    );
+    if (candidates.isEmpty) {
       throw UpdateInstallException('缺少下载地址');
-    }
-    if (!isAllowedUpdateDownloadUrl(url, channel)) {
-      throw UpdateInstallException('下载地址不可信');
     }
     ensureUpdateHasChecksum(
       info: info,
-      channel: channel,
+      channel: UpdateChannel.github,
       portableBuild: portableBuild,
     );
 
-    final expectedSha = await _resolveExpectedSha256(
+    // 校验值只取官方清单的 sha256（或官方源上的独立校验文件），与安装包
+    // 下载线路无关；代理只传输安装包，不能改写这里的期望值。
+    final expectedSha = await _resolveExpectedSha256ForDownload(
       info: info,
-      channel: channel,
       portableBuild: portableBuild,
       cancelToken: cancelToken,
     );
     final expectedSize = info.downloadSize(portableBuild: portableBuild);
-    final savePath = await _prepareResumeSave(
-      tagName: info.tagName,
-      url: url,
-      sha256: expectedSha,
-      expectedSize: expectedSize,
-    );
 
-    onPhase('正在下载');
     try {
+      final savePath = await runUpdateDownloadAttempts<String>(
+        candidates: candidates,
+        attempt: (candidate) => _downloadCandidate(
+          candidate: candidate,
+          tagName: info.tagName,
+          expectedSha: expectedSha,
+          expectedSize: expectedSize,
+          cancelToken: cancelToken,
+          onProgress: onProgress,
+          onPhase: onPhase,
+        ),
+        onFailure: (failure) {
+          log.update.warn(
+            'legacy',
+            '[UpdateInstaller] 下载线路失败：${failure.candidate.label} '
+            '${failure.detail}',
+            fields: {
+              'source': failure.candidate.source.name,
+              'host': failure.candidate.host,
+              'reason': failure.reason.name,
+              if (failure.statusCode != null) 'status': failure.statusCode,
+            },
+          );
+        },
+      );
+      return savePath;
+    } on UpdateDownloadAggregateException catch (error) {
+      throw UpdateInstallException(error.message);
+    }
+  }
+
+  /// 单条线路：下载、长度检查、SHA256 校验；任一步失败都只让该线路失败。
+  static Future<String> _downloadCandidate({
+    required UpdateDownloadCandidate candidate,
+    required String tagName,
+    required String expectedSha,
+    required int? expectedSize,
+    required CancelToken cancelToken,
+    required UpdateProgressCallback onProgress,
+    required UpdatePhaseCallback onPhase,
+  }) async {
+    try {
+      if (!isAllowedUpdateDownloadUrlForRoute(candidate.url)) {
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.invalidUrl,
+        );
+      }
+      final savePath = await _prepareResumeSave(
+        tagName: tagName,
+        url: candidate.url,
+        sha256: expectedSha,
+        expectedSize: expectedSize,
+      );
+
+      onPhase('正在下载');
       await _downloadResumable(
-        url: url,
+        url: candidate.url,
         savePath: savePath,
         expectedSize: expectedSize,
         cancelToken: cancelToken,
         onProgress: onProgress,
       );
-    } on DioException {
-      rethrow;
-    } on UpdateInstallException {
-      rethrow;
-    } catch (_) {
-      throw UpdateInstallException('下载失败');
-    }
 
-    final downloaded = File(savePath);
-    final downloadedLength = await downloaded.exists()
-        ? await downloaded.length()
-        : 0;
-    if (downloadedLength == 0) {
-      await _discardDownloadedUpdate(savePath);
-      throw UpdateInstallException('下载文件为空');
-    }
-    if (expectedSize != null && downloadedLength > expectedSize) {
-      await _discardDownloadedUpdate(savePath);
-      throw UpdateInstallException('下载失败');
-    }
-    if (expectedSize != null && downloadedLength < expectedSize) {
-      throw UpdateInstallException('下载未完成');
-    }
+      final downloaded = File(savePath);
+      final downloadedLength = await downloaded.exists()
+          ? await downloaded.length()
+          : 0;
+      if (downloadedLength == 0) {
+        await _discardDownloadedUpdate(savePath);
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.empty,
+        );
+      }
+      if (expectedSize != null && downloadedLength > expectedSize) {
+        await _discardDownloadedUpdate(savePath);
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.unknown,
+        );
+      }
+      if (expectedSize != null && downloadedLength < expectedSize) {
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.incomplete,
+        );
+      }
 
-    onPhase('正在校验');
-    try {
+      onPhase('正在校验');
       final ok = await _verifySha256(savePath, expectedSha);
       if (!ok) {
-        throw UpdateInstallException('校验失败，文件已删除');
+        await _discardDownloadedUpdate(savePath);
+        log.update.warn(
+          'legacy',
+          '[UpdateInstaller] 线路 SHA256 校验不通过，标记为不可信：'
+          '${candidate.label}',
+          fields: {
+            'source': candidate.source.name,
+            'host': candidate.host,
+            'sha256': expectedSha,
+          },
+        );
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.checksum,
+        );
       }
-    } catch (_) {
-      await _discardDownloadedUpdate(savePath);
+      log.update.info(
+        'legacy',
+        '[UpdateInstaller] 线路 SHA256 校验通过：${candidate.label}',
+        fields: {
+          'source': candidate.source.name,
+          'host': candidate.host,
+        },
+      );
+      return savePath;
+    } on UpdateDownloadAttemptException {
       rethrow;
+    } on DioException catch (error) {
+      throw UpdateDownloadAttemptException(
+        _failureReasonForDio(error),
+        statusCode: error.response?.statusCode,
+        cause: error,
+      );
+    } on UpdateInstallException catch (error) {
+      throw UpdateDownloadAttemptException(
+        _failureReasonForInstallMessage(error.message),
+        cause: error,
+      );
+    } on FileSystemException catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 写入更新文件失败：${error.message}',
+        fields: {
+          'host': candidate.host,
+          'path': error.path ?? '',
+        },
+        error: error,
+      );
+      throw UpdateDownloadAttemptException(
+        UpdateDownloadFailureReason.disk,
+        cause: error,
+      );
+    } catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 下载线路异常：${error.runtimeType}',
+        fields: {'host': candidate.host},
+        error: error,
+      );
+      throw UpdateDownloadAttemptException(
+        UpdateDownloadFailureReason.unknown,
+        cause: error,
+      );
     }
-    return savePath;
+  }
+
+  static UpdateDownloadFailureReason _failureReasonForDio(
+    DioException error,
+  ) {
+    final type = error.type;
+    if (type == DioExceptionType.connectionTimeout ||
+        type == DioExceptionType.receiveTimeout ||
+        type == DioExceptionType.sendTimeout) {
+      return UpdateDownloadFailureReason.timeout;
+    }
+    if (type == DioExceptionType.cancel) {
+      return UpdateDownloadFailureReason.cancelled;
+    }
+    if (type == DioExceptionType.badResponse) {
+      final status = error.response?.statusCode;
+      if (status == HttpStatus.notFound || status == HttpStatus.gone) {
+        return UpdateDownloadFailureReason.notFound;
+      }
+      if (status != null && status >= 500) {
+        return UpdateDownloadFailureReason.server;
+      }
+      return UpdateDownloadFailureReason.unknown;
+    }
+    return UpdateDownloadFailureReason.connection;
+  }
+
+  static UpdateDownloadFailureReason _failureReasonForInstallMessage(
+    String message,
+  ) {
+    if (message.contains('校验')) return UpdateDownloadFailureReason.checksum;
+    if (message.contains('路径非法') || message.contains('缺少下载地址')) {
+      return UpdateDownloadFailureReason.invalidUrl;
+    }
+    if (message.contains('为空')) return UpdateDownloadFailureReason.empty;
+    if (message.contains('未完成')) {
+      return UpdateDownloadFailureReason.incomplete;
+    }
+    return UpdateDownloadFailureReason.unknown;
   }
 
   static Future<UpdateInstallOutcome> installDownloaded({
@@ -810,6 +981,40 @@ class UpdateInstaller {
     }
   }
 
+  /// 校验值的获取与下载线路无关；网络与读取异常统一转为可展示的安装错误。
+  static Future<String> _resolveExpectedSha256ForDownload({
+    required UpdateInfo info,
+    required bool portableBuild,
+    required CancelToken cancelToken,
+  }) async {
+    try {
+      final sha = await _resolveExpectedSha256(
+        info: info,
+        channel: UpdateChannel.github,
+        portableBuild: portableBuild,
+        cancelToken: cancelToken,
+      );
+      return sha;
+    } on UpdateInstallException {
+      rethrow;
+    } on DioException catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 获取更新校验值失败：${error.type.name}',
+        fields: {'status': error.response?.statusCode ?? 0},
+        error: error,
+      );
+      throw UpdateInstallException('获取更新校验值失败');
+    } catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 读取更新校验值异常：${error.runtimeType}',
+        error: error,
+      );
+      throw UpdateInstallException('获取更新校验值失败');
+    }
+  }
+
   static bool _isSha256(String value) =>
       RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value);
 
@@ -1002,7 +1207,12 @@ class UpdateInstaller {
 
   static Future<void> _discardDownloadedUpdate(String savePath) async {
     await _deleteQuietly(savePath);
-    if (await File(savePath).exists()) return;
+    try {
+      if (await File(savePath).exists()) return;
+    } on FileSystemException {
+      // 无法确认删除结果时保留下载记录，避免下次续传错位。
+      return;
+    }
     await _deleteQuietly(
       p.join(p.dirname(savePath), updateDownloadStateFileName),
     );

@@ -109,6 +109,55 @@ void main() {
     expect(info.size, 123456);
   });
 
+  test('maps the official GitHub slug to the Gitee mirror', () {
+    final fromGitHub = UpdateInfo.fromReleaseJson({
+      'tag_name': 'v2.4.0',
+      'assets': [
+        {
+          'name': 'pure_music_2.4.0_release_installer.exe',
+          'browser_download_url':
+              'https://github.com/Triangle-Wave/Pure-music/releases/download/'
+              'v2.4.0/pure_music_2.4.0_release_installer.exe',
+        },
+      ],
+    }, channel: UpdateChannel.github);
+
+    expect(
+      fromGitHub.giteeInstallerUrl,
+      contains('gitee.com/qingyueyin/Pure-music'),
+    );
+    expect(fromGitHub.giteeInstallerUrl, isNot(contains('Triangle-Wave')));
+
+    final packed = UpdateInfo.fromJson({
+      'tag_name': 'v2.4.0',
+      'installer_url':
+          'https://github.com/Triangle-Wave/Pure-music/releases/download/'
+          'v2.4.0/pure_music_2.4.0_release_installer.exe',
+    });
+    expect(
+      packed.giteeInstallerUrl,
+      contains('gitee.com/qingyueyin/Pure-music'),
+    );
+
+    final fromGitee = UpdateInfo.fromReleaseJson({
+      'tag_name': 'v2.4.0',
+      'assets': [
+        {
+          'name': 'pure_music_2.4.0_release_installer.exe',
+          'browser_download_url':
+              'https://gitee.com/qingyueyin/Pure-music/releases/download/'
+              'v2.4.0/pure_music_2.4.0_release_installer.exe',
+        },
+      ],
+    }, channel: UpdateChannel.gitee);
+
+    expect(
+      fromGitee.installerUrl,
+      contains('github.com/Triangle-Wave/Pure-music'),
+    );
+    expect(fromGitee.installerUrl, isNot(contains('qingyueyin')));
+  });
+
   test('missing download fields default to null', () {
     final info = UpdateInfo.fromJson({'tag_name': 'v2.3.0'});
     expect(info.installerUrl, isNull);

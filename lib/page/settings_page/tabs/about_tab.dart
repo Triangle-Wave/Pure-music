@@ -10,6 +10,7 @@ import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/update_checker.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/native/rust/api/utils.dart' as rust_utils;
 import 'package:pure_music/page/settings_page/check_update.dart';
@@ -34,6 +35,8 @@ class AboutTabContent extends StatelessWidget {
         const _AboutVersionItem(),
         const SizedBox(height: 16.0),
         const _AboutUpdateSourceItem(),
+        const SizedBox(height: 16.0),
+        const _AboutDownloadRouteItem(),
         const SizedBox(height: 16.0),
         const _AboutAutoUpdateItem(),
         const SizedBox(height: 24.0),
@@ -389,6 +392,94 @@ class _AboutUpdateSourceItem extends StatelessWidget {
       description: '更新源',
       subtitle: 'GitHub · ${AppPreference.defaultUpdateRepoSlug}',
       action: const Icon(Symbols.check_circle, size: 18),
+    );
+  }
+}
+
+class _AboutDownloadRouteItem extends StatefulWidget {
+  const _AboutDownloadRouteItem();
+
+  @override
+  State<_AboutDownloadRouteItem> createState() =>
+      _AboutDownloadRouteItemState();
+}
+
+class _AboutDownloadRouteItemState extends State<_AboutDownloadRouteItem> {
+  var _saving = false;
+
+  Future<void> _select(UpdateDownloadRoute route) async {
+    final preference = AppPreference.instance;
+    if (_saving || preference.updateDownloadRoute == route) return;
+    final previous = preference.updateDownloadRoute;
+    setState(() {
+      preference.updateDownloadRoute = route;
+      _saving = true;
+    });
+    final saved = await preference.save();
+    if (!mounted) return;
+    if (!saved) {
+      preference.updateDownloadRoute = previous;
+      showTextOnSnackBar('保存下载线路失败', variant: ToastVariant.error);
+    }
+    setState(() => _saving = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final route = AppPreference.instance.updateDownloadRoute;
+    final scheme = Theme.of(context).colorScheme;
+    final usesProxy =
+        route == UpdateDownloadRoute.auto ||
+        route == UpdateDownloadRoute.proxy;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingsTile(
+          description: '下载线路',
+          subtitle: route.description,
+          action: DropdownMenu<UpdateDownloadRoute>(
+            key: ValueKey('update-download-route-${route.name}'),
+            initialSelection: route,
+            width: 200,
+            enableFilter: false,
+            requestFocusOnTap: false,
+            dropdownMenuEntries: [
+              for (final value in UpdateDownloadRoute.values)
+                DropdownMenuEntry<UpdateDownloadRoute>(
+                  value: value,
+                  label: value.label,
+                ),
+            ],
+            onSelected: _saving
+                ? null
+                : (value) {
+                    if (value != null) unawaited(_select(value));
+                  },
+          ),
+        ),
+        if (usesProxy)
+          Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Symbols.info, size: 16, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 6.0),
+                Expanded(
+                  child: Text(
+                    '加速代理为第三方服务，可能看到下载内容与你的 IP；'
+                    '校验值取自官方清单（GitHub 直连或 Gitee），'
+                    '代理只承担安装包传输。',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: AppType.caption,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
