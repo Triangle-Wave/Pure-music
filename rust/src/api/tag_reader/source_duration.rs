@@ -23,13 +23,6 @@ const TTA_HEADER_BYTES: usize = 22;
 /// TTA1 音频格式：无损 PCM。
 const TTA_FORMAT_PCM: u16 = 1;
 
-/// 单个 FILE 的时长探测结果，仅在本模块内累计，对外以元组返回。
-#[derive(Debug, Default, PartialEq, Eq)]
-struct DurationProbe {
-    duration_ms: Option<u64>,
-    attempts: Vec<String>,
-}
-
 /// 依次尝试 Windows 媒体属性与容器头部解析，任一成功即停止。
 ///
 /// 返回 `(duration_ms, attempts)`：`attempts` 记录内置读取器与每次回退的失败原因，
@@ -45,27 +38,23 @@ where
     W: FnOnce(&Path) -> anyhow::Result<u64>,
     H: FnOnce(&Path) -> Result<u64, String>,
 {
-    let mut probe = DurationProbe {
-        duration_ms: None,
-        attempts: vec![builtin_note],
-    };
+    let mut duration_ms: Option<u64> = None;
+    let mut attempts: Vec<String> = vec![builtin_note];
 
     match windows_probe(path) {
-        Ok(duration_ms) => {
-            probe.duration_ms = Some(duration_ms);
-            return (probe.duration_ms, probe.attempts);
+        Ok(probed_ms) => {
+            duration_ms = Some(probed_ms);
+            return (duration_ms, attempts);
         }
-        Err(error) => probe
-            .attempts
-            .push(format!("windows media properties: {error:#}")),
+        Err(error) => attempts.push(format!("windows media properties: {error:#}")),
     }
 
     match header_probe(path) {
-        Ok(duration_ms) => probe.duration_ms = Some(duration_ms),
-        Err(reason) => probe.attempts.push(reason),
+        Ok(probed_ms) => duration_ms = Some(probed_ms),
+        Err(reason) => attempts.push(reason),
     }
 
-    (probe.duration_ms, probe.attempts)
+    (duration_ms, attempts)
 }
 
 /// 按扩展名解析容器头部的时长，单位毫秒。
