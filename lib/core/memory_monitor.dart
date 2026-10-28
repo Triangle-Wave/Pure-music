@@ -48,7 +48,9 @@ class MemoryMonitorService {
   void _checkMemoryPressure() {
     final rssMB = (ProcessInfo.currentRss / (1024 * 1024)).round();
     final playbackService = PlayService.existingPlaybackService;
-    final playingPath = playbackService?.nowPlaying?.path;
+    final nowPlaying = playbackService?.nowPlaying;
+    final playingPath = nowPlaying?.path;
+    final playingFilePath = nowPlaying?.filePath;
     final now = DateTime.now();
     if (_isPlaying()) {
       if (Platform.environment['CP_MEMORY_LOG'] == '1') {
@@ -61,10 +63,16 @@ class MemoryMonitorService {
     const tier3Threshold = 320;
     if (rssMB > tier3Threshold &&
         _cleanupDue(now, _lastTier3CleanupAt, const Duration(minutes: 1))) {
-      _runTier3Cleanup(now, playingPath, rssMB, tier3Threshold);
+      _runTier3Cleanup(
+        now,
+        playingPath,
+        playingFilePath,
+        rssMB,
+        tier3Threshold,
+      );
     } else if (rssMB > tier2Threshold &&
         _cleanupDue(now, _lastTier2CleanupAt, const Duration(minutes: 3))) {
-      _runTier2Cleanup(now, playingPath, rssMB, tier2Threshold);
+      _runTier2Cleanup(now, playingFilePath, rssMB, tier2Threshold);
     } else if (rssMB > tier1Threshold &&
         _cleanupDue(now, _lastTier1CleanupAt, const Duration(minutes: 1))) {
       _runTier1Cleanup(now);
@@ -77,6 +85,7 @@ class MemoryMonitorService {
   void _runTier3Cleanup(
     DateTime now,
     String? playingPath,
+    String? playingFilePath,
     int rssMB,
     int tier3Threshold,
   ) {
@@ -89,7 +98,7 @@ class MemoryMonitorService {
     );
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
-    CoverImageCache.instance.trimMemory(keepPath: playingPath);
+    CoverImageCache.instance.trimMemory(keepPath: playingFilePath);
     CoverImageCache.instance.trimSmall(keepEntries: 24);
     AudioLibrary.instance.trimCollectionThumbnailRetention(32);
     LyricsLinePainter.clearPool();
@@ -103,7 +112,7 @@ class MemoryMonitorService {
 
   void _runTier2Cleanup(
     DateTime now,
-    String? playingPath,
+    String? playingFilePath,
     int rssMB,
     int tier2Threshold,
   ) {
@@ -113,7 +122,7 @@ class MemoryMonitorService {
       'legacy',
       '[mem] RSS ${rssMB}MB > $tier2Threshold, tier-2 cleanup',
     );
-    CoverImageCache.instance.trimMemory(keepPath: playingPath);
+    CoverImageCache.instance.trimMemory(keepPath: playingFilePath);
     CoverImageCache.instance.trimSmall(keepEntries: 64);
     AudioLibrary.instance.trimCollectionThumbnailRetention(80);
     LyricsLinePainter.trimPool();
@@ -134,7 +143,7 @@ class MemoryMonitorService {
   }
 
   void trimAfterSongChange() {
-    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.path;
+    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.filePath;
     AudioLibrary.instance.evictStaleCoverBytes();
     AudioLibrary.instance.trimCollectionThumbnailRetention(96);
     CoverImageCache.instance.trimMemory(keepPath: playingPath);
@@ -146,7 +155,7 @@ class MemoryMonitorService {
   void trimTrayHidden() {
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
-    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.path;
+    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.filePath;
     CoverImageCache.instance.trimMemory(keepPath: playingPath);
     CoverImageCache.instance.trimSmall(keepEntries: 96);
     AudioLibrary.instance.trimCollectionThumbnailRetention(128);
@@ -157,7 +166,7 @@ class MemoryMonitorService {
 
   /// 任务栏最小化清理：只回收可重建的非当前资源，保留恢复所需的页面对象。
   void trimWindowMinimized() {
-    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.path;
+    final playingPath = PlayService.existingPlaybackService?.nowPlaying?.filePath;
     PaintingBinding.instance.imageCache.clear();
     CoverImageCache.instance.trimMemory(keepPath: playingPath);
     CoverImageCache.instance.trimSmall(keepEntries: 128);

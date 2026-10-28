@@ -62,6 +62,9 @@ extension PinyinCompare on String {
     return pinyin;
   }
 
+  /// 完整拼音（汉字转无声调拼音，非汉字原样保留），与首字母共用缓存。
+  String getPinyin() => _getPinyin();
+
   /// 与列表自然序相同：拼音、数字、忽略装饰前缀。
   int localeCompareTo(String other) {
     return naturalCompareTo(other);

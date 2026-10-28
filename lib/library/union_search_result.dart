@@ -13,11 +13,13 @@ class UnionSearchResult {
 
   UnionSearchResult(this.query);
 
+  /// 文本、拼音首字母与完整拼音共用同一套规范化匹配。
   static bool _matchesQuery(String text, String queryInLowerCase) {
     if (normalizedSearchQuery(text).toLowerCase().contains(queryInLowerCase)) {
       return true;
     }
-    return text.getPinyinInitials().toLowerCase().contains(queryInLowerCase);
+    return text.getPinyinInitials().toLowerCase().contains(queryInLowerCase) ||
+        text.getPinyin().toLowerCase().contains(queryInLowerCase);
   }
 
   static UnionSearchResult search(String query, {SearchScope? scope}) {
@@ -28,12 +30,20 @@ class UnionSearchResult {
     final library = AudioLibrary.instance;
 
     if (scope == null || scope == SearchScope.music) {
+      final titleMatches = <Audio>[];
+      final metadataMatches = <Audio>[];
       for (int i = 0; i < library.audioCollection.length; i++) {
         final audio = library.audioCollection[i];
-        if (audio.matchesSearchQuery(queryInLowerCase)) {
-          result.audios.add(audio);
+        final rank = audio.searchMatchRank(queryInLowerCase);
+        if (rank == 0) {
+          titleMatches.add(audio);
+        } else if (rank == 1) {
+          metadataMatches.add(audio);
         }
       }
+      result.audios
+        ..addAll(titleMatches)
+        ..addAll(metadataMatches);
     }
 
     if (scope == null || scope == SearchScope.artist) {

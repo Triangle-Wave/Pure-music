@@ -251,40 +251,12 @@ class AlbumColorCache {
     }
   }
 
-  File? _findLocalCoverFileSync(Directory parent) {
-    for (final name in folderCoverFileNames) {
-      try {
-        final candidate = File(path.join(parent.path, name));
-        if (candidate.existsSync()) return candidate;
-      } catch (error, trace) {
-        log.app.debug(
-          'legacy',
-          '[cover] failed to stat folder cover $name: $error',
-          stackTrace: trace,
-        );
-      }
-    }
-    try {
-      final matches = <String, File>{};
-      for (final entity in parent.listSync(followLinks: false)) {
-        if (entity is! File) continue;
-        final name = path.basename(entity.path).toLowerCase();
-        if (folderCoverFileNames.contains(name)) {
-          matches.putIfAbsent(name, () => entity);
-        }
-      }
-      for (final name in folderCoverFileNames) {
-        final file = matches[name];
-        if (file != null) return file;
-      }
-    } catch (error, trace) {
-      log.app.debug(
-        'legacy',
-        '[cover] failed to scan folder cover in ${parent.path}: $error',
-        stackTrace: trace,
-      );
-    }
-    return null;
+  File? _findLocalCoverFileSync(Directory parent, {String? sourcePath}) {
+    final cover = findFolderCoverFileSync(
+      parent.path,
+      sourcePath: sourcePath,
+    );
+    return cover == null ? null : File(cover.path);
   }
 
   Future<(String, String)> _albumKeyAndSignature(Album album) async {
@@ -298,7 +270,7 @@ class AlbumColorCache {
       final sig = '$key|$mod';
       return (key, sig);
     }
-    final key = 'audio:${audio.path}';
+    final key = 'audio:${audio.filePath}';
     final sig = '$key|${audio.modified}';
     return (key, sig);
   }
@@ -306,15 +278,18 @@ class AlbumColorCache {
   (String, String) _albumKeyAndSignatureSync(Album album) {
     final audio = album.works.isEmpty ? null : album.works.first;
     if (audio == null) return ('album:${album.name}', 'nomedia');
-    final parent = Directory(File(audio.path).parent.path);
-    final cover = _findLocalCoverFileSync(parent);
+    final parent = Directory(File(audio.filePath).parent.path);
+    final cover = _findLocalCoverFileSync(
+      parent,
+      sourcePath: audio.filePath,
+    );
     if (cover != null) {
       final mod = cover.statSync().modified.millisecondsSinceEpoch;
       final key = 'file:${cover.path}';
       final sig = '$key|$mod';
       return (key, sig);
     }
-    final key = 'audio:${audio.path}';
+    final key = 'audio:${audio.filePath}';
     final sig = '$key|${audio.modified}';
     return (key, sig);
   }
@@ -326,7 +301,7 @@ class AlbumColorCache {
     if (coverPath != null) return File(coverPath).readAsBytes();
 
     final bytes = await CoverImageCache.instance.loadBytes(
-      path: audio.path,
+      path: audio.filePath,
       modified: audio.modified,
       width: 64,
       height: 64,
@@ -970,11 +945,13 @@ class CoverImageCache {
     }
   }
 
+  /// Flutter 引擎（Skia）自带 BMP 解码器；解码失败由本类的 try/catch 降级。
   static const Set<String> _imageCoverExtensions = <String>{
     '.jpg',
     '.jpeg',
     '.png',
     '.webp',
+    '.bmp',
   };
 
   bool _isImageCoverPath(String value) =>
@@ -1131,7 +1108,8 @@ class CoverImageCache {
     if (_indexPath == null) return;
     final targets = <String, int>{};
     for (final audio in audios) {
-      if (audio.path.isNotEmpty) targets[audio.path] = audio.modified;
+      final path = audio.filePath;
+      if (path.isNotEmpty) targets[path] = audio.modified;
     }
     if (targets.isEmpty) return;
     unawaited(_warmPersistent(targets));

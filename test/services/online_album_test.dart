@@ -37,6 +37,27 @@ void main() {
       expect(extractYearHintFromTexts(['No year here']), isNull);
       expect(extractYearHintFromTexts(['Track 1234']), isNull);
     });
+
+    test('虚拟轨从 identityPath 提取年份', () {
+      const source = 'D:/Music/Abbey Road (1969).cue';
+      final audio = Audio(
+        'Come Together',
+        'The Beatles',
+        'Abbey Road',
+        null,
+        1,
+        275,
+        320,
+        44100,
+        '$source::track=01::start=0::end=275640',
+        1,
+        1,
+        'test',
+      );
+      final album = Album(name: 'Abbey Road')..works = [audio];
+
+      expect(extractAlbumYearHint(album), 1969);
+    });
   });
 
   group('候选打分', () {

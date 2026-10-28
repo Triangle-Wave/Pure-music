@@ -723,13 +723,13 @@ class _SmallCoverWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final initialProvider = CoverImageCache.instance.getCached(
-      path: audio.path,
+      path: audio.filePath,
       modified: audio.modified,
       width: 48,
       height: 48,
     );
     return ScrollAwareFutureBuilder<ImageProvider?>(
-      identity: '${audio.path}|${audio.modified}',
+      identity: '${audio.filePath}|${audio.modified}',
       initialData: initialProvider,
       future: () => audio.cover,
       builder: (context, snapshot) {

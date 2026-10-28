@@ -19,8 +19,13 @@ Audio _audioFor(String path) => Audio(
   'test',
 );
 
-String _cueTrackPath(String directory) =>
-    '${p.join(directory, 'album.cue')}::track=01::start=0::end=200000';
+String _cueTrackPath(
+  String directory, {
+  String fileName = 'album.cue',
+  int track = 1,
+}) =>
+    '${p.join(directory, fileName)}'
+    '::track=${track.toString().padLeft(2, '0')}::start=0::end=200000';
 
 String _sacdTrackPath(String directory) =>
     '${p.join(directory, 'album.iso')}'
@@ -87,18 +92,135 @@ void main() {
     expect(await audio.resolveFolderCoverPath(), isNull);
   });
 
+  test('resolves an image named after the cue source file', () async {
+    final cover = File(p.join(directory.path, '告白.png'));
+    await cover.writeAsBytes([1]);
+    final audio = _audioFor(_cueTrackPath(directory.path, fileName: '告白.tak'));
+
+    expect(await audio.resolveFolderCoverPath(), cover.path);
+  });
+
+  test('prefers a generic cover name over the source-named image', () async {
+    await File(p.join(directory.path, '告白.png')).writeAsBytes([1]);
+    final cover = File(p.join(directory.path, 'cover.jpg'));
+    await cover.writeAsBytes([2]);
+    final audio = _audioFor(_cueTrackPath(directory.path, fileName: '告白.tak'));
+
+    expect(await audio.resolveFolderCoverPath(), cover.path);
+  });
+
+  test('prefers the source-named image over a Jacket scan', () async {
+    final jacket = await Directory(p.join(directory.path, 'Jacket')).create();
+    await File(p.join(jacket.path, 'IMG_0001.bmp')).writeAsBytes([1]);
+    final cover = File(p.join(directory.path, '告白.png'));
+    await cover.writeAsBytes([2]);
+    final audio = _audioFor(_cueTrackPath(directory.path, fileName: '告白.tak'));
+
+    expect(await audio.resolveFolderCoverPath(), cover.path);
+  });
+
   test(
-    'shares the folder lookup between tracks in the same directory',
+    'resolves a bmp cover inside a case-insensitive Jacket directory',
+    () async {
+      final jacket = await Directory(p.join(directory.path, 'jacket')).create();
+      final cover = File(p.join(jacket.path, 'IMG_0002.bmp'));
+      await cover.writeAsBytes([1]);
+      await File(p.join(jacket.path, 'notes.txt')).writeAsString('ignore me');
+      final audio = _audioFor(_cueTrackPath(directory.path));
+
+      expect(await audio.resolveFolderCoverPath(), cover.path);
+    },
+  );
+
+  test('resolves an image inside a Scans directory', () async {
+    final scans = await Directory(p.join(directory.path, 'SCANS')).create();
+    await File(p.join(scans.path, 'scan02.png')).writeAsBytes([1]);
+    final cover = File(p.join(scans.path, 'scan01.jpg'));
+    await cover.writeAsBytes([2]);
+    final audio = _audioFor(_cueTrackPath(directory.path));
+
+    expect(await audio.resolveFolderCoverPath(), cover.path);
+  });
+
+  test('uses the source-named image for a sacd virtual track too', () async {
+    final cover = File(p.join(directory.path, 'album.webp'));
+    await cover.writeAsBytes([1]);
+    final audio = _audioFor(_sacdTrackPath(directory.path));
+
+    expect(await audio.resolveFolderCoverPath(), cover.path);
+  });
+
+  test(
+    'shares the folder lookup between tracks of the same source file',
     () async {
       final cover = File(p.join(directory.path, 'cover.webp'));
       await cover.writeAsBytes([1]);
       final first = _audioFor(_cueTrackPath(directory.path));
-      final second = _audioFor(_sacdTrackPath(directory.path));
+      final second = _audioFor(_cueTrackPath(directory.path, track: 2));
 
       expect(await first.resolveFolderCoverPath(), cover.path);
       await cover.delete();
-      // 目录级缓存按目录共享：同一目录的下一首曲目沿用已解析的封面路径。
+      // 同一音源的多条虚拟轨共享封面缓存，沿用已解析的封面路径。
       expect(await second.resolveFolderCoverPath(), cover.path);
+    },
+  );
+
+  test('resolves each source its own image in a shared folder', () async {
+    final firstCover = File(p.join(directory.path, 'a.png'));
+    final secondCover = File(p.join(directory.path, 'b.png'));
+    await firstCover.writeAsBytes([1]);
+    await secondCover.writeAsBytes([2]);
+    final first = _audioFor(_cueTrackPath(directory.path, fileName: 'a.tak'));
+    final second = _audioFor(_cueTrackPath(directory.path, fileName: 'b.tak'));
+
+    expect(await first.resolveFolderCoverPath(), firstCover.path);
+    expect(await second.resolveFolderCoverPath(), secondCover.path);
+  });
+
+  test('returns every folder cover candidate in priority order', () async {
+    final cover = File(p.join(directory.path, 'cover.jpg'));
+    final sameName = File(p.join(directory.path, 'a.png'));
+    final jacket = await Directory(p.join(directory.path, 'Jacket')).create();
+    final scan = File(p.join(jacket.path, 'IMG_0001.bmp'));
+    await cover.writeAsBytes([1]);
+    await sameName.writeAsBytes([2]);
+    await scan.writeAsBytes([3]);
+    final audio = _audioFor(_cueTrackPath(directory.path, fileName: 'a.tak'));
+
+    final candidates = await AudioLibrary.instance.resolveFolderCoverCandidates(
+      directory.path,
+      sourcePath: audio.filePath,
+    );
+
+    expect(candidates.map((candidate) => candidate.path), [
+      cover.path,
+      sameName.path,
+      scan.path,
+    ]);
+  });
+
+  test(
+    'enumerates a shared folder once for concurrent and repeated lookups',
+    () async {
+      final firstCover = File(p.join(directory.path, 'a.png'));
+      final secondCover = File(p.join(directory.path, 'b.png'));
+      await firstCover.writeAsBytes([1]);
+      await secondCover.writeAsBytes([2]);
+      final first = _audioFor(_cueTrackPath(directory.path, fileName: 'a.tak'));
+      final second = _audioFor(_cueTrackPath(directory.path, fileName: 'b.tak'));
+      final library = AudioLibrary.instance;
+      final before = library.folderCoverDirectoryScanCount;
+
+      final paths = await Future.wait([
+        first.resolveFolderCoverPath(),
+        second.resolveFolderCoverPath(),
+      ]);
+
+      expect(paths, [firstCover.path, secondCover.path]);
+      expect(library.folderCoverDirectoryScanCount - before, 1);
+      // 重复调用命中候选缓存，不再重新枚举目录。
+      expect(await second.resolveFolderCoverPath(), secondCover.path);
+      expect(library.folderCoverDirectoryScanCount - before, 1);
     },
   );
 }

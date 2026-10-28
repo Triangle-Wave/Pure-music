@@ -181,7 +181,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   @override
   void didUpdateWidget(covariant AlbumDetailPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.album.primaryPath != widget.album.primaryPath) {
+    if (oldWidget.album.identityPath != widget.album.identityPath) {
       _onlineRequestId++;
       _onlineLoading = false;
       _onlineInfo = null;
@@ -474,7 +474,7 @@ class _AlbumDetailScaffold extends StatelessWidget {
       picShape: PicShape.rrect,
       title: album.name,
       subtitle: '${album.works.length} 首作品',
-      heroTag: 'album:${album.primaryPath}',
+      heroTag: 'album:${album.identityPath}',
       primaryPicSeed: album.cachedDetailCover,
       headerTrailing: headerTrailing,
       // 在线专辑面板比在线头像面板内容多，右侧摆放需要更宽的空间；977 宽

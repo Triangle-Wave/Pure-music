@@ -889,7 +889,7 @@ String albumArtistFor(Album album) {
 int? extractAlbumYearHint(Album album) {
   return extractYearHintFromTexts([
     album.name,
-    if (album.primaryPath != null) album.primaryPath!,
+    if (album.identityPath != null) album.identityPath!,
     for (final audio in album.works.take(1)) audio.title,
   ]);
 }

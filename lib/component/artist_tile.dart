@@ -316,7 +316,7 @@ class _ArtistTileState extends State<ArtistTile> {
         );
         if (!widget.enableHero) return clipped;
         return Hero(
-          tag: 'artist:${widget.artist.primaryPath}',
+          tag: 'artist:${widget.artist.identityPath}',
           child: clipped,
         );
       },

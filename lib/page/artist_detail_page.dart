@@ -92,7 +92,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
   @override
   void didUpdateWidget(covariant ArtistDetailPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.artist.primaryPath != widget.artist.primaryPath) {
+    if (oldWidget.artist.identityPath != widget.artist.identityPath) {
       _onlineRequestId++;
       _onlineLoading = false;
       _candidateCache = null;
@@ -243,7 +243,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       picShape: PicShape.oval,
       title: artist.name,
       subtitle: '${artist.works.length} 首作品',
-      heroTag: 'artist:${artist.primaryPath}',
+      heroTag: 'artist:${artist.identityPath}',
       primaryPicSeed: artist.cachedDetailPicture,
       headerTrailing: _headerTrailing,
       // 正文宽度不足时把在线头像面板移到标题下方，优先保证标题与操作区。

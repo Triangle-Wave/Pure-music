@@ -41,6 +41,16 @@ Set<String> _folderPathKeySet(Iterable<String> paths) {
   return result;
 }
 
+String _folderCoverLookupKey(String directory, String? sourcePath) {
+  final directoryKey = _audioPathLookupKey(directory);
+  if (sourcePath == null || sourcePath.isEmpty) {
+    return '$directoryKey\u0001';
+  }
+  final baseName = p.basenameWithoutExtension(sourcePath).toLowerCase();
+  if (baseName.isEmpty) return '$directoryKey\u0001';
+  return '$directoryKey\u0000$baseName';
+}
+
 /// 同目录封面候选文件名，按优先级从高到低排列。
 /// 匹配目录项时统一转小写，覆盖 Windows 路径大小写不一致的情况。
 const List<String> folderCoverFileNames = <String>[
@@ -48,17 +58,278 @@ const List<String> folderCoverFileNames = <String>[
   'cover.jpeg',
   'cover.png',
   'cover.webp',
+  'cover.bmp',
   'folder.jpg',
   'folder.jpeg',
   'folder.png',
   'folder.webp',
+  'folder.bmp',
   'front.jpg',
   'front.jpeg',
   'front.png',
   'front.webp',
+  'front.bmp',
 ];
 
-typedef _FolderCoverFile = ({String path, int modified});
+/// 封面图片扩展名，按同名图片候选的匹配顺序排列。
+const List<String> folderCoverImageExtensions = <String>[
+  'jpg',
+  'jpeg',
+  'png',
+  'webp',
+  'bmp',
+];
+
+/// 存放扫描图的常见子目录名，匹配时大小写不敏感。
+const List<String> folderCoverSubdirectoryNames = <String>['jacket', 'scans'];
+
+/// 已解析的目录封面：图片路径与修改时间（秒）。
+typedef FolderCoverFile = ({String path, int modified});
+
+bool _isFolderCoverImageName(String lowerName) {
+  final extension = p.extension(lowerName);
+  if (extension.length < 2) return false;
+  return folderCoverImageExtensions.contains(extension.substring(1));
+}
+
+bool _isCommonCoverName(String path) {
+  return folderCoverFileNames.contains(p.basename(path).toLowerCase());
+}
+
+/// 把目录项排成封面候选顺序：通用名、与音源文件同名的图片、扫描子目录。
+List<File> _rankFolderCoverCandidates({
+  required Map<String, File> files,
+  required Map<String, Map<String, File>> subdirectoryFiles,
+  String? sourcePath,
+}) {
+  final candidates = <File>[];
+  final seen = <String>{};
+
+  void add(File file) {
+    if (seen.add(file.path.toLowerCase())) candidates.add(file);
+  }
+
+  for (final name in folderCoverFileNames) {
+    final file = files[name];
+    if (file != null) add(file);
+  }
+
+  final sourceName = sourcePath == null
+      ? null
+      : p.basenameWithoutExtension(sourcePath).toLowerCase();
+  if (sourceName != null && sourceName.isNotEmpty) {
+    for (final extension in folderCoverImageExtensions) {
+      final file = files['$sourceName.$extension'];
+      if (file != null) add(file);
+    }
+  }
+
+  for (final directoryName in folderCoverSubdirectoryNames) {
+    final subdirectory = subdirectoryFiles[directoryName];
+    if (subdirectory == null) continue;
+    for (final name in folderCoverFileNames) {
+      final file = subdirectory[name];
+      if (file != null) add(file);
+    }
+    final rest = subdirectory.keys
+        .where((name) => !folderCoverFileNames.contains(name))
+        .toList()
+      ..sort();
+    for (final name in rest) {
+      final file = subdirectory[name];
+      if (file != null) add(file);
+    }
+  }
+
+  return candidates;
+}
+
+/// 一次目录枚举的结果：根目录文件与扫描子目录内的图片。
+///
+/// 同一目录下所有曲目共用同一份清单，只按各自的音源文件名挑选候选，
+/// 避免每首歌都重复枚举根目录与 Jacket/Scans。
+class _FolderCoverDirectory {
+  const _FolderCoverDirectory({
+    required this.files,
+    required this.subdirectoryFiles,
+  });
+
+  static const _FolderCoverDirectory empty = _FolderCoverDirectory(
+    files: <String, File>{},
+    subdirectoryFiles: <String, Map<String, File>>{},
+  );
+
+  final Map<String, File> files;
+  final Map<String, Map<String, File>> subdirectoryFiles;
+}
+
+/// 枚举目录项；失败时记录日志并返回空清单，由调用方降级为无目录封面。
+Future<_FolderCoverDirectory> _scanFolderCoverDirectory(
+  String directory,
+) async {
+  try {
+    final root = Directory(directory);
+    final files = <String, File>{};
+    final subdirectories = <String, Directory>{};
+    await for (final entity in root.list(followLinks: false)) {
+      final name = p.basename(entity.path).toLowerCase();
+      if (entity is File) {
+        files.putIfAbsent(name, () => entity);
+      } else if (entity is Directory) {
+        subdirectories.putIfAbsent(name, () => entity);
+      }
+    }
+    final subdirectoryFiles = <String, Map<String, File>>{};
+    for (final directoryName in folderCoverSubdirectoryNames) {
+      final subdirectory = subdirectories[directoryName];
+      if (subdirectory == null) continue;
+      final matches = <String, File>{};
+      try {
+        await for (final entity in subdirectory.list(followLinks: false)) {
+          if (entity is! File) continue;
+          final name = p.basename(entity.path).toLowerCase();
+          if (!_isFolderCoverImageName(name)) continue;
+          matches.putIfAbsent(name, () => entity);
+        }
+      } catch (error, trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] failed to scan cover directory ${subdirectory.path}: $error',
+          stackTrace: trace,
+        );
+        continue;
+      }
+      subdirectoryFiles[directoryName] = matches;
+    }
+    return _FolderCoverDirectory(
+      files: files,
+      subdirectoryFiles: subdirectoryFiles,
+    );
+  } catch (error, trace) {
+    log.app.debug(
+      'legacy',
+      '[cover] failed to scan folder cover in $directory: $error',
+      stackTrace: trace,
+    );
+    return _FolderCoverDirectory.empty;
+  }
+}
+
+/// 按优先级逐个校验候选文件，返回全部可读取的封面来源。
+///
+/// 逐个尝试而不是只取第一个，调用方可以在前一个文件读取或解码失败时
+/// 继续使用后面的候选。
+Future<List<FolderCoverFile>> _statFolderCoverCandidates(
+  _FolderCoverDirectory listing, {
+  String? sourcePath,
+}) async {
+  final result = <FolderCoverFile>[];
+  final candidates = _rankFolderCoverCandidates(
+    files: listing.files,
+    subdirectoryFiles: listing.subdirectoryFiles,
+    sourcePath: sourcePath,
+  );
+  for (final file in candidates) {
+    try {
+      final stat = await file.stat();
+      if (stat.type == FileSystemEntityType.notFound) continue;
+      result.add((
+        path: file.path,
+        modified: stat.modified.millisecondsSinceEpoch ~/ 1000,
+      ));
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to stat folder cover ${file.path}: $error',
+        stackTrace: trace,
+      );
+    }
+  }
+  return result;
+}
+
+/// 同步解析目录封面，供不能 await 的缓存路径使用。
+FolderCoverFile? findFolderCoverFileSync(
+  String directory, {
+  String? sourcePath,
+}) {
+  try {
+    final root = Directory(directory);
+    final files = <String, File>{};
+    final subdirectories = <String, Directory>{};
+    for (final entity in root.listSync(followLinks: false)) {
+      final name = p.basename(entity.path).toLowerCase();
+      if (entity is File) {
+        files.putIfAbsent(name, () => entity);
+      } else if (entity is Directory) {
+        subdirectories.putIfAbsent(name, () => entity);
+      }
+    }
+    final subdirectoryFiles = <String, Map<String, File>>{};
+    for (final directoryName in folderCoverSubdirectoryNames) {
+      final subdirectory = subdirectories[directoryName];
+      if (subdirectory == null) continue;
+      final matches = <String, File>{};
+      try {
+        for (final entity in subdirectory.listSync(followLinks: false)) {
+          if (entity is! File) continue;
+          final name = p.basename(entity.path).toLowerCase();
+          if (!_isFolderCoverImageName(name)) continue;
+          matches.putIfAbsent(name, () => entity);
+        }
+      } catch (error, trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] failed to scan cover directory ${subdirectory.path}: $error',
+          stackTrace: trace,
+        );
+        continue;
+      }
+      subdirectoryFiles[directoryName] = matches;
+    }
+    final candidates = _rankFolderCoverCandidates(
+      files: files,
+      subdirectoryFiles: subdirectoryFiles,
+      sourcePath: sourcePath,
+    );
+    for (final file in candidates) {
+      try {
+        final stat = file.statSync();
+        if (stat.type == FileSystemEntityType.notFound) continue;
+        return (
+          path: file.path,
+          modified: stat.modified.millisecondsSinceEpoch ~/ 1000,
+        );
+      } catch (error, trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] failed to stat folder cover ${file.path}: $error',
+          stackTrace: trace,
+        );
+      }
+    }
+  } catch (error, trace) {
+    log.app.debug(
+      'legacy',
+      '[cover] failed to scan folder cover in $directory: $error',
+      stackTrace: trace,
+    );
+  }
+  return null;
+}
+
+/// 解析目录封面：通用名优先，其次是音源同名图片，最后是扫描子目录。
+Future<FolderCoverFile?> findFolderCoverFile(
+  String directory, {
+  String? sourcePath,
+}) async {
+  final listing = await _scanFolderCoverDirectory(directory);
+  final candidates = await _statFolderCoverCandidates(
+    listing,
+    sourcePath: sourcePath,
+  );
+  return candidates.firstOrNull;
+}
 
 int? _optionalInt(Object? value) {
   if (value is int) return value;
@@ -484,14 +755,27 @@ class AudioLibrary {
   final LinkedHashSet<String> _smallCoverOrder = LinkedHashSet<String>();
   final LinkedHashSet<String> _coverCachePaths = LinkedHashSet<String>();
 
-  /// 目录封面解析结果按目录共享，避免同一目录下每首曲目重复扫描目录项。
-  /// 值为 null 表示该目录已确认没有候选封面文件。
+  /// 目录封面缓存条目上限。
   static const int _maxFolderCoverLookups = 4096;
-  final LinkedHashMap<String, _FolderCoverFile?> _folderCoverFiles =
-      LinkedHashMap<String, _FolderCoverFile?>();
-  final Map<String, Future<_FolderCoverFile?>> _folderCoverPending =
-      <String, Future<_FolderCoverFile?>>{};
+
+  /// 目录级首选封面缓存；值为 null 表示该目录已确认没有通用封面文件。
+  final LinkedHashMap<String, FolderCoverFile?> _folderCoverFiles =
+      LinkedHashMap<String, FolderCoverFile?>();
+
+  /// 按音源文件名缓存的完整候选列表；前一个读取失败时仍可回退到后续候选。
+  final LinkedHashMap<String, List<FolderCoverFile>> _folderCoverCandidates =
+      LinkedHashMap<String, List<FolderCoverFile>>();
+
+  /// 目录项清单按目录共享：同目录 N 首歌只枚举一次根目录与扫描子目录。
+  final Map<String, Future<_FolderCoverDirectory>> _folderCoverDirectories =
+      <String, Future<_FolderCoverDirectory>>{};
+  final Map<String, Future<List<FolderCoverFile>>> _folderCoverPending =
+      <String, Future<List<FolderCoverFile>>>{};
   int _folderCoverLookupGeneration = 0;
+
+  /// 目录枚举次数，供测试确认同目录只枚举一次。
+  @visibleForTesting
+  int folderCoverDirectoryScanCount = 0;
   static const int _maxRetainedCollectionThumbnails = 160;
   final LinkedHashMap<(Object, int), void Function()>
   _collectionThumbnailRetention =
@@ -915,6 +1199,8 @@ class AudioLibrary {
     _pageSnapshotCoordinator.reset();
     _folderCoverLookupGeneration++;
     _folderCoverFiles.clear();
+    _folderCoverCandidates.clear();
+    _folderCoverDirectories.clear();
     _folderCoverPending.clear();
     final generation = _collectionGeneration;
     for (final artist in artistCollection.values) {
@@ -2327,7 +2613,7 @@ class AudioLibrary {
           audio._mediumCoverImage?.target == null &&
           audio._largeCoverImage?.target == null &&
           audio._smallCoverBytes == null) {
-        CoverImageCache.instance.evictPath(path);
+        CoverImageCache.instance.evictPath(audio.filePath);
         _coverCachePaths.remove(path);
         continue;
       }
@@ -2342,10 +2628,15 @@ class AudioLibrary {
 
   /// Evict retained Audio cover providers except the currently playing track.
   void evictAllCoversExcept(
-    String? playingPath, {
+    String? playingPathOrFilePath, {
     bool includeCollectionCovers = false,
   }) {
     int evicted = 0;
+    final playingAudio = playingPathOrFilePath == null
+        ? null
+        : audioByPath(playingPathOrFilePath);
+    final playingPath = playingAudio?.path ?? playingPathOrFilePath;
+    final playingFilePath = playingAudio?.filePath ?? playingPathOrFilePath;
     final activePaths = List<String>.from(_coverCachePaths);
     for (final path in activePaths) {
       if (path == playingPath) continue;
@@ -2358,11 +2649,11 @@ class AudioLibrary {
     }
     if (includeCollectionCovers) {
       for (final artist in artistCollection.values) {
-        if (artist.primaryPath == playingPath) continue;
+        if (artist.primaryPath == playingFilePath) continue;
         if (artist.evictPictureCache()) evicted++;
       }
       for (final album in albumCollection.values) {
-        if (album.primaryPath == playingPath) continue;
+        if (album.primaryPath == playingFilePath) continue;
         if (album.evictCoverCache()) evicted++;
       }
     }
@@ -2375,32 +2666,64 @@ class AudioLibrary {
   }
 
   /// 同步读取已解析的目录封面；尚未解析时返回 null。
-  _FolderCoverFile? cachedFolderCoverFile(String directory) {
-    final key = _audioPathLookupKey(directory);
-    if (!_folderCoverFiles.containsKey(key)) return null;
-    final cached = _folderCoverFiles.remove(key);
-    _folderCoverFiles[key] = cached;
-    return cached;
+  FolderCoverFile? cachedFolderCoverFile(
+    String directory, {
+    String? sourcePath,
+  }) {
+    final directoryKey = _audioPathLookupKey(directory);
+    if (_folderCoverFiles.containsKey(directoryKey)) {
+      final common = _folderCoverFiles.remove(directoryKey);
+      _folderCoverFiles[directoryKey] = common;
+      if (common != null) return common;
+    }
+    final key = _folderCoverLookupKey(directory, sourcePath);
+    return _touchFolderCoverCandidates(key)?.firstOrNull;
   }
 
-  /// 解析目录下的封面图片；同一目录的并发请求合并为一次扫描。
-  Future<_FolderCoverFile?> resolveFolderCoverFile(String directory) async {
-    final key = _audioPathLookupKey(directory);
-    if (_folderCoverFiles.containsKey(key)) {
-      final cached = _folderCoverFiles.remove(key);
-      _folderCoverFiles[key] = cached;
-      return cached;
-    }
+  /// 解析目录下的封面图片；同一音源的并发请求合并为一次扫描。
+  Future<FolderCoverFile?> resolveFolderCoverFile(
+    String directory, {
+    String? sourcePath,
+  }) async {
+    final candidates = await resolveFolderCoverCandidates(
+      directory,
+      sourcePath: sourcePath,
+    );
+    return candidates.firstOrNull;
+  }
+
+  /// 解析目录下可用的全部封面候选，按通用名、同名图、扫描子目录排序。
+  ///
+  /// 同目录的目录项清单只枚举一次；每首歌按自己的音源文件名从清单中挑选
+  /// 候选，调用方可以在前一个候选读取或解码失败时继续尝试下一个。
+  Future<List<FolderCoverFile>> resolveFolderCoverCandidates(
+    String directory, {
+    String? sourcePath,
+  }) async {
+    final key = _folderCoverLookupKey(directory, sourcePath);
+    final cached = _touchFolderCoverCandidates(key);
+    if (cached != null) return cached;
     final pending = _folderCoverPending[key];
     if (pending != null) return pending;
 
-    final future = _scanFolderCoverFile(directory);
+    final directoryKey = _audioPathLookupKey(directory);
     final generation = _folderCoverLookupGeneration;
+    final future = _resolveFolderCoverCandidatesUncached(
+      directory,
+      sourcePath,
+    );
     _folderCoverPending[key] = future;
     try {
       final resolved = await future;
       if (generation == _folderCoverLookupGeneration) {
-        _storeFolderCoverFile(key, resolved);
+        final first = resolved.firstOrNull;
+        if (first != null && _isCommonCoverName(first.path)) {
+          _storeFolderCoverFile(directoryKey, first);
+        } else if (!_folderCoverFiles.containsKey(directoryKey)) {
+          // 记录"该目录没有通用封面"，避免同目录其他曲目重复扫描。
+          _storeFolderCoverFile(directoryKey, null);
+        }
+        _storeFolderCoverCandidates(key, resolved);
       }
       return resolved;
     } finally {
@@ -2410,50 +2733,62 @@ class AudioLibrary {
     }
   }
 
-  void _storeFolderCoverFile(String key, _FolderCoverFile? value) {
+  Future<List<FolderCoverFile>> _resolveFolderCoverCandidatesUncached(
+    String directory,
+    String? sourcePath,
+  ) async {
+    final listing = await _folderCoverDirectory(directory);
+    return _statFolderCoverCandidates(listing, sourcePath: sourcePath);
+  }
+
+  /// 按目录共享目录项清单；并发请求复用同一个 future，串行请求复用已完成结果。
+  Future<_FolderCoverDirectory> _folderCoverDirectory(String directory) {
+    final key = _audioPathLookupKey(directory);
+    final existing = _folderCoverDirectories.remove(key);
+    if (existing != null) {
+      _folderCoverDirectories[key] = existing;
+      return existing;
+    }
+    folderCoverDirectoryScanCount++;
+    final generation = _folderCoverLookupGeneration;
+    final future = _scanFolderCoverDirectory(directory);
+    _folderCoverDirectories[key] = future;
+    while (_folderCoverDirectories.length > _maxFolderCoverLookups) {
+      _folderCoverDirectories.remove(_folderCoverDirectories.keys.first);
+    }
+    // 刷新或释放后丢弃过期的清单，避免覆盖新一轮缓存。
+    unawaited(
+      future.whenComplete(() {
+        if (generation != _folderCoverLookupGeneration &&
+            identical(_folderCoverDirectories[key], future)) {
+          _folderCoverDirectories.remove(key);
+        }
+      }),
+    );
+    return future;
+  }
+
+  List<FolderCoverFile>? _touchFolderCoverCandidates(String key) {
+    final cached = _folderCoverCandidates.remove(key);
+    if (cached == null) return null;
+    _folderCoverCandidates[key] = cached;
+    return cached;
+  }
+
+  void _storeFolderCoverCandidates(String key, List<FolderCoverFile> value) {
+    _folderCoverCandidates.remove(key);
+    _folderCoverCandidates[key] = value;
+    while (_folderCoverCandidates.length > _maxFolderCoverLookups) {
+      _folderCoverCandidates.remove(_folderCoverCandidates.keys.first);
+    }
+  }
+
+  void _storeFolderCoverFile(String key, FolderCoverFile? value) {
     _folderCoverFiles.remove(key);
     _folderCoverFiles[key] = value;
     while (_folderCoverFiles.length > _maxFolderCoverLookups) {
       _folderCoverFiles.remove(_folderCoverFiles.keys.first);
     }
-  }
-
-  Future<_FolderCoverFile?> _scanFolderCoverFile(String directory) async {
-    try {
-      final matches = <String, File>{};
-      final entities = Directory(directory).list(followLinks: false);
-      await for (final entity in entities) {
-        if (entity is! File) continue;
-        final name = p.basename(entity.path).toLowerCase();
-        if (folderCoverFileNames.contains(name)) {
-          matches.putIfAbsent(name, () => entity);
-        }
-      }
-      for (final name in folderCoverFileNames) {
-        final file = matches[name];
-        if (file == null) continue;
-        try {
-          final stat = await file.stat();
-          return (
-            path: file.path,
-            modified: stat.modified.millisecondsSinceEpoch ~/ 1000,
-          );
-        } catch (error, trace) {
-          log.app.debug(
-            'legacy',
-            '[cover] failed to stat folder cover ${file.path}: $error',
-            stackTrace: trace,
-          );
-        }
-      }
-    } catch (error, trace) {
-      log.app.debug(
-        'legacy',
-        '[cover] failed to scan folder cover in $directory: $error',
-        stackTrace: trace,
-      );
-    }
-    return null;
   }
 
   /// 完全释放数据库资源
@@ -2468,7 +2803,10 @@ class AudioLibrary {
     _coverCachePaths.clear();
     _folderCoverLookupGeneration++;
     _folderCoverFiles.clear();
+    _folderCoverCandidates.clear();
+    _folderCoverDirectories.clear();
     _folderCoverPending.clear();
+    folderCoverDirectoryScanCount = 0;
     _invalidateAggregatedRootFolders();
     _audioByPath.clear();
     audioCollection.clear();
@@ -2758,6 +3096,31 @@ class AudioFolder {
   }
 }
 
+/// 搜索文本的三个归一化视图：去空白小写文本、拼音首字母、完整拼音。
+class _SearchTextCache {
+  const _SearchTextCache(this.normalized, this.initials, this.pinyin);
+
+  factory _SearchTextCache.of(String value) {
+    if (value.isEmpty) return const _SearchTextCache('', '', '');
+    return _SearchTextCache(
+      normalizedSearchQuery(value).toLowerCase(),
+      value.getPinyinInitials().toLowerCase(),
+      value.getPinyin().toLowerCase(),
+    );
+  }
+
+  final String normalized;
+  final String initials;
+  final String pinyin;
+
+  bool matches(String query) {
+    if (query.isEmpty) return false;
+    return normalized.contains(query) ||
+        initials.contains(query) ||
+        pinyin.contains(query);
+  }
+}
+
 class Audio {
   int _libraryIndex = -1;
   int _audiosPageIndex = -1;
@@ -2809,6 +3172,8 @@ class Audio {
 
   String? _searchNorm;
   String? _searchPinyin;
+  _SearchTextCache? _searchAlbum;
+  _SearchTextCache? _searchArtist;
 
   /// 缓存 ImageProvider 实例，避免每次创建新实例导致 Flutter ImageCache 失效
   /// 使用 WeakReference 让 CoverImageCache 的 LRU 驱逐后能被 GC 回收
@@ -2933,7 +3298,10 @@ class Audio {
   bool get isSacdTrack => cueSegment?.sacdArea != null;
 
   /// 实际用于读取文件、封面、歌词的路径。
-  String get filePath => cueSegment?.sourcePath ?? path;
+  String get filePath {
+    final sourcePath = cueSegment?.sourcePath;
+    return sourcePath == null || sourcePath.isEmpty ? path : sourcePath;
+  }
 
   int get segmentStartMs => cueSegment?.startMs ?? 0;
 
@@ -2960,6 +3328,8 @@ class Audio {
   void _invalidateSearchCache() {
     _searchNorm = null;
     _searchPinyin = null;
+    _searchAlbum = null;
+    _searchArtist = null;
   }
 
   bool matchesSearchQuery(String queryInLowerCase) {
@@ -2967,6 +3337,17 @@ class Audio {
     if (norm.contains(queryInLowerCase)) return true;
     final pinyin = _searchPinyin ??= title.getPinyinInitials().toLowerCase();
     return pinyin.contains(queryInLowerCase);
+  }
+
+  /// 搜索命中等级：0 标题，1 专辑或艺术家，-1 未命中。
+  /// 标题命中排在专辑/艺术家命中之前，调用方据此稳定排序。
+  int searchMatchRank(String queryInLowerCase) {
+    if (matchesSearchQuery(queryInLowerCase)) return 0;
+    final albumCache = _searchAlbum ??= _SearchTextCache.of(album);
+    if (albumCache.matches(queryInLowerCase)) return 1;
+    final artistCache = _searchArtist ??= _SearchTextCache.of(artist);
+    if (artistCache.matches(queryInLowerCase)) return 1;
+    return -1;
   }
 
   void _replaceMetadataFrom(Audio other) {
@@ -2978,11 +3359,16 @@ class Audio {
       _cueSegmentCachePath = null;
       _cueSegmentCache = null;
     }
-    final titleChanged = title != other.title;
+    final searchTextChanged =
+        title != other.title ||
+        artist != other.artist ||
+        album != other.album;
     title = other.title;
-    if (titleChanged) {
+    if (searchTextChanged) {
       _searchNorm = other._searchNorm;
       _searchPinyin = other._searchPinyin;
+      _searchAlbum = other._searchAlbum;
+      _searchArtist = other._searchArtist;
     }
     artist = other.artist;
     album = other.album;
@@ -3079,7 +3465,10 @@ class Audio {
   }) {
     try {
       final directory = File(filePath).parent.path;
-      final cover = AudioLibrary.instance.cachedFolderCoverFile(directory);
+      final cover = AudioLibrary.instance.cachedFolderCoverFile(
+        directory,
+        sourcePath: filePath,
+      );
       if (cover == null) return null;
       final ratio = PlatformDispatcher.instance.views.first.devicePixelRatio;
       final physicalWidth = (width * ratio).round();
@@ -3120,10 +3509,18 @@ class Audio {
   }
 
   Future<String?> resolveFolderCoverPath() async {
+    if (filePath.isEmpty) {
+      log.app.debug(
+        'legacy',
+        '[cover] skipped folder cover lookup for an empty audio path',
+      );
+      return null;
+    }
     try {
       final directory = File(filePath).parent.path;
       final file = await AudioLibrary.instance.resolveFolderCoverFile(
         directory,
+        sourcePath: filePath,
       );
       return file?.path;
     } catch (error, trace) {
@@ -3136,15 +3533,21 @@ class Audio {
     }
   }
 
-  /// 封面字节来源：同目录图片优先，音频文件内嵌图/系统缩略图兜底。
-  Future<List<_FolderCoverFile>> _coverSources() async {
-    final sources = <_FolderCoverFile>[];
+  /// 封面字节来源：同目录候选按优先级排列，音频文件内嵌图/系统缩略图兜底。
+  Future<List<FolderCoverFile>> _coverSources() async {
+    if (filePath.isEmpty) {
+      log.app.debug(
+        'legacy',
+        '[cover] skipped cover sources for an empty audio path',
+      );
+      return const <FolderCoverFile>[];
+    }
+    final sources = <FolderCoverFile>[];
     try {
       final directory = File(filePath).parent.path;
-      final folderCover = await AudioLibrary.instance.resolveFolderCoverFile(
-        directory,
-      );
-      if (folderCover != null) sources.add(folderCover);
+      final folderCovers = await AudioLibrary.instance
+          .resolveFolderCoverCandidates(directory, sourcePath: filePath);
+      sources.addAll(folderCovers);
     } catch (error, trace) {
       log.app.debug(
         'legacy',
@@ -3190,6 +3593,7 @@ class Audio {
       final directory = File(filePath).parent.path;
       final cover = await AudioLibrary.instance.resolveFolderCoverFile(
         directory,
+        sourcePath: filePath,
       );
       if (cover == null) return null;
       final ratio = PlatformDispatcher.instance.views.first.devicePixelRatio;
@@ -3338,7 +3742,7 @@ class Audio {
         _mediumCoverImage?.target == null &&
         _largeCoverImage?.target == null &&
         _smallCoverBytes == null) {
-      CoverImageCache.instance.evictPath(path);
+      CoverImageCache.instance.evictPath(filePath);
       AudioLibrary.instance._coverCachePaths.remove(path);
     }
   }
@@ -3422,7 +3826,16 @@ class Artist {
   String? _pictureCachePath;
   final Map<int, _CollectionThumbnail> _thumbnailPictures = {};
 
-  String? get primaryPath => works.firstOrNull?.path;
+  /// 封面与图片缓存使用的真实文件路径；虚拟轨指向整轨源文件。
+  String? get primaryPath {
+    final audio = works.firstOrNull;
+    if (audio == null) return null;
+    final filePath = audio.filePath;
+    return filePath.isEmpty ? audio.path : filePath;
+  }
+
+  /// 集合身份使用的路径；虚拟轨保留合成路径，避免同源文件的集合互相覆盖。
+  String? get identityPath => works.firstOrNull?.path;
 
   /// 详情页头图已缓存的那张；没有再退回列表缩略图，给飞行动画落地用。
   ImageProvider? get cachedDetailPicture {
@@ -3548,7 +3961,16 @@ class Album {
   String? _coverCachePath;
   final Map<int, _CollectionThumbnail> _thumbnailCovers = {};
 
-  String? get primaryPath => works.firstOrNull?.path;
+  /// 封面与图片缓存使用的真实文件路径；虚拟轨指向整轨源文件。
+  String? get primaryPath {
+    final audio = works.firstOrNull;
+    if (audio == null) return null;
+    final filePath = audio.filePath;
+    return filePath.isEmpty ? audio.path : filePath;
+  }
+
+  /// 集合身份使用的路径；虚拟轨保留合成路径，避免同源文件的集合互相覆盖。
+  String? get identityPath => works.firstOrNull?.path;
 
   /// 详情页头图已缓存的那张；没有再退回列表缩略图，给飞行动画落地用。
   ImageProvider? get cachedDetailCover {

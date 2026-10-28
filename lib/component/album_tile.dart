@@ -232,7 +232,7 @@ class _AlbumTileState extends State<AlbumTile> {
     final clipped = ClipRRect(borderRadius: borderRadius, child: image);
     if (!widget.enableHero) return clipped;
     return Hero(
-      tag: 'album:${widget.album.primaryPath}',
+      tag: 'album:${widget.album.identityPath}',
       child: clipped,
     );
   }
