@@ -1964,13 +1964,13 @@ fn read_cue_folder(
                 } else {
                     format!("built-in readers: .{extension} is outside the supported format set")
                 };
-                let probe = probe_container_duration_ms(
+                let (probed_ms, attempts) = probe_container_duration_ms(
                     &source_path,
                     builtin_note,
                     windows_media_duration_ms,
                     header_duration_ms,
                 );
-                duration_ms = probe.duration_ms;
+                duration_ms = probed_ms;
                 if let Some(resolved_ms) = duration_ms {
                     log::info!(
                         target: "tag",
@@ -1983,7 +1983,7 @@ fn read_cue_folder(
                         target: "tag",
                         "cue source duration unresolved: {}; attempts: {}; last track ends at its start",
                         source_path.display(),
-                        probe.attempts.join(" | ")
+                        attempts.join(" | ")
                     );
                 }
             }

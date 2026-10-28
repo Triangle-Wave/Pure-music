@@ -23,23 +23,24 @@ const TTA_HEADER_BYTES: usize = 22;
 /// TTA1 音频格式：无损 PCM。
 const TTA_FORMAT_PCM: u16 = 1;
 
-/// 单个 FILE 的时长探测结果。
+/// 单个 FILE 的时长探测结果，仅在本模块内累计，对外以元组返回。
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct DurationProbe {
-    pub(super) duration_ms: Option<u64>,
-    pub(super) attempts: Vec<String>,
+struct DurationProbe {
+    duration_ms: Option<u64>,
+    attempts: Vec<String>,
 }
 
 /// 依次尝试 Windows 媒体属性与容器头部解析，任一成功即停止。
 ///
-/// `builtin_note` 描述内置读取器失败的原因，用于最终诊断；
+/// 返回 `(duration_ms, attempts)`：`attempts` 记录内置读取器与每次回退的失败原因，
+/// 供上层诊断。`builtin_note` 描述内置读取器失败的原因；
 /// `windows_probe` 与 `header_probe` 由调用方注入，测试可替换为桩。
 pub(super) fn probe_container_duration_ms<W, H>(
     path: &Path,
     builtin_note: String,
     windows_probe: W,
     header_probe: H,
-) -> DurationProbe
+) -> (Option<u64>, Vec<String>)
 where
     W: FnOnce(&Path) -> anyhow::Result<u64>,
     H: FnOnce(&Path) -> Result<u64, String>,
@@ -52,7 +53,7 @@ where
     match windows_probe(path) {
         Ok(duration_ms) => {
             probe.duration_ms = Some(duration_ms);
-            return probe;
+            return (probe.duration_ms, probe.attempts);
         }
         Err(error) => probe
             .attempts
@@ -64,7 +65,7 @@ where
         Err(reason) => probe.attempts.push(reason),
     }
 
-    probe
+    (probe.duration_ms, probe.attempts)
 }
 
 /// 按扩展名解析容器头部的时长，单位毫秒。
@@ -375,42 +376,42 @@ mod tests {
 
     #[test]
     fn probe_prefers_windows_duration_without_reading_header() {
-        let probe = probe_container_duration_ms(
+        let (duration_ms, attempts) = probe_container_duration_ms(
             Path::new("album.tak"),
             "built-in readers: unsupported".to_string(),
             |_| Ok(733_480),
             |_| panic!("header probe must not run when Windows probe succeeds"),
         );
-        assert_eq!(probe.duration_ms, Some(733_480));
-        assert_eq!(probe.attempts, vec!["built-in readers: unsupported"]);
+        assert_eq!(duration_ms, Some(733_480));
+        assert_eq!(attempts, vec!["built-in readers: unsupported"]);
     }
 
     #[test]
     fn probe_falls_back_to_header_when_windows_fails() {
-        let probe = probe_container_duration_ms(
+        let (duration_ms, attempts) = probe_container_duration_ms(
             Path::new("album.tak"),
             "built-in readers: unsupported".to_string(),
             |_| Err(anyhow::anyhow!("no media property handler")),
             |_| Ok(700_000),
         );
-        assert_eq!(probe.duration_ms, Some(700_000));
-        assert_eq!(probe.attempts.len(), 2);
-        assert!(probe.attempts[1].contains("no media property handler"));
+        assert_eq!(duration_ms, Some(700_000));
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts[1].contains("no media property handler"));
     }
 
     #[test]
     fn probe_reports_every_attempt_when_all_sources_fail() {
-        let probe = probe_container_duration_ms(
+        let (duration_ms, attempts) = probe_container_duration_ms(
             Path::new("album.tak"),
             "built-in readers: unsupported".to_string(),
             |_| Err(anyhow::anyhow!("windows failed")),
             |_| Err("header fallback: invalid TAK streaminfo".to_string()),
         );
-        assert_eq!(probe.duration_ms, None);
-        assert_eq!(probe.attempts.len(), 3);
-        assert!(probe.attempts[0].contains("unsupported"));
-        assert!(probe.attempts[1].contains("windows failed"));
-        assert!(probe.attempts[2].contains("invalid TAK streaminfo"));
+        assert_eq!(duration_ms, None);
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts[0].contains("unsupported"));
+        assert!(attempts[1].contains("windows failed"));
+        assert!(attempts[2].contains("invalid TAK streaminfo"));
     }
 
     #[test]
@@ -495,30 +496,30 @@ mod tests {
     #[test]
     fn probe_falls_back_to_tta_header_when_windows_fails() {
         let file = temp_tta(&tta_bytes(44_100, 32_346_468));
-        let probe = probe_container_duration_ms(
+        let (duration_ms, attempts) = probe_container_duration_ms(
             &file.0,
             "built-in readers: unsupported".to_string(),
             |_| Err(anyhow::anyhow!("no media property handler")),
             header_duration_ms,
         );
-        assert_eq!(probe.duration_ms, Some(733_480));
-        assert_eq!(probe.attempts.len(), 2);
-        assert!(probe.attempts[1].contains("no media property handler"));
+        assert_eq!(duration_ms, Some(733_480));
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts[1].contains("no media property handler"));
     }
 
     #[test]
     fn probe_collects_both_failures_for_tta_source() {
         let file = temp_tta(&tta_bytes(0, 32_346_468));
-        let probe = probe_container_duration_ms(
+        let (duration_ms, attempts) = probe_container_duration_ms(
             &file.0,
             "built-in readers: unsupported".to_string(),
             |_| Err(anyhow::anyhow!("windows media properties unavailable")),
             header_duration_ms,
         );
-        assert_eq!(probe.duration_ms, None);
-        assert_eq!(probe.attempts.len(), 3);
-        assert!(probe.attempts[0].contains("unsupported"));
-        assert!(probe.attempts[1].contains("windows media properties unavailable"));
-        assert!(probe.attempts[2].contains("TTA sample rate is zero"));
+        assert_eq!(duration_ms, None);
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts[0].contains("unsupported"));
+        assert!(attempts[1].contains("windows media properties unavailable"));
+        assert!(attempts[2].contains("TTA sample rate is zero"));
     }
 }
