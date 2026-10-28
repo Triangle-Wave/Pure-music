@@ -126,7 +126,7 @@
 - **CUE 分轨**：FLAC/WAV 整轨配合同名 CUE 展开为独立曲目，播放、进度与 seek 都以 CUE 段边界为准；TAK 整轨中的曲目同样按段呈现。
 - **SACD ISO**：解析 ISO 的 TOC 生成曲目列表，2CH 与 MCH 区分别呈现；裸 DSD（3-in-14 / 3-in-16）与 DST 压缩轨道都提取为 DSF，DST 由内置解码器还原。同目录的 metabase XML 提供专辑、曲名、艺术家与封面，缺失时回退 ISO 内的文本信息。
 - **TAK**：CUE 整轨中的 TAK 曲目通过 BASS_FFMPEG 原生解码播放，无需外部转换工具。
-- **导入与封面**：文件夹导入与 m3u/pls 导入都识别 CUE、ISO 源文件，按其中的曲目展开为虚拟轨；同目录的 cover / folder / front 命名图片作为专辑封面（jpg / jpeg / png / webp）。
+- **导入与封面**：文件夹导入与 m3u/pls 导入都识别 CUE、ISO 源文件，按其中的曲目展开为虚拟轨；同目录封面按 `cover` / `folder` / `front`、源文件同名图片、`Jacket` / `Scans` 子目录的顺序解析（jpg / jpeg / png / webp / bmp），未命中回退内嵌图。
 
 ### 播放与输出
 
