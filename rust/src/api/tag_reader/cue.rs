@@ -564,7 +564,14 @@ pub(crate) fn expand_segments(
                     .flatten();
                 match file_duration_ms {
                     Some(duration_ms) if duration_ms > start_ms => end_ms = duration_ms,
-                    _ => warnings.push(format!("track {}: unknown end position", track.number)),
+                    Some(duration_ms) => warnings.push(format!(
+                        "track {}: source duration {} ms not after track start {} ms",
+                        track.number, duration_ms, start_ms
+                    )),
+                    None => warnings.push(format!(
+                        "track {}: unknown end position, source duration unavailable",
+                        track.number
+                    )),
                 }
             }
         }
@@ -908,9 +915,16 @@ mod tests {
     }
 
     #[test]
-    fn last_track_without_file_duration_is_zero_length() {
+    fn last_track_end_uses_source_duration_or_falls_back_to_start() {
         let text = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 02:00:00\n";
         let sheet = parse_ok(text);
+
+        let (with_duration, warnings) = expand_segments(&sheet, &[Some(200_000)]);
+        assert!(warnings.is_empty());
+        assert_eq!(with_duration[0].start_ms, 120_000);
+        assert_eq!(with_duration[0].end_ms, 200_000);
+        assert_eq!(with_duration[0].duration_ms(), 80_000);
+
         let empty: &[Option<u64>] = &[];
         let missing: &[Option<u64>] = &[None];
         for durations in [empty, missing] {
@@ -919,8 +933,70 @@ mod tests {
             assert_eq!(segments[0].start_ms, 120_000);
             assert_eq!(segments[0].end_ms, 120_000);
             assert_eq!(segments[0].duration_ms(), 0);
-            assert_eq!(warnings, vec!["track 1: unknown end position"]);
+            assert_eq!(
+                warnings,
+                vec!["track 1: unknown end position, source duration unavailable"]
+            );
         }
+    }
+
+    #[test]
+    fn middle_tracks_use_next_start_when_last_duration_missing() {
+        let text = "FILE \"a.tak\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\nTRACK 03 AUDIO\nINDEX 01 02:00:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[None]);
+
+        let ranges: Vec<(u64, u64)> = segments
+            .iter()
+            .map(|segment| (segment.start_ms, segment.end_ms))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![(0, 60_000), (60_000, 120_000), (120_000, 120_000)]
+        );
+        assert_eq!(
+            warnings,
+            vec!["track 3: unknown end position, source duration unavailable"]
+        );
+    }
+
+    #[test]
+    fn each_file_closes_with_its_own_duration() {
+        let text = "FILE \"disc1.tak\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\nFILE \"disc2.tak\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 02:00:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(150_000), None]);
+
+        let ranges: Vec<(u64, u64)> = segments
+            .iter()
+            .map(|segment| (segment.start_ms, segment.end_ms))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (0, 60_000),
+                (60_000, 150_000),
+                (0, 120_000),
+                (120_000, 120_000)
+            ]
+        );
+        assert_eq!(
+            warnings,
+            vec!["track 4: unknown end position, source duration unavailable"]
+        );
+    }
+
+    #[test]
+    fn warns_when_source_duration_does_not_exceed_track_start() {
+        let text = "FILE \"a.tak\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:01:00\n";
+        let sheet = parse_ok(text);
+        let (segments, warnings) = expand_segments(&sheet, &[Some(1_000)]);
+
+        assert_eq!(segments[0].start_ms, 1_000);
+        assert_eq!(segments[0].end_ms, 1_000);
+        assert_eq!(
+            warnings,
+            vec!["track 1: source duration 1000 ms not after track start 1000 ms"]
+        );
     }
 
     #[test]
@@ -1034,7 +1110,10 @@ mod tests {
         assert_eq!(segments[0].start_ms, 1_000);
         assert_eq!(segments[0].end_ms, 1_000);
         assert_eq!(segments[0].duration_ms(), 0);
-        assert_eq!(warnings, vec!["track 1: unknown end position"]);
+        assert_eq!(
+            warnings,
+            vec!["track 1: source duration 500 ms not after track start 1000 ms"]
+        );
     }
 
     #[test]

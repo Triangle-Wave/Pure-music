@@ -45,6 +45,7 @@ use format_detection::{
 
 mod format_readers;
 mod cue;
+mod source_duration;
 use cue::{
     expand_segments, is_cue_path, parse_cue_file, parse_segment_path, sacd_segment_path,
     segment_path_with_range,
@@ -52,6 +53,7 @@ use cue::{
 use format_readers::{
     read_by_asf, read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia,
 };
+use source_duration::{header_duration_ms, probe_container_duration_ms};
 
 mod dff;
 use dff::read_dff_metadata;
@@ -1038,6 +1040,24 @@ impl Drop for WinRtWorkerGuard {
     }
 }
 
+/// 通过 Windows 媒体属性读取源文件时长，单位毫秒。
+///
+/// 不依赖扩展名白名单；文件缺少媒体属性处理器或属性为空时返回错误。
+fn windows_media_duration_ms(path: &Path) -> anyhow::Result<u64> {
+    let _winrt = WinRtWorkerGuard::initialize();
+    let storage_file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path))?.get()?;
+    let music_properties = storage_file
+        .Properties()?
+        .GetMusicPropertiesAsync()?
+        .get()?;
+    let duration: Duration = music_properties.Duration()?.into();
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    if duration_ms == 0 {
+        anyhow::bail!("media properties report zero duration");
+    }
+    Ok(duration_ms)
+}
+
 fn tag_reader_worker_count_for(logical_cores: usize, job_count: usize) -> usize {
     (logical_cores.saturating_sub(RESERVED_LOGICAL_CORES) / 2)
         .max(1)
@@ -1882,7 +1902,7 @@ fn read_cue_folder(
 
         let mut sources: Vec<Option<CueSourceInfo>> = Vec::with_capacity(sheet.files.len());
         let mut file_durations_ms: Vec<Option<u64>> = Vec::with_capacity(sheet.files.len());
-        for file in &sheet.files {
+        for (file_index, file) in sheet.files.iter().enumerate() {
             let source_path = cue_dir.join(file.name.as_str());
             let metadata = match fs::metadata(&source_path) {
                 Ok(metadata) if metadata.is_file() => metadata,
@@ -1911,7 +1931,7 @@ fn read_cue_folder(
             };
             referenced.insert(path_key(&source_path));
 
-            let (duration_ms, bitrate, sample_rate) = match Audio::read_from_path(&source_path) {
+            let (mut duration_ms, bitrate, sample_rate) = match Audio::read_from_path(&source_path) {
                 Some(audio) => (
                     if audio.duration == 0 {
                         None
@@ -1930,6 +1950,43 @@ fn read_cue_folder(
                     (None, None, None)
                 }
             };
+            let file_has_tracks = sheet
+                .tracks
+                .iter()
+                .any(|track| track.file_index == file_index);
+            if duration_ms.is_none() && file_has_tracks {
+                let extension = source_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("<none>");
+                let builtin_note = if is_supported_audio_path(&source_path) {
+                    format!("built-in readers: no duration reported for .{extension}")
+                } else {
+                    format!("built-in readers: .{extension} is outside the supported format set")
+                };
+                let probe = probe_container_duration_ms(
+                    &source_path,
+                    builtin_note,
+                    windows_media_duration_ms,
+                    header_duration_ms,
+                );
+                duration_ms = probe.duration_ms;
+                if let Some(resolved_ms) = duration_ms {
+                    log::info!(
+                        target: "tag",
+                        "cue source duration fallback: {} -> {} ms",
+                        source_path.display(),
+                        resolved_ms
+                    );
+                } else {
+                    log::warn!(
+                        target: "tag",
+                        "cue source duration unresolved: {}; attempts: {}; last track ends at its start",
+                        source_path.display(),
+                        probe.attempts.join(" | ")
+                    );
+                }
+            }
             file_durations_ms.push(duration_ms);
             sources.push(Some(CueSourceInfo {
                 path: source_path,
