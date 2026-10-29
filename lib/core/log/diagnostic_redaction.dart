@@ -1,9 +1,11 @@
 final diagnosticWindowsPathPattern = RegExp(
-  r'(?:[A-Za-z]:[\\/]|\\\\)[^|"\r\n]*?(?=\s+\((?:error|code)\b|[|"\r\n]|$)',
+  r'(?:[A-Za-z]:[\\/]|\\\\)[^|"\r\n]*?'
+  r'(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s+\((?:error|code)\b|[|"\r\n]|$)',
   caseSensitive: false,
 );
 final diagnosticUnixPathPattern = RegExp(
-  r'/(?:Users|home)/[^|"\r\n]*?(?=\s+\((?:error|code)\b|[|"\r\n]|$)',
+  r'/(?:Users|home)/[^|"\r\n]*?'
+  r'(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s+\((?:error|code)\b|[|"\r\n]|$)',
   caseSensitive: false,
 );
 final diagnosticUrlQueryPattern = RegExp(

@@ -12,6 +12,7 @@ import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/core/equalizer_action_state.dart';
 import 'package:pure_music/native/bass/bass.dart' as bass;
+import 'package:pure_music/native/bass/bass_error_text.dart';
 import 'package:pure_music/native/bass/bass_fx.dart';
 import 'package:pure_music/native/bass/bass_mix.dart';
 import 'package:pure_music/native/bass/bass_wasapi.dart' as bass_wasapi;
@@ -4195,11 +4196,13 @@ class BassPlayer {
     var handle = _streamCreateFile(audioPath, firstFlags);
     if (handle != 0) return handle;
     final firstError = _bass.BASS_ErrorGetCode();
+    final fileFields = _audioFileLogFields(audioPath);
     if ((firstFlags & bass.BASS_ASYNCFILE) == 0) {
       log.app.warn(
         'legacy',
-        '[bass] stream create failed: path=$audioPath '
-            'flags=0x${firstFlags.toRadixString(16)} error=$firstError',
+        '[bass] stream create failed: file=${path.basename(audioPath)} '
+            '$fileFields flags=0x${firstFlags.toRadixString(16)} '
+            'error=$firstError(${bassErrorText(firstError)})',
       );
       return 0;
     }
@@ -4208,20 +4211,42 @@ class BassPlayer {
     if (handle != 0) {
       log.app.warn(
         'legacy',
-        '[bass] stream create required sync io: path=$audioPath '
-            'flags=0x${firstFlags.toRadixString(16)} error=$firstError',
+        '[bass] stream create required sync io: '
+            'file=${path.basename(audioPath)} $fileFields '
+            'flags=0x${firstFlags.toRadixString(16)} '
+            'error=$firstError(${bassErrorText(firstError)})',
       );
       return handle;
     }
     final retryError = _bass.BASS_ErrorGetCode();
     log.app.warn(
       'legacy',
-      '[bass] stream create failed after retry: path=$audioPath '
+      '[bass] stream create failed after retry: '
+          'file=${path.basename(audioPath)} $fileFields '
           'flags=0x${firstFlags.toRadixString(16)} '
           'retryFlags=0x${retryFlags.toRadixString(16)} '
-          'error=$firstError retryError=$retryError',
+          'error=$firstError(${bassErrorText(firstError)}) '
+          'retryError=$retryError(${bassErrorText(retryError)})',
     );
     return 0;
+  }
+
+  /// 失败日志附带的扩展名与文件大小；读取失败时大小为 -1，不抛到调用方。
+  String _audioFileLogFields(String audioPath) {
+    final extension = path.extension(audioPath).toLowerCase();
+    final extensionText = extension.isEmpty ? '<none>' : extension;
+    var size = -1;
+    try {
+      size = File(audioPath).lengthSync();
+    } catch (err, trace) {
+      log.app.debug(
+        'legacy',
+        '[bass] failed to read audio file size: ext=$extensionText '
+            'error=${err.runtimeType}',
+        stackTrace: trace,
+      );
+    }
+    return 'ext=$extensionText sizeBytes=$size';
   }
 
   int _streamCreateFile(String audioPath, int flags) {

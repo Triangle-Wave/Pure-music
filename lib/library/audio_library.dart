@@ -623,20 +623,29 @@ Future<(List<Audio>, int)> _fillConvertedAudios<T>(
   return (audios, convertedAudioCount);
 }
 
-/// 旧索引可能同时保留 CUE/ISO 整轨条目与其虚拟轨；同目录存在虚拟轨时只保留虚拟轨。
-List<Audio> _dropContainerTracksShadowedByVirtualTracks(List<Audio> audios) {
-  if (audios.length < 2) return audios;
-  final containerKeys = <String>{};
+/// 采集虚拟轨覆盖的容器路径键。
+Set<String> _containerTrackKeys(Iterable<Audio> audios) {
+  final keys = <String>{};
   for (final audio in audios) {
     final segment = audio.cueSegment;
     if (segment != null) {
-      containerKeys.add(_audioPathLookupKey(segment.sourcePath));
+      keys.add(_audioPathLookupKey(segment.sourcePath));
     }
   }
-  if (containerKeys.isEmpty) return audios;
+  return keys;
+}
+
+/// 同目录存在虚拟轨时，剔除其覆盖的容器整轨条目；加载与聚合入口共用。
+List<Audio> _dropContainerTracksShadowedByVirtualTracks(
+  List<Audio> audios, {
+  Set<String>? containerKeys,
+}) {
+  if (containerKeys == null && audios.length < 2) return audios;
+  final keys = containerKeys ?? _containerTrackKeys(audios);
+  if (keys.isEmpty) return audios;
   final kept = <Audio>[];
   for (final audio in audios) {
-    if (!audio.isVirtualTrack && containerKeys.contains(audio._pathLookupKey)) {
+    if (!audio.isVirtualTrack && keys.contains(audio._pathLookupKey)) {
       continue;
     }
     kept.add(audio);
@@ -668,7 +677,7 @@ Future<_FolderConversionResult> _convertSqliteFolders(
     convertedAudioCount = converted.$2;
     folders.add(
       AudioFolder(
-        _dropContainerTracksShadowedByVirtualTracks(converted.$1),
+        converted.$1,
         folder.path,
         folder.modified.toInt(),
         folder.latest.toInt(),
@@ -708,12 +717,7 @@ Future<_FolderConversionResult> _convertJsonFolders(
       objectBatchSize: objectBatchSize,
     );
     convertedAudioCount = converted.$2;
-    folders.add(
-      AudioFolder.fromMap(
-        map,
-        _dropContainerTracksShadowedByVirtualTracks(converted.$1),
-      ),
-    );
+    folders.add(AudioFolder.fromMap(map, converted.$1));
     map.clear();
   }
   final pooledTextCount = loadPool.textCount;
@@ -1308,8 +1312,15 @@ class AudioLibrary {
 
   void _buildCollections() {
     final state = _beginCollectionBuild();
+    final containerKeys = _containerTrackKeys(
+      folders.expand((folder) => folder.audios),
+    );
     for (final folder in folders) {
-      for (final audio in folder.audios) {
+      final audios = _dropContainerTracksShadowedByVirtualTracks(
+        folder.audios,
+        containerKeys: containerKeys,
+      );
+      for (final audio in audios) {
         _addAudioToCollections(audio, state);
       }
     }
@@ -1318,9 +1329,16 @@ class AudioLibrary {
 
   Future<void> _buildCollectionsForInitialLoad(int objectBatchSize) async {
     final state = _beginCollectionBuild();
+    final containerKeys = _containerTrackKeys(
+      folders.expand((folder) => folder.audios),
+    );
     var processed = 0;
     for (final folder in folders) {
-      for (final audio in folder.audios) {
+      final audios = _dropContainerTracksShadowedByVirtualTracks(
+        folder.audios,
+        containerKeys: containerKeys,
+      );
+      for (final audio in audios) {
         _addAudioToCollections(audio, state);
         processed++;
         if (processed % objectBatchSize == 0) {
@@ -3044,7 +3062,13 @@ class AudioLibrary {
 class AudioFolder {
   String _path;
   String? _pathLookupKeyCache;
-  List<Audio> audios;
+  List<Audio> _audios;
+
+  /// 任何写入入口都剔除被同目录虚拟轨覆盖的整轨条目。
+  List<Audio> get audios => _audios;
+  set audios(List<Audio> value) {
+    _audios = _dropContainerTracksShadowedByVirtualTracks(value);
+  }
 
   /// absolute path
   String get path => _path;
@@ -3066,12 +3090,13 @@ class AudioFolder {
   String? alias;
 
   AudioFolder(
-    this.audios,
+    List<Audio> audios,
     String path,
     this.modified,
     this.latest, [
     this.alias,
-  ]) : _path = path;
+  ]) : _audios = _dropContainerTracksShadowedByVirtualTracks(audios),
+       _path = path;
 
   /// 展示名：别名优先，否则目录名
   String get displayName => alias ?? p.basename(path);
