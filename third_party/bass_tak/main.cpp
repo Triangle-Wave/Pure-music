@@ -111,7 +111,7 @@ BOOL WINAPI DllMain( HINSTANCE hinstDLL,DWORD fdwReason,LPVOID lpvReserved){
 		case DLL_PROCESS_ATTACH: //initialize
 			DisableThreadLibraryCalls(hinstDLL);
 			if (HIWORD(BASS_GetVersion())!=BASSVERSION) {
-				MessageBoxA(0,"Incorrect BASS.DLL version ("BASSVERSIONTEXT" is required)","BASS_TAK",MB_ICONERROR);
+				MessageBoxA(0, "Incorrect BASS.DLL version (" BASSVERSIONTEXT " is required)", "BASS_TAK", MB_ICONERROR);
 				return FALSE;
 			}
 			bassfunc->RegisterPlugin(ConfigProc,PLUGIN_CONFIG_ADD); // register config function for freq/chans options
