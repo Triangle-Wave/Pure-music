@@ -253,4 +253,65 @@ void main() {
     }
     await verifyExtractedPortablePackage(dir.path);
   }, timeout: const Timeout(Duration(minutes: 2)));
+
+  group('installerLogShowsStart', () {
+    final startedAt = DateTime(2026, 10, 29, 12);
+
+    test('treats growth after the baseline as started', () {
+      expect(
+        installerLogShowsStart(
+          startedAt: startedAt,
+          modified: startedAt.subtract(const Duration(minutes: 5)),
+          baselineLength: 120,
+          currentLength: 160,
+        ),
+        isTrue,
+      );
+    });
+
+    test('accepts a fresh write when the length is unchanged', () {
+      expect(
+        installerLogShowsStart(
+          startedAt: startedAt,
+          modified: startedAt.add(const Duration(milliseconds: 200)),
+          baselineLength: 120,
+          currentLength: 120,
+        ),
+        isTrue,
+      );
+    });
+
+    test('ignores a log whose last write predates the start', () {
+      expect(
+        installerLogShowsStart(
+          startedAt: startedAt,
+          modified: startedAt.subtract(const Duration(seconds: 1)),
+          baselineLength: 120,
+          currentLength: 120,
+        ),
+        isFalse,
+      );
+      expect(
+        installerLogShowsStart(
+          startedAt: startedAt,
+          modified: null,
+          baselineLength: 120,
+          currentLength: 120,
+        ),
+        isFalse,
+      );
+    });
+
+    test('skips the length check when the baseline is unknown', () {
+      expect(
+        installerLogShowsStart(
+          startedAt: startedAt,
+          modified: startedAt.subtract(const Duration(minutes: 5)),
+          baselineLength: null,
+          currentLength: 999,
+        ),
+        isFalse,
+      );
+    });
+  });
 }
