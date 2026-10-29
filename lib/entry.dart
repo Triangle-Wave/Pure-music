@@ -294,6 +294,8 @@ class _EntryState extends State<Entry>
   final ValueNotifier<bool> _windowResizing = ValueNotifier(false);
   Timer? _resizeIdleTimer;
   Timer? _geometrySaveTimer;
+  VoidCallback? _routeLogListener;
+  String? _routeLogPath;
 
   @override
   void initState() {
@@ -303,6 +305,7 @@ class _EntryState extends State<Entry>
     AppSettings.backgroundNotifier.addListener(_applyWindowTransparent);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _attachRouteLog();
       AudioEchoLogRecorder.instance.start(
         full: Platform.environment['CP_ECHO_RECORD'] == '1',
       );
@@ -321,10 +324,28 @@ class _EntryState extends State<Entry>
     _resizeIdleTimer?.cancel();
     _geometrySaveTimer?.cancel();
     _windowResizing.dispose();
+    if (_routeLogListener != null) {
+      config.routerDelegate.removeListener(_routeLogListener!);
+    }
     AppSettings.backgroundNotifier.removeListener(_applyWindowTransparent);
     WidgetsBinding.instance.removeObserver(this);
     windowManager.removeListener(this);
     super.dispose();
+  }
+
+  /// 路由变化写一行日志，自动化测试靠它确认当前页面。
+  void _attachRouteLog() {
+    final delegate = config.routerDelegate;
+    void listener() {
+      final path = delegate.currentConfiguration.uri.path;
+      if (path == _routeLogPath) return;
+      _routeLogPath = path;
+      log.app.info('legacy', '[nav] path=$path');
+    }
+
+    _routeLogListener = listener;
+    delegate.addListener(listener);
+    listener();
   }
 
   void _applyWindowTransparent() {
@@ -363,6 +384,7 @@ class _EntryState extends State<Entry>
     // 等这次系统回调返回后再生效。回调里立刻画，会和还没恢复的窗口表面死锁。
     Timer.run(() {
       WindowRenderGate.instance.setWindowMinimized(false);
+      MemoryMonitorService.instance.stopHiddenTrim();
       PlayService.existingPlaybackService?.stopSmtcKeepAlive();
     });
   }
