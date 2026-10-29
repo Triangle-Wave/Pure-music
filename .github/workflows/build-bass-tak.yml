@@ -84,7 +84,7 @@ jobs:
               /DEF:"$src/bass_tak.def" `
               /OUT:bass_tak.dll `
               /PDB:bass_tak.pdb `
-              bass.lib tak_deco_lib.lib
+              bass.lib tak_deco_lib.lib user32.lib
             if ($LASTEXITCODE -ne 0) { throw "cl failed with exit code $LASTEXITCODE" }
           }
           finally {
