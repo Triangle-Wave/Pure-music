@@ -4,6 +4,10 @@ name: Build BASS TAK plugin
 # 手动触发，不参与主构建；验证通过后再接入 build-windows.yml。
 
 on:
+  push:
+    paths:
+      - 'third_party/bass_tak/**'
+      - '.github/workflows/build-bass-tak.yml'
   workflow_dispatch:
 
 permissions:
