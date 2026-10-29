@@ -116,7 +116,7 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 
 # Install BASS audio library & plugins (required at runtime)
-file(GLOB BASS_PLUGINS "${CMAKE_SOURCE_DIR}/../BASS/*.dll")
+file(GLOB BASS_PLUGINS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/../BASS/*.dll")
 install(FILES ${BASS_PLUGINS}
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/dll/BASS"
     COMPONENT Runtime)

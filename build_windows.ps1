@@ -493,13 +493,13 @@ function New-AppPackage([string]$artifactRoot, [string]$version, [bool]$isPortab
             throw "BASS directory not found in project root: $bassSrcDir"
         }
         New-Item -ItemType Directory -Force -Path $bassDestDir | Out-Null
-        foreach ($dll in @("bass.dll", "basswasapi.dll", "bass_fx.dll", "bassmix.dll")) {
+        foreach ($dll in @("bass.dll", "basswasapi.dll", "bass_fx.dll", "bassmix.dll", "bass_tak.dll", "tak_deco_lib.dll")) {
             $src = Join-Path $bassSrcDir $dll
             if (-not (Test-Path $src)) { throw "$dll not found in source BASS folder: $bassSrcDir" }
             Copy-Item -Path $src -Destination (Join-Path $bassDestDir $dll) -Force
         }
         Invoke-RoboCopy $bassSrcDir $bassDestDir
-        foreach ($dll in @("bass.dll", "basswasapi.dll", "bass_fx.dll", "bassmix.dll")) {
+        foreach ($dll in @("bass.dll", "basswasapi.dll", "bass_fx.dll", "bassmix.dll", "bass_tak.dll", "tak_deco_lib.dll")) {
             if (-not (Test-Path "$bassDestDir\$dll")) { throw "Missing BASS DLL: $dll" }
         }
     }
