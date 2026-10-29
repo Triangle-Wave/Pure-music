@@ -1,7 +1,7 @@
 {
   "tag_name": "v2.3.10",
   "name": "v2.3.10",
-  "body": "**Full Changelog**: https://github.com/Triangle-Wave/Pure-music/compare/v2.3.9...v2.3.10",
+  "body": "## 2.3.10 更新日志\n\n本版本与 2.3.9 内容完全一致，仅版本号递增，用于让已安装 2.3.9 的客户端能收到在线更新。\n\n**播放与曲库**\n- TTA 曲目进度条零点改用 BASS 实际定位落点，起点不再偏移\n- CUE 段尾偏移按距末尾距离设置，播放止于轨尾\n- 增量扫描发现 CUE 目录仍有被引用的源文件整轨条目时强制重建；曲库加载时剔除被虚拟轨覆盖的源文件条目\n- CUE 最后一轨时长：内置读取器 → Windows 媒体属性 → TAK 容器头（`tBaK` + STREAMINFO）→ TTA1 头依次兜底，同一文件只探测一次\n- CUE 虚拟轨封面按通用名 → 源文件同名图 → Jacket/Scans 子目录 → 内嵌图查找，支持 BMP，同目录共享一次扫描\n- 搜索匹配专辑名与艺术家，支持首字母与完整拼音，标题命中优先\n\n**歌词**\n- 主来源保留逐字时间轴，其他来源按时间戳补齐翻译与罗马音，已有内容不覆盖\n\n**音频输出**\n- 共享与独占模式分别记录输出设备\n- 设备名二次解析，去掉模糊匹配，失效设备不再静默切换\n- 设备热插拔后自动刷新列表\n\n**更新**\n- 下载线路：自动（GitHub 直连 → Gitee 镜像 → 加速代理）、仅 GitHub、仅 Gitee、仅加速代理\n- 更新清单只从 GitHub 或 Gitee 获取，加速代理只承担安装包传输\n- 每条线路下载后校验 SHA256，失败自动切换下一条，全部失败时优先展示直连原因\n\n**远程曲库**\n- 新增 Navidrome、WebDAV 远程曲库\n- 远程曲目参与播放统计与播放记录\n\n**其他**\n- 退出时释放音量控制\n- 在线歌词请求支持取消",
   "html_url": "https://github.com/Triangle-Wave/Pure-music/releases/tag/v2.3.10",
   "gitee_release_url": "https://gitee.com/qingyueyin/Pure-music/releases/tag/v2.3.10",
   "installer_url": "https://github.com/Triangle-Wave/Pure-music/releases/download/v2.3.10/pure_music_2.3.10_release_installer.exe",
