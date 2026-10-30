@@ -5,9 +5,31 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.11**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.12**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases) · [Gitee 镜像](https://gitee.com/qingyueyin/Pure-music)（同步常滞后）
+
+<details>
+<summary><strong>2.3.12</strong></summary>
+
+**TAK 播放**
+
+- 接入 TAK 官方解码库（64 位 `bass_tak` 插件），旧版编码的 TAK 可以正常播放；这类文件此前因 FFmpeg 未实现对应解码而报“格式不支持”。
+- 插件随应用分发，启动时由 BASS 自动加载，覆盖 CUE 整轨中的 TAK 曲目与直接播放。
+
+**曲库与显示（沿用 2.3.11）**
+
+- 整轨 TAK 不再出现在曲库、文件夹页与搜索结果中，只保留 CUE 展开的分轨。
+
+**播放诊断（沿用 2.3.11）**
+
+- BASS 创建流失败时记录文件名、扩展名、文件大小、错误码与可读文本。
+
+**更新流程（沿用 2.3.11）**
+
+- 安装助手启动过程逐步写入 `updates\installer_update.log`；助手未真正启动时应用不退出，提示手动运行安装包并给出完整路径。
+
+</details>
 
 <details>
 <summary><strong>2.3.11</strong></summary>
