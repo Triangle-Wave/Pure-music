@@ -463,4 +463,28 @@ void main() {
     });
     expect(api.withFallbackChecksums(packed).installerSha256, isNull);
   });
+
+  test('fills release notes from the same-tag manifest when the API body is empty', () {
+    final api = UpdateInfo.fromJson({'tag_name': 'v2.3.13', 'body': ''});
+    final packed = UpdateInfo.fromJson({
+      'tag_name': 'v2.3.13',
+      'body': '修复在线更新失败与更新说明缺失。',
+    });
+
+    expect(api.body, isNull);
+    expect(
+      api.withFallbackChecksums(packed).body,
+      '修复在线更新失败与更新说明缺失。',
+    );
+  });
+
+  test('keeps release notes from the API when present', () {
+    final api = UpdateInfo.fromJson({'tag_name': 'v2.3.13', 'body': 'API 更新说明'});
+    final packed = UpdateInfo.fromJson({
+      'tag_name': 'v2.3.13',
+      'body': '打包清单说明',
+    });
+
+    expect(api.withFallbackChecksums(packed).body, 'API 更新说明');
+  });
 }

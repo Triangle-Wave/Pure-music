@@ -407,7 +407,7 @@ class UpdateInfo {
     return UpdateInfo(
       tagName: tagName,
       name: name,
-      body: body,
+      body: body ?? fallback.body,
       htmlUrl: htmlUrl ?? fallback.htmlUrl,
       giteeHtmlUrl: giteeHtmlUrl ?? fallback.giteeHtmlUrl,
       installerUrl: installerUrl ?? fallback.installerUrl,
