@@ -12,7 +12,14 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 <details>
 <summary><strong>2.3.14</strong></summary>
 
-**Full Changelog**: https://github.com/Triangle-Wave/Pure-music/compare/v2.3.13...v2.3.14
+**更新流程**
+
+- 修复点击“下载并安装”后安装向导没有启动的问题：现在直接启动安装程序，由安装程序关闭当前应用并完成替换。
+- 修复 GitHub API 限流时更新弹窗不显示更新说明的问题，改用更新清单中的完整日志。
+
+**安装提示**
+
+- 2.3.13 及更早版本仍需要手动运行一次本版本的安装包；安装 2.3.14 后，后续版本可以正常在线更新。
 
 </details>
 
