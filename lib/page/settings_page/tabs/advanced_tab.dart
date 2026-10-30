@@ -18,8 +18,15 @@ class AdvancedTabContent extends StatelessWidget {
         _AdvancedGroupEntry(
           icon: Symbols.settings_suggest,
           title: '系统行为',
-          subtitle: '关闭窗口、防休眠与日志',
+          subtitle: '关闭窗口、防休眠、日志与缓存',
           groupId: 'advanced-system',
+        ),
+        SizedBox(height: 8.0),
+        _AdvancedGroupEntry(
+          icon: Symbols.language,
+          title: '网络',
+          subtitle: '代理与连接',
+          groupId: 'advanced-network',
         ),
         SizedBox(height: 8.0),
         SettingsSectionHeader('媒体与字体'),

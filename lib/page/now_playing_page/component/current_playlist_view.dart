@@ -1,12 +1,16 @@
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/component/danger_confirm_dialog.dart';
+import 'package:pure_music/component/hi_res_badge.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/services/concert_session.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
+
+/// 标题行可容纳「文本 + 徽章」的宽度下限；低于该值徽章组等比缩小。
+const double _badgeCompactThreshold = 120.0;
 
 class CurrentPlaylistView extends StatefulWidget {
   const CurrentPlaylistView({super.key});
@@ -444,13 +448,52 @@ class _PlaylistViewItem extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            audio.title,
-            style: TextStyle(
-              fontWeight: isNowPlaying
-                  ? AppType.weightSemibold
-                  : FontWeight.normal,
-            ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < _badgeCompactThreshold;
+              final isDsd = isDsdAudio(audio);
+              final isHiRes = isHiResAudio(audio);
+              final Widget badgeGroup = Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isDsd) ...[
+                    const SizedBox(width: 6),
+                    const DsdBadge(),
+                  ],
+                  if (isHiRes) ...[
+                    const SizedBox(width: 6),
+                    const HiResBadge(),
+                  ],
+                ],
+              );
+              return Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      audio.title,
+                      style: TextStyle(
+                        fontWeight: isNowPlaying
+                            ? AppType.weightSemibold
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                  if (isDsd || isHiRes)
+                    compact
+                        ? ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: compactBadgeGroupMaxWidth,
+                            ),
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: badgeGroup,
+                            ),
+                          )
+                        : badgeGroup,
+                ],
+              );
+            },
           ),
           const SizedBox(height: 2),
           Text(
@@ -525,11 +568,52 @@ class _ReorderItem extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            audio.title,
-            style: TextStyle(
-              fontWeight: isNowPlaying ? FontWeight.w600 : FontWeight.normal,
-            ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < _badgeCompactThreshold;
+              final isDsd = isDsdAudio(audio);
+              final isHiRes = isHiResAudio(audio);
+              final Widget badgeGroup = Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isDsd) ...[
+                    const SizedBox(width: 6),
+                    const DsdBadge(),
+                  ],
+                  if (isHiRes) ...[
+                    const SizedBox(width: 6),
+                    const HiResBadge(),
+                  ],
+                ],
+              );
+              return Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      audio.title,
+                      style: TextStyle(
+                        fontWeight: isNowPlaying
+                            ? FontWeight.w600
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                  if (isDsd || isHiRes)
+                    compact
+                        ? ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: compactBadgeGroupMaxWidth,
+                            ),
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: badgeGroup,
+                            ),
+                          )
+                        : badgeGroup,
+                ],
+              );
+            },
           ),
           const SizedBox(height: 2),
           Text(

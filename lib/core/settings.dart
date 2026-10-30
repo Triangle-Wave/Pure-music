@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:pure_music/core/app_data_paths.dart';
 import 'package:pure_music/core/hotkey_binding.dart';
 import 'package:pure_music/core/artist_name_splitter.dart';
 import 'package:pure_music/core/setting_action_state.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/settings/settings_decoder.dart';
 import 'package:pure_music/core/settings/settings_types.dart';
 import 'package:pure_music/core/window_placement.dart';
@@ -18,68 +20,11 @@ import 'package:github/github.dart';
 import 'package:path/path.dart' as path;
 import 'package:window_manager/window_manager.dart';
 
+export 'app_data_paths.dart';
 export 'settings/settings_decoder.dart';
 export 'settings/settings_types.dart';
 
-const bool portableBuild = bool.fromEnvironment(
-  'PORTABLE_BUILD',
-  defaultValue: true,
-);
-
 const bool enableOnlineLyricWriting = true;
-
-String resolveAppDataPath({
-  required bool usePortableData,
-  required String executablePath,
-  required Map<String, String> environment,
-}) {
-  final exeBase = path.basename(executablePath).toLowerCase();
-  if (usePortableData &&
-      exeBase != 'dart.exe' &&
-      exeBase != 'flutter_tester.exe') {
-    return path.join(path.dirname(executablePath), 'data');
-  }
-
-  final localAppData = environment['LOCALAPPDATA'];
-  if (localAppData != null && localAppData.trim().isNotEmpty) {
-    return path.join(localAppData, 'pure_music');
-  }
-
-  final userProfile = environment['USERPROFILE'];
-  if (userProfile != null && userProfile.trim().isNotEmpty) {
-    return path.join(userProfile, 'AppData', 'Local', 'pure_music');
-  }
-
-  final appData = environment['APPDATA'];
-  if (appData != null && appData.trim().isNotEmpty) {
-    return path.join(appData, 'pure_music');
-  }
-
-  throw StateError('Unable to determine app data directory');
-}
-
-List<String> appDataPathCandidates({
-  required bool usePortableData,
-  required String executablePath,
-  required Map<String, String> environment,
-}) {
-  final preferred = resolveAppDataPath(
-    usePortableData: usePortableData,
-    executablePath: executablePath,
-    environment: environment,
-  );
-  final fallback = resolveAppDataPath(
-    usePortableData: false,
-    executablePath: executablePath,
-    environment: environment,
-  );
-  return [
-    preferred,
-    if (path.normalize(preferred).toLowerCase() !=
-        path.normalize(fallback).toLowerCase())
-      fallback,
-  ];
-}
 
 Future<Directory>? _appDataDirectoryFuture;
 
@@ -87,21 +32,56 @@ Future<Directory> getAppDataDir() {
   return _appDataDirectoryFuture ??= _resolveAppDataDir();
 }
 
-Future<Directory> _resolveAppDataDir() async {
-  final executable = Platform.resolvedExecutable;
-  final candidates = appDataPathCandidates(
+Future<Directory> _resolveAppDataDir() {
+  return resolveAppDataDirectory(
     usePortableData: portableBuild,
-    executablePath: executable,
+    executablePath: Platform.resolvedExecutable,
     environment: Platform.environment,
+    onWarn: (message, error) =>
+        log.app.warn('legacy', message, error: error),
   );
+}
+
+Future<Directory> resolveAppDataDirectory({
+  required bool usePortableData,
+  required String executablePath,
+  required Map<String, String> environment,
+  void Function(String message, Object? error)? onWarn,
+}) async {
+  final rawCustom = environment[appDataDirEnvironmentKey];
+  final custom = customAppDataPath(environment);
+  if (rawCustom != null && rawCustom.trim().isNotEmpty && custom == null) {
+    onWarn?.call(
+      '$appDataDirEnvironmentKey 不是绝对路径，已忽略：$rawCustom',
+      null,
+    );
+  }
+
+  final candidates = appDataPathCandidates(
+    usePortableData: usePortableData,
+    executablePath: executablePath,
+    environment: environment,
+  );
+  final customKey = custom == null
+      ? null
+      : path.windows.normalize(custom).toLowerCase();
   Object? lastError;
   for (final candidate in candidates) {
+    final isCustom =
+        customKey != null &&
+        path.windows.normalize(candidate).toLowerCase() == customKey;
     try {
       final directory = await Directory(candidate).create(recursive: true);
       await _verifyWritableDirectory(directory);
       return directory;
     } catch (error) {
       lastError = error;
+      if (isCustom) {
+        onWarn?.call(
+          '$appDataDirEnvironmentKey 指定的目录不可写，已回退默认位置：$candidate',
+          error,
+        );
+      }
     }
   }
   throw StateError('Unable to create writable app data directory: $lastError');
@@ -128,7 +108,19 @@ Future<Directory> getSettingsDir() async {
   return Directory(path.join(root.path, 'settings')).create(recursive: true);
 }
 
-final Map<String, Future<void>> _atomicWriteQueues = <String, Future<void>>{};
+final class _AtomicWriteState {
+  _AtomicWriteState(this.filePath);
+
+  final String filePath;
+
+  /// 待写内容，始终保存最新一次调用的完整快照。
+  String? pendingContent;
+
+  Future<void>? active;
+}
+
+final Map<String, _AtomicWriteState> _atomicWriteStates =
+    <String, _AtomicWriteState>{};
 
 Future<void> _writeTextFileAtomicallyNow(
   String filePath,
@@ -149,43 +141,50 @@ Future<void> _writeTextFileAtomicallyNow(
   }
 }
 
+/// 原子写入同一文件时只保留最新内容：写入期间到达的新内容覆盖待写快照，
+/// 当前一轮结束后再写一次最新值，避免调用方排队堆积。
 Future<void> writeTextFileAtomically(String filePath, String content) {
   final queueKey = path.normalize(path.absolute(filePath)).toLowerCase();
-  final previous = _atomicWriteQueues[queueKey];
-  late Future<void> current;
-  current = _writeQueuedTextFile(
-    previous: previous,
-    filePath: filePath,
-    content: content,
-    queueKey: queueKey,
-    current: () => current,
+  final state = _atomicWriteStates.putIfAbsent(
+    queueKey,
+    () => _AtomicWriteState(filePath),
   );
-  _atomicWriteQueues[queueKey] = current;
-  return current;
+  state.pendingContent = content;
+  final active = state.active;
+  if (active != null) return active;
+  final started = _drainAtomicWrite(queueKey, state);
+  state.active = started;
+  return started;
 }
 
-Future<void> _writeQueuedTextFile({
-  required Future<void>? previous,
-  required String filePath,
-  required String content,
-  required String queueKey,
-  required Future<void> Function() current,
-}) async {
+Future<void> _drainAtomicWrite(
+  String queueKey,
+  _AtomicWriteState state,
+) async {
+  Object? failure;
+  StackTrace? failureTrace;
   try {
-    if (previous != null) {
+    while (true) {
+      final content = state.pendingContent;
+      state.pendingContent = null;
+      if (content == null) break;
       try {
-        await previous;
-      } catch (_) {}
+        await _writeTextFileAtomicallyNow(state.filePath, content);
+      } catch (error, trace) {
+        failure = error;
+        failureTrace = trace;
+      }
     }
-    await _writeTextFileAtomicallyNow(filePath, content);
   } finally {
-    if (identical(_atomicWriteQueues[queueKey], current())) {
-      final removed = _atomicWriteQueues.remove(queueKey);
-      if (removed != null) unawaited(removed);
-    }
+    state.active = null;
+    _atomicWriteStates.remove(queueKey);
+  }
+  if (failure != null) {
+    Error.throwWithStackTrace(failure, failureTrace ?? StackTrace.current);
   }
 }
 
+/// 旧版缓存根 `<数据根>/cache`，仅用于兼容旧缓存路径。
 Future<Directory> getCacheDir() async {
   final root = await getAppDataDir();
   return Directory(path.join(root.path, 'cache')).create(recursive: true);
@@ -194,6 +193,11 @@ Future<Directory> getCacheDir() async {
 Future<Directory> getDbDir() async {
   final root = await getAppDataDir();
   return Directory(path.join(root.path, 'db')).create(recursive: true);
+}
+
+Future<Directory> getTempDir() async {
+  final root = await getAppDataDir();
+  return Directory(path.join(root.path, 'temp')).create(recursive: true);
 }
 
 class RebuildNotifier extends ChangeNotifier {
@@ -206,7 +210,7 @@ class AppSettings {
   static final listMotionNotifier = RebuildNotifier();
   static const String version = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '2.2.5',
+    defaultValue: '2.3.13',
   );
 
   static GitHub? _github;
@@ -232,6 +236,7 @@ class AppSettings {
   LyricSourceType preferredOnlineSource = LyricSourceType.qq;
   bool showTranslation = true;
   bool showRomanization = true;
+  bool autoRomanizeLyric = true;
   bool keepLyricMetadata = true;
   bool showDesktopLyricRoman = true;
   int desktopLyricRomanPosition = 1;
@@ -278,6 +283,8 @@ class AppSettings {
   bool useMaterialYouForControls = false;
   bool keepPitch = true;
   bool lastFmEnabled = false;
+  bool onlineAlbumInfoEnabled = true;
+  bool onlineArtistImageEnabled = true;
   Set<NowPlayingMode> wavyBarEnabledModes = defaultWavyBarEnabledModes();
   bool showSpectrumBar = false;
   bool useMaterialYouForSpectrumBar = false;
@@ -318,7 +325,17 @@ class AppSettings {
   bool preventSleepOnNowPlaying = false;
   bool rememberPlaybackPosition = false;
 
+  ProxyMode proxyMode = ProxyMode.system;
+  String proxyHost = '';
+  int proxyPort = defaultProxyPort;
+  String proxyUser = '';
+  String proxyPass = '';
+  String proxyBypass = defaultProxyBypass;
+
   String? midiSoundfontPath;
+
+  /// 缓存根目录；空字符串表示 `<数据根>/cache`。
+  String cacheDirectory = '';
 
   String? fontFamily;
   String? fontPath;
@@ -412,6 +429,7 @@ class AppSettings {
     _readLegacyArtistSeparator(settingsMap);
     _readLyricPreferenceSettings(settingsMap);
     _readWindowPlaybackSettings(settingsMap);
+    _readNetworkProxySettings(settingsMap);
   }
 
   static void _readLegacyArtistSeparator(Map<String, dynamic> settingsMap) {
@@ -447,6 +465,7 @@ class AppSettings {
     _readDesktopLyricTypographySettings(settingsMap);
     _readDesktopLyricColorSettings(settingsMap);
     _readFontSettings(settingsMap);
+    _readNetworkProxySettings(settingsMap);
   }
 
   static void _readThemeMotionHotkeySettings(Map<String, dynamic> settingsMap) {
@@ -555,6 +574,13 @@ class AppSettings {
     if (sr != null) {
       _instance.showRomanization = normalizedBoolSetting(
         sr,
+        defaultValue: true,
+      );
+    }
+    final arl = settingsMap['AutoRomanizeLyric'];
+    if (arl != null) {
+      _instance.autoRomanizeLyric = normalizedBoolSetting(
+        arl,
         defaultValue: true,
       );
     }
@@ -1134,6 +1160,39 @@ class AppSettings {
     }
   }
 
+  static void _readNetworkProxySettings(Map<String, dynamic> settingsMap) {
+    _instance.proxyMode = normalizedSettingEnumValue(
+      settingsMap['ProxyMode'],
+      ProxyMode.values,
+      fallback: ProxyMode.system,
+    )!;
+    _instance.proxyHost =
+        normalizedStringSetting(settingsMap['ProxyHost']) ?? '';
+    _instance.proxyPort = normalizedBoundedIntSetting(
+      settingsMap['ProxyPort'],
+      defaultValue: defaultProxyPort,
+      min: 1,
+      max: 65535,
+    );
+    _instance.proxyUser =
+        normalizedStringSetting(settingsMap['ProxyUser']) ?? '';
+    _instance.proxyPass =
+        normalizedStringSetting(settingsMap['ProxyPass']) ?? '';
+    _instance.proxyBypass =
+        normalizedStringSetting(settingsMap['ProxyBypass']) ??
+        defaultProxyBypass;
+    _instance.onlineAlbumInfoEnabled = normalizedBoolSetting(
+      settingsMap['OnlineAlbumInfoEnabled'],
+      defaultValue: true,
+    );
+    _instance.onlineArtistImageEnabled = normalizedBoolSetting(
+      settingsMap['OnlineArtistImageEnabled'],
+      defaultValue: true,
+    );
+    _instance.cacheDirectory =
+        normalizedPathSetting(settingsMap['CacheDirectory']) ?? '';
+  }
+
   static Future<void> readFromJson() async {
     try {
       final dir = await getSettingsDir();
@@ -1177,6 +1236,7 @@ class AppSettings {
     'PreferredOnlineSource': preferredOnlineSource.name,
     'ShowTranslation': showTranslation,
     'ShowRomanization': showRomanization,
+    'AutoRomanizeLyric': autoRomanizeLyric,
     'KeepLyricMetadata': keepLyricMetadata,
     'ZhConversionMode': zhConversionMode.name,
     'PromptWriteLyricToTagDelay': promptWriteLyricToTagDelay,
@@ -1260,6 +1320,23 @@ class AppSettings {
     'MidiSoundfontPath': midiSoundfontPath,
   };
 
+  Map<String, Object?> _networkProxySettingsMap() => {
+    'ProxyMode': proxyMode.name,
+    'ProxyHost': proxyHost,
+    'ProxyPort': proxyPort,
+    'ProxyUser': proxyUser,
+    'ProxyPass': proxyPass,
+    'ProxyBypass': proxyBypass,
+    'OnlineAlbumInfoEnabled': onlineAlbumInfoEnabled,
+    'OnlineArtistImageEnabled': onlineArtistImageEnabled,
+  };
+
+  Map<String, Object?> _storageSettingsMap() => {
+    'CacheDirectory': cacheDirectory.trim().isEmpty
+        ? null
+        : cacheDirectory.trim(),
+  };
+
   Future<void> _writeSettingsFile(
     Map<String, Object?> settingsMap, {
     required bool isMaximized,
@@ -1330,6 +1407,8 @@ class AppSettings {
         ..._materialAppearanceSettingsMap(),
         'IsWindowMaximized': isMaximized,
         ..._windowFontPlaybackSettingsMap(),
+        ..._networkProxySettingsMap(),
+        ..._storageSettingsMap(),
       };
       await _writeSettingsFile(
         settingsMap,

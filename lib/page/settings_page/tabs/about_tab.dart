@@ -10,6 +10,7 @@ import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/update_checker.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/native/rust/api/utils.dart' as rust_utils;
 import 'package:pure_music/page/settings_page/check_update.dart';
@@ -33,7 +34,9 @@ class AboutTabContent extends StatelessWidget {
         const SizedBox(height: 4.0),
         const _AboutVersionItem(),
         const SizedBox(height: 16.0),
-        const _AboutUpdateChannelItem(),
+        const _AboutUpdateSourceItem(),
+        const SizedBox(height: 16.0),
+        const _AboutDownloadRouteItem(),
         const SizedBox(height: 16.0),
         const _AboutAutoUpdateItem(),
         const SizedBox(height: 24.0),
@@ -48,7 +51,7 @@ class AboutTabContent extends StatelessWidget {
         const SizedBox(height: 16.0),
         const _AboutLinkItem(
           title: '项目主页',
-          url: 'https://github.com/qingyueyin/Pure-music',
+          url: 'https://github.com/Triangle-Wave/Pure-music',
           actionLabel: '打开仓库',
           icon: Symbols.code,
         ),
@@ -331,9 +334,9 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
     setState(() => _isChecking = true);
 
     try {
-      final channel = await ensureUpdateChannel(context);
-      if (!mounted || channel == null) return;
-      final newest = await UpdateChecker.checkForUpdate(channel: channel);
+      final channel = await ensureUpdateChannel();
+      if (!mounted) return;
+      final newest = await UpdateChecker.checkForUpdate();
       if (!mounted) return;
 
       if (newest != null &&
@@ -350,7 +353,11 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
       }
     } catch (err, trace) {
       log.settings.error('legacy', err.toString(), stackTrace: trace);
-      if (mounted) showTextOnSnackBar('网络异常');
+      if (mounted) {
+        showTextOnSnackBar(
+          err is UpdateCheckException ? err.message : '检查更新失败，请稍后再试',
+        );
+      }
     } finally {
       if (mounted) setState(() => _isChecking = false);
     }
@@ -376,50 +383,103 @@ class _AboutVersionItemState extends State<_AboutVersionItem> {
   }
 }
 
-class _AboutUpdateChannelItem extends StatefulWidget {
-  const _AboutUpdateChannelItem();
+class _AboutUpdateSourceItem extends StatelessWidget {
+  const _AboutUpdateSourceItem();
 
   @override
-  State<_AboutUpdateChannelItem> createState() =>
-      _AboutUpdateChannelItemState();
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '更新源',
+      subtitle: 'GitHub · ${AppPreference.defaultUpdateRepoSlug}',
+      action: const Icon(Symbols.check_circle, size: 18),
+    );
+  }
 }
 
-class _AboutUpdateChannelItemState extends State<_AboutUpdateChannelItem> {
-  bool _changing = false;
+class _AboutDownloadRouteItem extends StatefulWidget {
+  const _AboutDownloadRouteItem();
 
-  Future<void> _chooseChannel() async {
-    if (_changing) return;
-    setState(() => _changing = true);
-    try {
-      await chooseAndSaveUpdateChannel(context);
-    } finally {
-      if (mounted) setState(() => _changing = false);
+  @override
+  State<_AboutDownloadRouteItem> createState() =>
+      _AboutDownloadRouteItemState();
+}
+
+class _AboutDownloadRouteItemState extends State<_AboutDownloadRouteItem> {
+  var _saving = false;
+
+  Future<void> _select(UpdateDownloadRoute route) async {
+    final preference = AppPreference.instance;
+    if (_saving || preference.updateDownloadRoute == route) return;
+    final previous = preference.updateDownloadRoute;
+    setState(() {
+      preference.updateDownloadRoute = route;
+      _saving = true;
+    });
+    final saved = await preference.save();
+    if (!mounted) return;
+    if (!saved) {
+      preference.updateDownloadRoute = previous;
+      showTextOnSnackBar('保存下载线路失败', variant: ToastVariant.error);
     }
+    setState(() => _saving = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    final channel = UpdateChannel.parse(AppPreference.instance.updateChannel);
-    return SettingsTile(
-      description: '更新渠道',
-      subtitle: channel?.label ?? '首次检查更新时选择',
-      action: OutlinedButton.icon(
-        onPressed: _changing ? null : _chooseChannel,
-        icon: _changing
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Symbols.swap_horiz, size: 18),
-        label: Text(
-          _changing
-              ? '保存中'
-              : channel == null
-              ? '选择渠道'
-              : '切换渠道',
+    final route = AppPreference.instance.updateDownloadRoute;
+    final scheme = Theme.of(context).colorScheme;
+    final usesProxy =
+        route == UpdateDownloadRoute.auto ||
+        route == UpdateDownloadRoute.proxy;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingsTile(
+          description: '下载线路',
+          subtitle: route.description,
+          action: DropdownMenu<UpdateDownloadRoute>(
+            key: ValueKey('update-download-route-${route.name}'),
+            initialSelection: route,
+            width: 200,
+            enableFilter: false,
+            requestFocusOnTap: false,
+            dropdownMenuEntries: [
+              for (final value in UpdateDownloadRoute.values)
+                DropdownMenuEntry<UpdateDownloadRoute>(
+                  value: value,
+                  label: value.label,
+                ),
+            ],
+            onSelected: _saving
+                ? null
+                : (value) {
+                    if (value != null) unawaited(_select(value));
+                  },
+          ),
         ),
-      ),
+        if (usesProxy)
+          Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Symbols.info, size: 16, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 6.0),
+                Expanded(
+                  child: Text(
+                    '加速代理为第三方服务，可能看到下载内容与你的 IP；'
+                    '校验值取自官方清单（GitHub 直连或 Gitee），'
+                    '代理只承担安装包传输。',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: AppType.caption,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

@@ -77,4 +77,30 @@ void main() {
     expect(eqDx8CenterHz(1000), 1000);
     expect(eqDx8CenterForSampleRate(16000, 44100), closeTo(14700, 0.0001));
   });
+
+  test('keeps peak estimate on the reduced log grid', () {
+    expect(
+      estimateEqPeakGainDb(List.filled(eqBandCount, 0.0)),
+      closeTo(0.0, 0.0001),
+    );
+    final singleLowBand = estimateEqPeakGainDb([
+      15.0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+    ]);
+    expect(singleLowBand, greaterThan(14.0));
+    expect(singleLowBand, lessThanOrEqualTo(15.5));
+    final singleHighBand = estimateEqPeakGainDb(
+      const <double>[0, 0, 0, 0, 0, 0, 0, 0, 0, 12.0],
+      sampleRate: 44100,
+    );
+    expect(singleHighBand, greaterThan(10.0));
+  });
 }

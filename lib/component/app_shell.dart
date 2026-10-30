@@ -179,11 +179,13 @@ class _AppBackgroundState extends State<_AppBackground> {
       children: [
         ColoredBox(color: widget.fallbackColor),
         if (imagePath != null) ...[
-          Opacity(
-            opacity: settings.appBackgroundImageOpacity,
-            child: blur > 0
-                ? _blurredBackground(context, imagePath, blur)
-                : _backgroundImage(imagePath),
+          RepaintBoundary(
+            child: Opacity(
+              opacity: settings.appBackgroundImageOpacity,
+              child: blur > 0
+                  ? _blurredBackground(context, imagePath, blur)
+                  : _backgroundImage(imagePath),
+            ),
           ),
           AnimatedContainer(
             duration: MotionDuration.fast,
@@ -385,11 +387,9 @@ class _AppShell_LargeState extends State<_AppShell_Large> {
                 tween: Tween<double>(end: expanded ? 1.0 : 0.0),
                 builder: (context, t, rail) =>
                     _railScaffold(t, rail!, pages!, expanded),
-                child: ClipRect(
-                  child: SideNav(
-                    navigationShell: widget.navigationShell,
-                    onExpandedChanged: _handleSidebarExpandedChanged,
-                  ),
+                child: SideNav(
+                  navigationShell: widget.navigationShell,
+                  onExpandedChanged: _handleSidebarExpandedChanged,
                 ),
               );
             },

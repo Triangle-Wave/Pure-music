@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/lyric/karaok_parser.dart';
+import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/lyric_loader.dart';
 
 void main() {
@@ -94,7 +95,7 @@ void main() {
       '.krc',
       '[1000,1000]<0,1000,0>第一行\n'
           '[2000,1000]<0,1000,0>第二行',
-      '[00:01.00][00:02.00]重复译',
+      transContent: '[00:01.00][00:02.00]重复译',
     );
 
     expect(lyric, isNotNull);
@@ -106,10 +107,99 @@ void main() {
     final lyric = parseKaraokToPureLyric(
       '.krc',
       '[1000,1000]<0,1000,0>第一行',
-      '[00:01]译文',
+      transContent: '[00:01]译文',
     );
 
     expect(lyric, isNotNull);
     expect(lyric!.lines.single.translation, '译文');
+  });
+
+  test('restores romanization embedded in a local KRC file', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'type': 0,
+              'lyricContent': [
+                ['ki', 'mi'],
+              ],
+            },
+            {
+              'type': 1,
+              'lyricContent': [
+                ['你的'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final lyric = parseExternalLyricText(
+      '[language:$language]\n'
+          '[1000,1000]<0,500,0>君<500,500,0>の',
+      '.krc',
+    );
+
+    expect(lyric, isNotNull);
+    final line = lyric!.lines.single as SyncLyricLine;
+    expect(line.romanLyric, 'ki mi');
+    expect(line.romanWords, hasLength(2));
+    expect(line.translation, '你的');
+  });
+
+  test('restores romanization when language entries have no type', () {
+    final language = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'content': [
+            {
+              'lyricContent': [
+                ['ki', 'mi'],
+              ],
+            },
+            {
+              'lyricContent': [
+                ['你的'],
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    final lyric = parseExternalLyricText(
+      '[language:$language]\n'
+          '[1000,1000]<0,500,0>君<500,500,0>の',
+      '.krc',
+    );
+
+    expect(lyric, isNotNull);
+    final line = lyric!.lines.single as SyncLyricLine;
+    expect(line.romanLyric, 'ki mi');
+    expect(line.romanWords, hasLength(2));
+    expect(line.translation, '你的');
+  });
+
+  test('does not add an interlude after kept KRC metadata', () {
+    final lyric = parseKaraokToPureLyric(
+      '.krc',
+      '[0,2030]<0,2030,0>作词 : GunkeyP\n'
+          '[6100,2030]<0,2030,0>作曲 : GunkeyP\n'
+          '[12190,2040]<0,2040,0>编曲 : GunkeyP/Soda纯白\n'
+          '[21850,5520]<0,5520,0>不经意被钟提醒未读的讯息\n'
+          '[72810,4590]<0,4590,0>到永远一瞬间都消失不见\n'
+          '[100390,5600]<0,5600,0>关于爱迷失的虔诚信徒献上崇拜',
+      keepMetadata: true,
+    );
+
+    expect(lyric, isNotNull);
+    final blankStarts = lyric!.lines
+        .whereType<SyncLyricLine>()
+        .where((line) => line.words.isEmpty)
+        .map((line) => line.start.inMilliseconds)
+        .toList();
+
+    expect(blankStarts, isNot(contains(14230)));
+    expect(blankStarts, contains(77400));
   });
 }

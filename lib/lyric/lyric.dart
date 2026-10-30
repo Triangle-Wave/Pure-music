@@ -36,8 +36,15 @@ class LyricLine {
   Duration length;
   String? translation;
   String? romanLyric;
+  List<SyncLyricWord>? romanWords;
 
-  LyricLine(this.start, this.length, [this.translation]) : romanLyric = null;
+  /// 罗马音由本地转写生成，仅用于显示，不写回歌词文件。
+  bool autoRomanized;
+
+  LyricLine(this.start, this.length, [this.translation])
+    : romanLyric = null,
+      romanWords = null,
+      autoRomanized = false;
 }
 
 class BackgroundVocal {
@@ -74,8 +81,10 @@ class SyncLyricLine extends LyricLine {
     this.words, [
     super.translation,
     String? romanLyric,
+    List<SyncLyricWord>? romanWords,
   ]) {
     this.romanLyric = romanLyric;
+    this.romanWords = romanWords;
   }
 
   String get content => words.map((w) => w.content).join();

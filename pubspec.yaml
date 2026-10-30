@@ -1,7 +1,7 @@
 name: pure_music
 description: Material You 风格的本地音乐播放器
 publish_to: none
-version: 2.3.3
+version: 2.3.13
 
 environment:
   sdk: ">=3.10.3 <4.0.0"
@@ -53,6 +53,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/fonts/Pretendard/PretendardVariable.ttf
+    - assets/images/hr_logo2.png
+    - assets/images/dsd_logo.png
     - app_icon.ico
   shaders:
     - assets/shaders/mesh_gradient_runtime.frag

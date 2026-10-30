@@ -1,0 +1,131 @@
+name: Build BASS TAK plugin
+
+# 独立构建 bass_tak.dll（x64），产物用于 BASS 直接解码 TAK。
+# 手动触发，不参与主构建；验证通过后再接入 build-windows.yml。
+
+on:
+  push:
+    paths:
+      - 'third_party/bass_tak/**'
+      - '.github/workflows/build-bass-tak.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # 从实际 DLL 提取导出名生成 def，再用 lib 生成导入库（x64）。
+      - name: Generate import libraries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/bass_tak"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          function Export-Def([string]$dll, [string]$def) {
+            if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+              throw "DLL not found: $dll"
+            }
+            $lines = & dumpbin /nologo /exports $dll
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed on $dll (exit $LASTEXITCODE)" }
+            $names = @($lines | ForEach-Object {
+              if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+([A-Za-z_?][A-Za-z0-9_?@$]*)') { $Matches[1] }
+            } | Sort-Object -Unique)
+            if ($names.Count -eq 0) { throw "no named exports in $dll" }
+            $library = [IO.Path]::GetFileNameWithoutExtension($dll)
+            @("LIBRARY $library", "EXPORTS") + $names | Set-Content -LiteralPath $def -Encoding ascii
+            "generated $def with $($names.Count) exports"
+          }
+
+          Export-Def "third_party/bass_tak/bin/tak_deco_lib.dll" "$out/tak_deco_lib.def"
+          Export-Def "BASS/bass.dll" "$out/bass.def"
+
+          # 插件的 bassfunc 通过 bass.dll 的 `_` 符号取得函数表，缺少它编译期无法解析。
+          if (-not (Select-String -LiteralPath "$out/bass.def" -Pattern '^_$' -Quiet)) {
+            throw "bass.def lacks the '_' export required by bassfunc"
+          }
+
+          foreach ($name in @("tak_deco_lib", "bass")) {
+            & lib /nologo /def:"$out/$name.def" /machine:x64 /out:"$out/$name.lib"
+            if ($LASTEXITCODE -ne 0) { throw "lib failed for $name (exit $LASTEXITCODE)" }
+            if (-not (Test-Path -LiteralPath "$out/$name.lib" -PathType Leaf)) {
+              throw "import library not created: $out/$name.lib"
+            }
+          }
+
+      - name: Compile bass_tak.dll (x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/bass_tak"
+          $src = "../../third_party/bass_tak"
+          Push-Location $out
+          try {
+            & cl /nologo /LD /EHsc /O2 /MT /W3 /utf-8 /D_CRT_SECURE_NO_WARNINGS `
+              /I"$src" `
+              "$src/main.cpp" `
+              "$src/TakStream.cpp" `
+              "$src/ioif.cpp" `
+              "$src/takfunc.cpp" `
+              /link /LIBPATH:"." `
+              /DEF:"$src/bass_tak.def" `
+              /OUT:bass_tak.dll `
+              /PDB:bass_tak.pdb `
+              bass.lib tak_deco_lib.lib user32.lib
+            if ($LASTEXITCODE -ne 0) { throw "cl failed with exit code $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+          if (-not (Test-Path -LiteralPath "$out/bass_tak.dll" -PathType Leaf)) {
+            throw "bass_tak.dll not produced"
+          }
+
+      # 插件由 BASS 通过 BASSplugin 加载，同时导出便捷入口；导入表只允许系统 DLL。
+      - name: Verify exports and dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dll = "build/bass_tak/bass_tak.dll"
+          $exports = & dumpbin /nologo /exports $dll
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /exports failed (exit $LASTEXITCODE)" }
+          $exports | Select-String 'BASSplugin|BASS_TAK_StreamCreate'
+          foreach ($symbol in @("BASSplugin", "BASS_TAK_StreamCreateFile", "BASS_TAK_StreamCreateURL", "BASS_TAK_StreamCreateFileUser")) {
+            if (-not ($exports | Select-String -SimpleMatch $symbol -Quiet)) {
+              throw "missing export: $symbol"
+            }
+          }
+
+          $deps = & dumpbin /nologo /dependents $dll
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed (exit $LASTEXITCODE)" }
+          $deps
+          foreach ($runtime in @("VCRUNTIME", "MSVCP", "ucrtbase")) {
+            if ($deps | Select-String -SimpleMatch $runtime -Quiet) {
+              throw "bass_tak.dll must not depend on $runtime (/MT expected)"
+            }
+          }
+
+          (Get-Item $dll) | Select-Object FullName, Length
+          (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bass_tak-x64
+          path: |
+            build/bass_tak/bass_tak.dll
+            build/bass_tak/bass_tak.pdb
+          if-no-files-found: error

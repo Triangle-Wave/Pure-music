@@ -6,8 +6,9 @@ import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/play_service/play_service.dart';
+import 'package:pure_music/remote/remote_library.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
 
 String formatCount(int value) {
   if (value >= 10000) {
@@ -37,18 +38,24 @@ String formatDuration(int seconds) {
   return '$minutes 分钟';
 }
 
-/// frb 严格 Int64List（元素为 BigInt）转普通 int 列表。
-List<int> toIntList(Iterable<BigInt> values) => [
-  for (final value in values) value.toInt(),
-];
+List<int> toIntList(Iterable<int> values) => List<int>.from(values);
 
 void playAudio(AudioLibrary library, Audio audio) {
   final audioIndex = library.audioCollection.indexOf(audio);
-  if (audioIndex < 0) return;
-  PlayService.instance.playbackService.play(
-    audioIndex,
-    library.audioCollection,
+  if (audioIndex >= 0) {
+    PlayService.instance.playbackService.play(
+      audioIndex,
+      library.audioCollection,
+    );
+    return;
+  }
+  if (!RemoteLibrary.isRemotePath(audio.path)) return;
+  final remoteAudios = RemoteLibrary.instance.audios;
+  final remoteIndex = remoteAudios.indexWhere(
+    (item) => item.path == audio.path,
   );
+  if (remoteIndex < 0) return;
+  PlayService.instance.playbackService.play(remoteIndex, remoteAudios);
 }
 
 class NamedPlayStat {
@@ -60,7 +67,7 @@ class NamedPlayStat {
 
 List<NamedPlayStat> buildTopArtists(
   List<Audio> audios,
-  List<rust_library_db.PlayCountEntry>? entries, {
+  List<PlayCountRecord>? entries, {
   int? limit,
 }) {
   final counts = <String, int>{};
@@ -88,7 +95,7 @@ List<NamedPlayStat> buildTopArtists(
 
 List<NamedPlayStat> buildTopAlbums(
   List<Audio> audios,
-  List<rust_library_db.PlayCountEntry>? entries, {
+  List<PlayCountRecord>? entries, {
   int? limit,
 }) {
   final counts = <String, int>{};
@@ -721,10 +728,7 @@ String _weekdayName(DateTime date) {
 String _two(int value) => value.toString().padLeft(2, '0');
 
 /// 当前时段的趋势点：日=24 小时，周=7 天，月=当月每日。
-List<TrendPoint> buildPeriodTrend(
-  StatsPeriod period,
-  rust_library_db.PlayHistoryStats stats,
-) {
+List<TrendPoint> buildPeriodTrend(StatsPeriod period, PlayHistoryStats stats) {
   if (period.mode == StatsPeriodMode.day) {
     final hourly = toIntList(stats.hourly);
     return [
@@ -760,9 +764,8 @@ List<TrendPoint> buildPeriodTrend(
   return points;
 }
 
-List<rust_library_db.DayCount> _sortedDaily(
-  List<rust_library_db.DayCount> daily,
-) => [...daily]..sort((a, b) => a.day.compareTo(b.day));
+List<PlayHistoryDayCount> _sortedDaily(List<PlayHistoryDayCount> daily) =>
+    [...daily]..sort((a, b) => a.day.compareTo(b.day));
 
 DateTime _dayOnly(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -770,7 +773,7 @@ String _dayKey(DateTime date) =>
     '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 
 /// 连续有播放记录的最长天数。
-int longestStreakDays(List<rust_library_db.DayCount> daily) {
+int longestStreakDays(List<PlayHistoryDayCount> daily) {
   final days = _sortedDaily(daily);
   if (days.isEmpty) return 0;
   var best = 1;

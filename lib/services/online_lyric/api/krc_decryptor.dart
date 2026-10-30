@@ -2,13 +2,23 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:isolate';
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 final List<int> _krcKey = [
   64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105,
 ];
 
 Future<String?> krcDecryptSingle(String content) async {
-  return Isolate.run(() => _krcDecryptSync(content))
+  if (currentLyricRequestToken?.isCancelled == true) return null;
+  final byteLength = (content.length * 3) ~/ 4;
+  if (shouldRunLyricWorkInline(byteLength)) {
+    return _krcDecryptSync(content);
+  }
+  return LyricRequestScheduler.instance
+      .runLyricCompute((token) async {
+        if (token.isCancelled) return null;
+        return Isolate.run(() => _krcDecryptSync(content));
+      })
       .timeout(const Duration(seconds: 5), onTimeout: () => null);
 }
 

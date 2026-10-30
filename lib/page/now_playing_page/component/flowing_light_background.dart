@@ -998,6 +998,14 @@ class _FlowingLightPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     _compositePaint.imageFilter = blurHandle.filter;
+    final low = audioReactiveFlow ? audio.low : 0.0;
+    final high = audioReactiveFlow ? audio.high : 0.0;
+    _coverPaint.colorFilter = _flowingLightColorFilter(
+      style.artworkSaturation +
+          (audioReactiveFlow ? audioReactiveFlowSaturationBoost(high) : 0.0),
+      style.blackScrim,
+      audioReactiveFlow ? audioReactiveFlowContrast(low) : 1.0,
+    );
     final previous = previousCoverImage;
     if (previous != null) {
       _drawFrame(
@@ -1037,12 +1045,6 @@ class _FlowingLightPainter extends CustomPainter {
               .clamp(1.0, 1.48)
               .toDouble()
         : 1.0;
-    _coverPaint.colorFilter = _flowingLightColorFilter(
-      style.artworkSaturation +
-          (audioReactiveFlow ? audioReactiveFlowSaturationBoost(high) : 0.0),
-      style.blackScrim,
-      audioReactiveFlow ? audioReactiveFlowContrast(low) : 1.0,
-    );
     final cycle2 = time / _kCoverPeriod2 * 2 * pi;
     final secondaryOffset = Offset(
       _kSecondaryOffset.dx + cos(-cycle2 * 0.5) * _kSecondaryOrbit - mid * 0.02,

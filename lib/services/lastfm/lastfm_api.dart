@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/services/lastfm/lastfm_models.dart';
 
 const lastFmApiUrl = 'https://ws.audioscrobbler.com/2.0/';
@@ -14,13 +15,13 @@ class LastFmApi {
 
   final LastFmHttpSend _send;
 
-  static final Dio _dio = Dio(
-    BaseOptions(
-      connectTimeout: const Duration(seconds: 12),
-      receiveTimeout: const Duration(seconds: 30),
-      validateStatus: (_) => true,
-    ),
-  );
+  static Dio get _dio => AppHttp.instance.dio;
+
+  /// Last.fm 用非 2xx 状态码携带错误信息，需要放开状态码校验。
+  static const _connectTimeout = Duration(seconds: 12);
+  static const _receiveTimeout = Duration(seconds: 30);
+
+  static bool _acceptAllStatus(int? status) => true;
 
   Future<String> requestAuthorizationToken(LastFmCredentials credentials) async {
     _requireAppCredentials(credentials);
@@ -136,12 +137,22 @@ class LastFmApi {
       response = await _dio.post<dynamic>(
         lastFmApiUrl,
         data: fields,
-        options: Options(contentType: Headers.formUrlEncodedContentType),
+        options: Options(
+          contentType: Headers.formUrlEncodedContentType,
+          connectTimeout: _connectTimeout,
+          receiveTimeout: _receiveTimeout,
+          validateStatus: _acceptAllStatus,
+        ),
       );
     } else {
       response = await _dio.get<dynamic>(
         lastFmApiUrl,
         queryParameters: fields,
+        options: Options(
+          connectTimeout: _connectTimeout,
+          receiveTimeout: _receiveTimeout,
+          validateStatus: _acceptAllStatus,
+        ),
       );
     }
     return parseLastFmResponse(response.data, httpCode: response.statusCode);

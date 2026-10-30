@@ -3,17 +3,22 @@ import 'dart:io';
 import 'dart:ui' show FlutterView, PlatformDispatcher;
 
 import 'package:pure_music/core/application_log.dart';
+import 'package:pure_music/core/app_http.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/setting_action_state.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/cache_paths.dart';
+import 'package:pure_music/core/cover_disk_cache.dart';
 import 'package:path/path.dart' as path;
 import 'package:pure_music/entry.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/immersive.dart';
 import 'package:pure_music/core/memory_monitor.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/now_playing_perf_auto.dart';
 import 'package:pure_music/core/sidebar_perf_auto.dart';
+import 'package:pure_music/native/rust/api/app_env.dart' as rust_app_env;
 import 'package:pure_music/native/rust/api/logger.dart';
 import 'package:pure_music/native/rust/frb_generated.dart';
 import 'package:pure_music/core/app_fonts.dart';
@@ -22,9 +27,21 @@ import 'package:pure_music/core/log/rust_log_line.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/window_lifecycle.dart';
 import 'package:pure_music/core/window_placement.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:flutter_single_instance/flutter_single_instance.dart';
+
+const _browserUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36';
+
+class _BrowserHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)..userAgent = _browserUserAgent;
+  }
+}
 
 Future<void> initWindow() async {
   await windowManager.ensureInitialized();
@@ -196,11 +213,13 @@ void _installGlobalErrorLogging() {
 }
 
 Future<void> main() async {
+  HttpOverrides.global = _BrowserHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
   await applicationLogOutput.init();
   _installGlobalErrorLogging();
+  final tempDir = await _prepareAppDataDirectories();
   try {
-    await _runApplication();
+    await _runApplication(tempDir);
   } catch (error, stackTrace) {
     applicationLogOutput.recordUnhandledSync(
       source: 'startup',
@@ -218,7 +237,21 @@ Future<void> main() async {
   }
 }
 
-Future<void> _runApplication() async {
+Future<Directory?> _prepareAppDataDirectories() async {
+  try {
+    return await getTempDir();
+  } catch (error, stackTrace) {
+    log.app.warn(
+      'legacy',
+      '[startup] 创建临时目录失败，继续使用系统临时目录',
+      error: error,
+      stackTrace: stackTrace,
+    );
+    return null;
+  }
+}
+
+Future<void> _runApplication(Directory? tempDir) async {
   PaintingBinding.instance.imageCache.maximumSize = 96;
   PaintingBinding.instance.imageCache.maximumSizeBytes = 32 << 20;
   final singleInstance = FlutterSingleInstance();
@@ -232,14 +265,33 @@ Future<void> _runApplication() async {
     log.app.error('legacy', 'RustLib.init failed: $e\n$s');
     rethrow;
   }
+  await _applyProcessTempDir(tempDir);
   _listenRustLogger();
   await HotkeysHelper.unregisterAll();
   final welcome = await _loadSettingsAndCaches();
+  _installNetworkProxy();
   if (!await _initWindowShell()) return;
   MemoryMonitorService.instance.start();
   runApp(Entry(welcome: welcome));
   NowPlayingPerfAuto.schedule();
   SidebarPerfAuto.schedule();
+}
+
+/// 把进程临时目录指向数据根下的 `temp`，供之后启动的子进程继承。
+///
+/// 必须在 `RustLib.init` 之后、任何子进程启动之前调用。
+Future<void> _applyProcessTempDir(Directory? tempDir) async {
+  if (tempDir == null) return;
+  try {
+    await rust_app_env.setProcessTempDir(path: tempDir.path);
+  } catch (error, stackTrace) {
+    log.app.warn(
+      'legacy',
+      '[startup] 设置进程临时目录失败，继续使用系统临时目录: ${tempDir.path}',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
 }
 
 void _listenRustLogger() {
@@ -264,9 +316,59 @@ Future<bool> _loadSettingsAndCaches() async {
   if (File(path.join(settingsDir.path, 'app_preference.json')).existsSync()) {
     await AppPreference.read();
   }
+  resetCacheRoot();
+  CoverDiskCache.instance.invalidateRoot();
+  unawaited(ensureCacheDirectories());
+  unawaited(CoverDiskCache.instance.prune());
   await HotkeysHelper.registerHotKeys();
   await AlbumColorCache.instance.init();
+  try {
+    await RemoteLibrary.instance.init();
+  } catch (e, s) {
+    log.app.error('legacy', 'RemoteLibrary.init failed: $e\n$s');
+  }
   return !File(path.join(supportPath, 'index.json')).existsSync();
+}
+
+/// 在创建任何网络客户端之前安装代理，失败时回退直连，不阻塞启动。
+void _installNetworkProxy() {
+  try {
+    final stored = ProxyConfig.fromSettings(AppSettings.instance);
+    final effective = stored.effective;
+    NetworkProxy.instance.apply(effective);
+    // 启动早期可能已有客户端按旧配置创建，统一重建一次。
+    AppHttp.instance.rebuild();
+    unawaited(NetworkProxy.instance.applyToRust(effective));
+    if (stored.mode == ProxyMode.manual && !stored.hasValidManualTarget) {
+      log.app.warn('legacy', '[network] 代理配置不完整，已回退直连');
+    } else if (effective.mode == ProxyMode.manual) {
+      log.app.info(
+        'legacy',
+        '[network] 手动代理 ${effective.normalizedHost}:${effective.resolvedPort}',
+      );
+    } else {
+      log.app.info('legacy', '[network] 代理模式 ${effective.mode.name}');
+    }
+  } catch (err, trace) {
+    try {
+      const fallback = ProxyConfig(mode: ProxyMode.direct);
+      NetworkProxy.instance.apply(fallback);
+      unawaited(NetworkProxy.instance.applyToRust(fallback));
+    } catch (fallbackError, fallbackTrace) {
+      log.app.error(
+        'legacy',
+        '[network] 回退直连失败',
+        error: fallbackError,
+        stackTrace: fallbackTrace,
+      );
+    }
+    log.app.error(
+      'legacy',
+      '[network] 应用代理配置失败，已回退直连',
+      error: err,
+      stackTrace: trace,
+    );
+  }
 }
 
 Future<bool> _initWindowShell() async {

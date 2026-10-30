@@ -129,6 +129,15 @@ class Ttml extends Lyric {
           nextStart,
           fallbackEnd: mainFallbackEnd,
         );
+        if (line.romanWords != null && line.romanWords!.isNotEmpty) {
+          _fillWordDurations(
+            line.romanWords!,
+            line.start,
+            line.length,
+            nextStart,
+            fallbackEnd: lineEnd,
+          );
+        }
 
         if (line.bgWords.isNotEmpty) {
           final bgStart = line.bgStart ?? line.bgWords.first.start;
@@ -423,6 +432,89 @@ class Ttml extends Lyric {
     return result;
   }
 
+  /// 解析内联 `x-roman` span 的逐词时间。
+  ///
+  /// 优先使用 span 内部带 begin 的子 span；否则使用 span 自身的时间。
+  /// 没有任何时间的 span 不计入结果，调用方回退到整行罗马音绘制。
+  static List<SyncLyricWord> _parseRomanSpanWords(
+    List<XmlElement> spans,
+    Duration parentBegin,
+  ) {
+    final words = <SyncLyricWord>[];
+    for (final span in spans) {
+      final timedChildren = span.childElements
+          .where((child) {
+            if (_hasRole(child, 'x-bg')) return false;
+            return _parseTime(_attr(child, 'begin')) != null;
+          })
+          .toList();
+      if (timedChildren.isNotEmpty) {
+        for (final child in timedChildren) {
+          final value = _cleanText(child.innerText);
+          if (value.isEmpty) continue;
+          final start = _parseElementTime(
+            child,
+            'begin',
+            parentBegin: parentBegin,
+          );
+          if (start == null) continue;
+          final end = _parseElementTime(
+            child,
+            'end',
+            parentBegin: parentBegin,
+          );
+          final hasEnd = end != null && end >= start;
+          words.add(
+            SyncLyricWord(
+              start,
+              hasEnd ? end - start : Duration.zero,
+              value,
+              hasExplicitEnd: hasEnd,
+            ),
+          );
+        }
+        continue;
+      }
+
+      final value = _cleanText(span.innerText);
+      if (value.isEmpty) continue;
+      final start = _parseElementTime(span, 'begin', parentBegin: parentBegin);
+      if (start == null) continue;
+      final end = _parseElementTime(span, 'end', parentBegin: parentBegin);
+      final hasEnd = end != null && end >= start;
+      words.add(
+        SyncLyricWord(
+          start,
+          hasEnd ? end - start : Duration.zero,
+          value,
+          hasExplicitEnd: hasEnd,
+        ),
+      );
+    }
+    return words;
+  }
+
+  /// 当 `x-roman` 没有带时间的 span 时，复用 transliteration 的逐词时间，
+  /// 前提是两者文本一致。
+  static List<SyncLyricWord>? _transliterationWordsFor(
+    _TtmlPronunciation? transliteration,
+    String pronunciation,
+  ) {
+    if (transliteration == null || transliteration.words.isEmpty) return null;
+    final joined = transliteration.words.map((word) => word.content).join();
+    if (_normalizePronunciation(joined) !=
+        _normalizePronunciation(pronunciation)) {
+      return null;
+    }
+    return transliteration.words;
+  }
+
+  static String _normalizePronunciation(String text) {
+    return text
+        .replaceAll(RegExp(r'[\s()（）]'), '')
+        .toLowerCase();
+  }
+
   static TtmlLine? _parseParagraph(
     XmlElement p,
     String? separator, {
@@ -516,14 +608,21 @@ class Ttml extends Lyric {
         .join(' ');
 
     final transf = transliterations[key];
+    final inlineRomanWords = _parseRomanSpanWords(romanSpans, begin);
     String? pronunciation;
+    List<SyncLyricWord>? romanWords;
     if (romanText.isNotEmpty) {
       pronunciation = romanText;
+      romanWords = inlineRomanWords.isNotEmpty
+          ? inlineRomanWords
+          : _transliterationWordsFor(transf, romanText);
     } else if (transf != null &&
         transf.text.replaceAll(RegExp(r'[()（）]'), '').trim().isNotEmpty) {
       pronunciation = _removeBgParentheses(transf.text);
+      romanWords = _transliterationWordsFor(transf, pronunciation);
     } else if (transf != null && transf.words.isNotEmpty) {
       pronunciation = transf.words.map((w) => w.content).join();
+      romanWords = transf.words;
     }
     if (pronunciation != null && pronunciation.isEmpty) pronunciation = null;
 
@@ -548,6 +647,7 @@ class Ttml extends Lyric {
 
     final line = TtmlLine(begin, duration, words, translation);
     line.romanLyric = pronunciation;
+    line.romanWords = romanWords;
     if (resolvedAgent.isNotEmpty) line.agent = resolvedAgent;
 
     if (bgSpan != null) {

@@ -13,6 +13,7 @@ import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/page/uni_detail_header_blur.dart';
+import 'package:pure_music/page/uni_detail_header_layout.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
 import 'package:pure_music/play_service/play_service.dart';
@@ -65,6 +66,10 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.locateButtonsController,
     this.heroTag,
     this.primaryPicSeed,
+    this.primaryPicFallback,
+    this.headerTrailing,
+    this.headerTrailingSideMinWidth = 0,
+    this.headerCoverOverlay,
   });
 
   final PagePreference pref;
@@ -119,6 +124,20 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
 
   /// 列表上已经在显示的封面。飞行动画落地时先画它，避免头图重新加载闪一下。
   final ImageProvider? primaryPicSeed;
+
+  /// 主封面解码失败时回退显示的本地封面。
+  final ImageProvider? primaryPicFallback;
+
+  /// 头部附加内容，例如专辑的在线信息面板。宽屏在右侧，中等宽度移到标题下方，
+  /// 窄屏不展示。
+  final Widget? headerTrailing;
+
+  /// 头部右侧摆放 [headerTrailing] 所需的最小宽度。低于该值时面板移到
+  /// 标题下方，避免挤压标题与操作区。
+  final double headerTrailingSideMinWidth;
+
+  /// 叠加在头图上的控件，例如在线封面切换器。
+  final Widget? headerCoverOverlay;
 
   @override
   State<UniDetailPage<P, S, T>> createState() => _UniDetailPageState<P, S, T>();
@@ -485,7 +504,7 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
     return ListenableBuilder(
       listenable: AppSettings.listMotionNotifier,
       builder: (context, _) {
-        Widget buildHeader(double collapseProgress) => _UniDetailPageHeader(
+        Widget buildHeader(double collapseProgress) => UniDetailPageHeader(
           pic: widget.primaryPic,
           picShape: widget.picShape,
           title: widget.title,
@@ -501,6 +520,10 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           collapseProgress: collapseProgress,
           heroTag: widget.heroTag,
           initialPic: widget.primaryPicSeed,
+          fallbackPic: widget.primaryPicFallback,
+          headerTrailing: widget.headerTrailing,
+          trailingSideMinWidth: widget.headerTrailingSideMinWidth,
+          headerCoverOverlay: widget.headerCoverOverlay,
         );
         if (!_enableHeaderCollapse(context)) {
           return buildHeader(0);
@@ -549,6 +572,9 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
     required int currentTabIndex,
   }) {
     return Stack(
+      // 头部异常变高时正文可能只剩极小高度；裁剪掉浮层溢出，避免按钮
+      // 绘制到头部或侧栏区域。
+      clipBehavior: Clip.hardEdge,
       children: [
         Positioned.fill(
           child: _buildResultContentRow(
@@ -1235,8 +1261,10 @@ class _CompactSearchBarState extends State<_CompactSearchBar> {
   }
 }
 
-class _UniDetailPageHeader extends StatelessWidget {
-  const _UniDetailPageHeader({
+/// 详情页头部。公开以便布局回归测试直接构造。
+class UniDetailPageHeader extends StatelessWidget {
+  const UniDetailPageHeader({
+    super.key,
     required this.pic,
     required this.picShape,
     required this.title,
@@ -1252,6 +1280,10 @@ class _UniDetailPageHeader extends StatelessWidget {
     this.collapseProgress = 0,
     this.heroTag,
     this.initialPic,
+    this.fallbackPic,
+    this.headerTrailing,
+    this.trailingSideMinWidth = 0,
+    this.headerCoverOverlay,
   });
 
   final Future<ImageProvider?> pic;
@@ -1270,17 +1302,15 @@ class _UniDetailPageHeader extends StatelessWidget {
   final double collapseProgress;
   final String? heroTag;
   final ImageProvider? initialPic;
+  final ImageProvider? fallbackPic;
+  final Widget? headerTrailing;
+  final double trailingSideMinWidth;
+  final Widget? headerCoverOverlay;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    if (SidebarMotionScope.hasScope(context)) {
-      return _buildHeaderBody(
-        context,
-        theme,
-        BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width),
-      );
-    }
+    // 头部附加面板按父级实际宽度决定摆放方式；侧栏展开后正文会明显变窄。
     return LayoutBuilder(
       builder: (context, constraints) =>
           _buildHeaderBody(context, theme, constraints),
@@ -1293,8 +1323,11 @@ class _UniDetailPageHeader extends StatelessWidget {
     BoxConstraints constraints,
   ) {
     final scheme = theme.colorScheme;
-    final compact =
-        SidebarMotionScope.layoutWidthOf(context, constraints.maxWidth) < 560;
+    final layoutWidth = SidebarMotionScope.layoutWidthOf(
+      context,
+      constraints.maxWidth,
+    );
+    final compact = layoutWidth < 560;
     final expandedCoverSize = compact ? 156.0 : 200.0;
     // Scroll-scrubbed layout stays 1:1 with pixels. Easing the scrub
     // front-loads the collapse (easeOutCubic(0.5) ≈ 0.875) so the first
@@ -1310,6 +1343,16 @@ class _UniDetailPageHeader extends StatelessWidget {
     final expandedContentOpacity = 1.0 - progress;
     final horizontalInset = lerpDouble(compact ? 12.0 : 16.0, 12.0, progress)!;
     final verticalInset = lerpDouble(12.0, 8.0, progress)!;
+    // 按封面、间距与 trailing 面板的实际宽度做预算：标题区至少保留可读
+    // 宽度，右侧放不下时把面板移到标题下方，再窄则隐藏。
+    final headerLayout = UniDetailHeaderLayout.resolve(
+      maxWidth: constraints.maxWidth,
+      horizontalInset: horizontalInset,
+      coverSize: coverSize,
+      gap: gap,
+      hasTrailing: headerTrailing != null,
+      trailingSideMinWidth: trailingSideMinWidth,
+    );
     return Padding(
       padding: EdgeInsets.symmetric(
         horizontal: horizontalInset,
@@ -1318,12 +1361,22 @@ class _UniDetailPageHeader extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _headerCover(scheme, theme.brightness, coverSize),
+          SizedBox(
+            key: const ValueKey('detail-header-cover'),
+            child: _headerCover(scheme, theme.brightness, coverSize),
+          ),
           SizedBox(width: gap),
           Expanded(
             child: ConstrainedBox(
               constraints: BoxConstraints(minHeight: coverSize),
-              child: _headerInfo(scheme, titleSize, expandedContentOpacity),
+              child: _headerInfo(
+                scheme,
+                titleSize,
+                expandedContentOpacity,
+                headerLayout.showTrailing ? headerTrailing : null,
+                headerLayout.trailingWidth,
+                headerLayout.showStackedTrailing,
+              ),
             ),
           ),
         ],
@@ -1335,6 +1388,7 @@ class _UniDetailPageHeader extends StatelessWidget {
     final image = _HoverableCover(
       futurePic: pic,
       initialPic: initialPic,
+      fallbackPic: fallbackPic,
       picShape: picShape,
       scheme: scheme,
       size: size,
@@ -1362,22 +1416,31 @@ class _UniDetailPageHeader extends StatelessWidget {
       ),
       child: image,
     );
-    if (heroTag == null) return framed;
-    return Hero(tag: heroTag!, child: framed);
+    final base = heroTag == null ? framed : Hero(tag: heroTag!, child: framed);
+    final overlay = headerCoverOverlay;
+    if (overlay == null || size < 150) return base;
+    return Stack(
+      children: [base, Positioned.fill(child: overlay)],
+    );
   }
 
   Widget _headerInfo(
     ColorScheme scheme,
     double titleSize,
     double expandedContentOpacity,
+    Widget? trailing,
+    double trailingWidth,
+    bool stackTrailing,
   ) {
-    return Column(
+    final info = Column(
       mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.end,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: titleSize,
             color: scheme.onSurface,
@@ -1392,6 +1455,8 @@ class _UniDetailPageHeader extends StatelessWidget {
               opacity: expandedContentOpacity,
               child: Text(
                 subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: AppType.body,
                   color: scheme.onSurfaceVariant,
@@ -1414,12 +1479,87 @@ class _UniDetailPageHeader extends StatelessWidget {
         ),
       ],
     );
+    if (trailing == null) return info;
+    if (stackTrailing) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          info,
+          ClipRect(
+            child: Align(
+              alignment: Alignment.topLeft,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    top: 8.0 * expandedContentOpacity,
+                  ),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      maxWidth: UniDetailHeaderLayout.stackedMaxTrailingWidth,
+                      maxHeight:
+                          UniDetailHeaderLayout.stackedMaxTrailingHeight,
+                    ),
+                    child: KeyedSubtree(
+                      key: const ValueKey('detail-header-trailing'),
+                      child: trailing,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: UniDetailHeaderLayout.minInfoWidth,
+            ),
+            child: info,
+          ),
+        ),
+        SizedBox(
+          width:
+              UniDetailHeaderLayout.trailingGap * expandedContentOpacity,
+        ),
+        Flexible(
+          flex: 0,
+          fit: FlexFit.loose,
+          child: ClipRect(
+            child: Align(
+              alignment: Alignment.bottomRight,
+              widthFactor: expandedContentOpacity,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: SizedBox(
+                  width: trailingWidth,
+                  child: KeyedSubtree(
+                    key: const ValueKey('detail-header-trailing'),
+                    child: trailing,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 
 class _HoverableCover extends StatefulWidget {
   final Future<ImageProvider?> futurePic;
   final ImageProvider? initialPic;
+  final ImageProvider? fallbackPic;
   final PicShape picShape;
   final ColorScheme scheme;
   final double size;
@@ -1429,6 +1569,7 @@ class _HoverableCover extends StatefulWidget {
   const _HoverableCover({
     required this.futurePic,
     this.initialPic,
+    this.fallbackPic,
     required this.picShape,
     required this.scheme,
     required this.size,
@@ -1479,20 +1620,71 @@ class _HoverableCoverState extends State<_HoverableCover> {
   }
 
   Widget _coverSnapshot(AsyncSnapshot<ImageProvider?> snapshot) {
-    if (snapshot.data == null) {
-      if (snapshot.connectionState != ConnectionState.done) {
+    if (snapshot.hasError || snapshot.data == null) {
+      if (!snapshot.hasError &&
+          snapshot.connectionState != ConnectionState.done) {
         return const Center(child: CircularProgressIndicator());
       }
+      final fallback = widget.fallbackPic;
+      if (fallback == null) return widget.placeholder;
+      return RepaintBoundary(
+        child: _shapeCover(
+          Image(
+            image: _resizedCover(fallback),
+            width: widget.size,
+            height: widget.size,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => widget.placeholder,
+          ),
+        ),
+      );
+    }
+    return RepaintBoundary(
+      child: _shapeCover(
+        Image(
+          image: _resizedCover(snapshot.data!),
+          width: widget.size,
+          height: widget.size,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => _errorCover(snapshot.data!),
+        ),
+      ),
+    );
+  }
+
+  /// 在线封面按字节缓存原图，这里限制到实际显示像素，切换封面时不再解码整张。
+  ImageProvider<Object> _resizedCover(ImageProvider<Object> provider) {
+    final pixelWidth = (widget.size *
+            MediaQuery.devicePixelRatioOf(context))
+        .round();
+    if (pixelWidth <= 0) return provider;
+    return ResizeImage(
+      provider,
+      width: pixelWidth,
+      height: pixelWidth,
+      allowUpscaling: false,
+    );
+  }
+
+  /// 在线封面解码失败时优先回退本地专辑封面；回退图也失败则显示占位。
+  Widget _errorCover(ImageProvider failedProvider) {
+    final fallback = widget.fallbackPic;
+    if (fallback == null || identical(fallback, failedProvider)) {
       return widget.placeholder;
     }
-    final image = Image(
-      image: snapshot.data!,
+    return Image(
+      image: _resizedCover(fallback),
       width: widget.size,
       height: widget.size,
       fit: BoxFit.cover,
       gaplessPlayback: true,
       errorBuilder: (_, _, _) => widget.placeholder,
     );
+  }
+
+  Widget _shapeCover(Widget image) {
     return switch (widget.picShape) {
       PicShape.oval => ClipOval(child: image),
       PicShape.rrect => ClipRRect(

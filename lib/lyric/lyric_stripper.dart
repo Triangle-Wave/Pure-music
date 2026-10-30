@@ -764,6 +764,12 @@ void applyProfanityUncensor(Lyric lyric) {
     if (line.romanLyric != null && line.romanLyric!.isNotEmpty) {
       line.romanLyric = uncensorProfanity(line.romanLyric!);
     }
+    final romanWords = line.romanWords;
+    if (romanWords != null) {
+      for (final word in romanWords) {
+        word.content = uncensorProfanity(word.content);
+      }
+    }
   }
 }
 
@@ -797,6 +803,7 @@ void blankAmllTtmlCreatorLines(List<LyricLine> lines) {
     }
     line.translation = null;
     line.romanLyric = null;
+    line.romanWords = null;
   }
 }
 
@@ -819,6 +826,7 @@ void blankMetadataLines(List<LyricLine> lines, [StripOptions? options]) {
   final footerLimit = _scanLimit(totalLines, 0.2, 20, 50);
 
   void blankLine(LyricLine line) {
+    line.romanWords = null;
     if (_isLineBlanked(line)) return; // 已清空过，不重复操作
     if (line is SyncLyricLine) {
       line.words.clear();

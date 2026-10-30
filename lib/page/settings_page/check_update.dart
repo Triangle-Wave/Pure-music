@@ -17,72 +17,19 @@ Future<void> _launchBrowserUrl(String uri) async {
   }
 }
 
-Future<UpdateChannel?> _showUpdateChannelDialog(
-  BuildContext context, {
-  UpdateChannel? selected,
-}) => showDialog<UpdateChannel>(
-  context: context,
-  barrierDismissible: false,
-  builder: (dialogContext) {
-    var current = selected;
-    return StatefulBuilder(
-      builder: (context, setDialogState) => AlertDialog(
-        title: const Text('选择更新渠道'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _UpdateChannelList(
-              current: current,
-              onChanged: (value) => setDialogState(() => current = value),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: current == null
-                ? null
-                : () => Navigator.pop(dialogContext, current),
-            child: const Text('继续'),
-          ),
-        ],
-      ),
-    );
-  },
-);
-
-Future<UpdateChannel?> ensureUpdateChannel(BuildContext context) async {
+Future<UpdateChannel> ensureUpdateChannel() async {
+  const channel = UpdateChannel.supported;
   final preference = AppPreference.instance;
-  final saved = UpdateChannel.parse(preference.updateChannel);
-  if (saved != null) return saved;
-
-  final selected = await _showUpdateChannelDialog(context);
-  if (selected == null) return null;
-  preference.updateChannel = selected.name;
+  if (UpdateChannel.parse(preference.updateChannel) == channel) {
+    return channel;
+  }
+  final previous = preference.updateChannel;
+  preference.updateChannel = channel.name;
   if (!await preference.save()) {
-    preference.updateChannel = null;
-    showTextOnSnackBar('保存更新渠道失败', variant: ToastVariant.error);
-    return null;
+    preference.updateChannel = previous;
+    log.settings.warn('legacy', '[Update] 保存更新渠道失败');
   }
-  return selected;
-}
-
-Future<bool> chooseAndSaveUpdateChannel(BuildContext context) async {
-  final preference = AppPreference.instance;
-  final previous = UpdateChannel.parse(preference.updateChannel);
-  final selected = await _showUpdateChannelDialog(context, selected: previous);
-  if (selected == null || selected == previous) return selected != null;
-
-  preference.updateChannel = selected.name;
-  final saved = await preference.save();
-  if (!saved) {
-    preference.updateChannel = previous?.name;
-    showTextOnSnackBar('保存更新渠道失败', variant: ToastVariant.error);
-  }
-  return saved;
+  return channel;
 }
 
 String _formatMb(int bytes) {
@@ -92,12 +39,12 @@ String _formatMb(int bytes) {
 
 enum _UpdatePhase {
   idle,
+  checking,
   downloading,
   preparing,
   verifying,
   installing,
   ready,
-  switchingChannel,
   error,
 }
 
@@ -252,19 +199,30 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
     await _launchBrowserUrl(updateUrl);
   }
 
-  Future<void> _switchChannelAndRetry() async {
+  Future<void> _retry() async {
     if (_busy) return;
-    final target = _channel.alternate;
     setState(() {
-      _phase = _UpdatePhase.switchingChannel;
+      _phase = _UpdatePhase.checking;
       _errorMessage = null;
     });
-    if (!await _persistUpdateChannel(target)) return;
     try {
-      final newest = await _newestForChannel(target);
+      final newest = await UpdateChecker.checkForUpdate();
       if (!mounted) return;
+      if (newest == null ||
+          !UpdateChecker.hasNewVersion(newest.tagName, AppSettings.version)) {
+        throw UpdateInstallException('GitHub 暂未提供可用的新版本');
+      }
+      final hasDownload = newest
+          .downloadUrl(
+            channel: UpdateChannel.supported,
+            portableBuild: portableBuild,
+          )
+          ?.isNotEmpty;
+      if (hasDownload != true) {
+        throw UpdateInstallException('GitHub 暂未提供对应安装包');
+      }
       setState(() {
-        _channel = target;
+        _channel = UpdateChannel.supported;
         _info = newest;
         _phase = _UpdatePhase.idle;
       });
@@ -272,43 +230,12 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _channel = target;
         _phase = _UpdatePhase.error;
         _errorMessage = error is UpdateInstallException
             ? error.message
-            : '无法从${target.label}获取更新';
+            : '无法从 GitHub 获取更新';
       });
     }
-  }
-
-  Future<bool> _persistUpdateChannel(UpdateChannel target) async {
-    final preference = AppPreference.instance;
-    final previous = preference.updateChannel;
-    preference.updateChannel = target.name;
-    if (await preference.save()) return true;
-    preference.updateChannel = previous;
-    if (mounted) {
-      setState(() {
-        _phase = _UpdatePhase.error;
-        _errorMessage = '保存更新渠道失败';
-      });
-    }
-    return false;
-  }
-
-  Future<UpdateInfo> _newestForChannel(UpdateChannel target) async {
-    final newest = await UpdateChecker.checkForUpdate(channel: target);
-    if (newest == null ||
-        !UpdateChecker.hasNewVersion(newest.tagName, AppSettings.version)) {
-      throw UpdateInstallException('${target.label}暂未提供可用的新版本');
-    }
-    if (newest
-            .downloadUrl(channel: target, portableBuild: portableBuild)
-            ?.isNotEmpty !=
-        true) {
-      throw UpdateInstallException('${target.label}暂未提供对应安装包');
-    }
-    return newest;
   }
 
   void _cancel() {
@@ -329,6 +256,8 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
     switch (_phase) {
       case _UpdatePhase.idle:
         return '准备安装';
+      case _UpdatePhase.checking:
+        return '正在检查更新';
       case _UpdatePhase.downloading:
         return '正在下载 $_progressLabel';
       case _UpdatePhase.preparing:
@@ -339,19 +268,17 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
         return portableBuild ? '正在切换到新版本' : '正在启动安装程序';
       case _UpdatePhase.ready:
         return '更新已下载，可以安装';
-      case _UpdatePhase.switchingChannel:
-        return '正在切换到${_channel.alternate.label}';
       case _UpdatePhase.error:
         return _errorMessage ?? '更新失败';
     }
   }
 
   bool get _busy =>
+      _phase == _UpdatePhase.checking ||
       _phase == _UpdatePhase.downloading ||
       _phase == _UpdatePhase.preparing ||
       _phase == _UpdatePhase.verifying ||
-      _phase == _UpdatePhase.installing ||
-      _phase == _UpdatePhase.switchingChannel;
+      _phase == _UpdatePhase.installing;
 
   bool get _hasDownload =>
       _info
@@ -367,9 +294,9 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
   bool get _canInstall => _hasDownload && _hasChecksum;
 
   bool get _holdDialog =>
+      _phase == _UpdatePhase.checking ||
       _phase == _UpdatePhase.preparing ||
-      _phase == _UpdatePhase.installing ||
-      _phase == _UpdatePhase.switchingChannel;
+      _phase == _UpdatePhase.installing;
 
   @override
   Widget build(BuildContext context) {
@@ -527,9 +454,9 @@ class _NewestUpdateViewState extends State<NewestUpdateView> {
         ),
         if (_phase == _UpdatePhase.error)
           OutlinedButton.icon(
-            onPressed: _switchChannelAndRetry,
-            icon: const Icon(Symbols.swap_horiz, size: 18),
-            label: Text('切换到${_channel.alternate.label}'),
+            onPressed: _retry,
+            icon: const Icon(Symbols.refresh, size: 18),
+            label: const Text('重试'),
           ),
         _primaryAction(context, hasUpdateUrl),
         if (hasUpdateUrl && _canInstall && !_busy)
@@ -654,36 +581,6 @@ class UpdateTitleStatus extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _UpdateChannelList extends StatelessWidget {
-  const _UpdateChannelList({required this.current, required this.onChanged});
-
-  final UpdateChannel? current;
-  final ValueChanged<UpdateChannel?> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return RadioGroup<UpdateChannel>(
-      groupValue: current,
-      onChanged: onChanged,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          RadioListTile<UpdateChannel>(
-            value: UpdateChannel.github,
-            title: Text(UpdateChannel.github.label),
-            subtitle: const Text('从 GitHub 获取版本和安装包'),
-          ),
-          RadioListTile<UpdateChannel>(
-            value: UpdateChannel.gitee,
-            title: Text(UpdateChannel.gitee.label),
-            subtitle: const Text('从 Gitee 获取版本和安装包'),
-          ),
-        ],
-      ),
     );
   }
 }

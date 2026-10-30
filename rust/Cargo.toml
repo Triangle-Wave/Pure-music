@@ -4,15 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 flutter_rust_bridge = "=2.12.0"
 log = "0.4"
 lofty = "0.22.4"
 dsf-meta = "0.2.7"
+encoding_rs = "0.8"
+quick-xml = { version = "0.42.0", default-features = false }
 id3 = "1.17.1"
 ndsd-read = "0.1.2"
+dst-decoder = "0.1.2"
 ratag = "0.1.1"
 midly = "0.5.3"
 serde_json = "1.0.117"
@@ -41,6 +44,7 @@ windows = { version = "0.57.0", features = [
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_WinRT",
+    "Win32_System_WindowsProgramming",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_System_Ole",
@@ -75,6 +79,10 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     "aiff",
     "wav",
 ] }
+# GPL-3.0，与项目许可证兼容。rdsd2pcm 未发布到 crates.io，源码固定在 vendor/；
+# upstream commit a06475eb8de3ff19c33aaf403158894f60b58d43，dsd-reader 子模块
+# commit c147e220bc715dd021537e1045fa2b81127812c9 同为 vendored 源码。
+rdsd2pcm = { path = "vendor/rdsd2pcm" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

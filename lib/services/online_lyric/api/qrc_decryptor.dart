@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:isolate';
 import 'package:convert/convert.dart';
 import 'package:flutter/foundation.dart';
+import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 const int _encrypt = 1;
 const int _decrypt = 0;
@@ -441,7 +442,16 @@ Future<String?> qrcDecrypt({required dynamic encryptedQrc, required bool isLocal
 }
 
 Future<String?> qrcDecryptSingle(String encryptedHex) async {
-  return Isolate.run(() => _qrcDecryptSync(encryptedHex))
+  if (currentLyricRequestToken?.isCancelled == true) return null;
+  final byteLength = encryptedHex.length ~/ 2;
+  if (shouldRunLyricWorkInline(byteLength)) {
+    return _qrcDecryptSync(encryptedHex);
+  }
+  return LyricRequestScheduler.instance
+      .runLyricCompute((token) async {
+        if (token.isCancelled) return null;
+        return Isolate.run(() => _qrcDecryptSync(encryptedHex));
+      })
       .timeout(const Duration(seconds: 5), onTimeout: () => null);
 }
 

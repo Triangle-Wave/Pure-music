@@ -139,6 +139,19 @@ npm run dev
 **能编译，但播放或桌面歌词不可用**  
 不要单独移动 exe；检查构建目录中的 `dll/BASS/` 与 `desktop_lyric/` 是否完整。
 
+## 无本地开发环境
+
+日常改动可以在只有 Git 的机器上完成，编译与测试由 GitHub Actions 负责。
+
+- push 到 `main` 自动运行 `Build Windows`，产物在该次 run 页面的 Artifacts 区域。
+- push 涉及 `rust/**` 时运行 `Rust tests`；也可以在 Actions 页面选择 `Rust tests`，手动执行 `Run workflow`。
+
+没有本地 Flutter 与 Rust 时，`flutter analyze`、`flutter test`、`cargo test` 都无法执行。交付前以 CI 绿色为准，不要把“本地没跑”当成已验证。
+
+修改 `rust/src/api/` 的函数签名或类型后，必须重新生成 FRB 绑定。本地没有环境时，先让 CI 安装 codegen 再构建（该步骤在后续提交补充）；生成文件不要手动修改。
+
+CI 失败时先查看失败步骤的日志，确认原因后再改代码，不要靠猜。
+
 ## 提交前
 
 ```powershell

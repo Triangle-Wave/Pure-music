@@ -6,12 +6,14 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:pure_music/core/color_extraction.dart';
+import 'package:pure_music/core/cover_disk_cache.dart';
 import 'package:pure_music/core/database.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/workload_policy.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/native/rust/api/library_db.dart' as library_db;
 import 'package:pure_music/native/rust/api/tag_reader.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -249,15 +251,12 @@ class AlbumColorCache {
     }
   }
 
-  File? _findLocalCoverFileSync(Directory parent) {
-    final candidates = [
-      File(path.join(parent.path, 'cover.jpg')),
-      File(path.join(parent.path, 'cover.png')),
-    ];
-    for (final f in candidates) {
-      if (f.existsSync()) return f;
-    }
-    return null;
+  File? _findLocalCoverFileSync(Directory parent, {String? sourcePath}) {
+    final cover = findFolderCoverFileSync(
+      parent.path,
+      sourcePath: sourcePath,
+    );
+    return cover == null ? null : File(cover.path);
   }
 
   Future<(String, String)> _albumKeyAndSignature(Album album) async {
@@ -271,7 +270,7 @@ class AlbumColorCache {
       final sig = '$key|$mod';
       return (key, sig);
     }
-    final key = 'audio:${audio.path}';
+    final key = 'audio:${audio.filePath}';
     final sig = '$key|${audio.modified}';
     return (key, sig);
   }
@@ -279,15 +278,18 @@ class AlbumColorCache {
   (String, String) _albumKeyAndSignatureSync(Album album) {
     final audio = album.works.isEmpty ? null : album.works.first;
     if (audio == null) return ('album:${album.name}', 'nomedia');
-    final parent = Directory(File(audio.path).parent.path);
-    final cover = _findLocalCoverFileSync(parent);
+    final parent = Directory(File(audio.filePath).parent.path);
+    final cover = _findLocalCoverFileSync(
+      parent,
+      sourcePath: audio.filePath,
+    );
     if (cover != null) {
       final mod = cover.statSync().modified.millisecondsSinceEpoch;
       final key = 'file:${cover.path}';
       final sig = '$key|$mod';
       return (key, sig);
     }
-    final key = 'audio:${audio.path}';
+    final key = 'audio:${audio.filePath}';
     final sig = '$key|${audio.modified}';
     return (key, sig);
   }
@@ -299,7 +301,7 @@ class AlbumColorCache {
     if (coverPath != null) return File(coverPath).readAsBytes();
 
     final bytes = await CoverImageCache.instance.loadBytes(
-      path: audio.path,
+      path: audio.filePath,
       modified: audio.modified,
       width: 64,
       height: 64,
@@ -417,7 +419,7 @@ class _LruMap<K, V> {
     while (_map.length >= maxSize) {
       final oldestKey = _map.keys.first;
       final evicted = _map.remove(oldestKey);
-      if (evicted != null) _discard(oldestKey, evicted, evict: false);
+      if (evicted != null) _discard(oldestKey, evicted, evict: true);
     }
     _map[key] = value;
   }
@@ -447,7 +449,7 @@ class _LruMap<K, V> {
     while (_map.length > size) {
       final oldestKey = _map.keys.first;
       final removed = _map.remove(oldestKey);
-      if (removed != null) _discard(oldestKey, removed, evict: false);
+      if (removed != null) _discard(oldestKey, removed, evict: true);
     }
   }
 }
@@ -602,6 +604,7 @@ class CoverImageCache {
   final _pending = <String, Future<ImageProvider?>>{};
   final _pendingBytes = <String, Future<Uint8List?>>{};
   final _decodedBytes = _LruMap<String, Uint8List>(20);
+  final _thumbnailWarmPending = <String>{};
   final _persistentWarmCompleted = <String>{};
   final _persistentWarmPending = <String>{};
   late final _missing = _LruMap<String, bool>(512);
@@ -850,6 +853,7 @@ class CoverImageCache {
         path: path,
         physicalWidth: physicalWidth,
         physicalHeight: physicalHeight,
+        modified: modified,
       ),
       lowPriority: lowPriority,
     );
@@ -870,18 +874,48 @@ class CoverImageCache {
     }
   }
 
-  /// 小封面（≤96 物理像素）直接 FFI 读音频文件，不走 SQLite 持久化层：
-  /// 内存缓存已足以覆盖列表滚动距离，省掉每次 stat + 全局锁 + SQLite 查询。
-  /// 大封面仍走持久化缓存，命中时避免重复读音频文件。
+  /// 音频文件：小封面（≤96 物理像素）直接 FFI 读内嵌图，不走 SQLite 持久化层；
+  /// 大封面走持久化缓存，命中时避免重复读音频文件。
+  /// 同目录封面图片：直接读取图片文件并解码缩放，失败时再走同一兜底链路。
   Future<Uint8List?> _loadBytesUncached({
     required String path,
     required int physicalWidth,
     required int physicalHeight,
+    int? modified,
   }) async {
     developer.Timeline.startSync('cover.decode');
     try {
+      if (_isImageCoverPath(path)) {
+        final stamp = await _resolveImageModified(path, modified);
+        final diskCache = CoverDiskCache.instance;
+        final cached = await diskCache.readLocalThumbnail(
+          sourcePath: path,
+          width: physicalWidth,
+          height: physicalHeight,
+          modified: stamp,
+        );
+        if (cached != null) return cached;
+        final bytes = await _loadImageCoverFile(
+          path,
+          physicalWidth,
+          physicalHeight,
+        );
+        if (bytes != null) {
+          await diskCache.writeLocalThumbnail(
+            sourcePath: path,
+            width: physicalWidth,
+            height: physicalHeight,
+            modified: stamp,
+            bytes: bytes,
+          );
+          return bytes;
+        }
+      }
       final indexPath = _indexPath;
       final maxPhysical = max(physicalWidth, physicalHeight);
+      if (RemoteLibrary.isRemotePath(path)) {
+        return RemoteLibrary.instance.coverBytes(path, maxPhysical);
+      }
       if (indexPath != null && maxPhysical > 96) {
         try {
           return await library_db.getCachedCover(
@@ -911,12 +945,171 @@ class CoverImageCache {
     }
   }
 
+  /// Flutter 引擎（Skia）自带 BMP 解码器；解码失败由本类的 try/catch 降级。
+  static const Set<String> _imageCoverExtensions = <String>{
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.webp',
+    '.bmp',
+  };
+
+  bool _isImageCoverPath(String value) =>
+      _imageCoverExtensions.contains(path.extension(value).toLowerCase());
+
+  /// 同目录封面图片直接读取并按目标像素解码缩放。
+  /// 走图片文件自身的 Key（路径 + mtime + 尺寸），与音频内嵌图缓存键相互独立。
+  Future<Uint8List?> _loadImageCoverFile(
+    String imagePath,
+    int width,
+    int height,
+  ) async {
+    try {
+      final raw = await File(imagePath).readAsBytes();
+      if (raw.isEmpty) return null;
+      final codec = await ui.instantiateImageCodec(
+        raw,
+        targetWidth: width,
+        targetHeight: height,
+        allowUpscaling: false,
+      );
+      try {
+        final frame = await codec.getNextFrame();
+        try {
+          final data = await frame.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (data == null) return null;
+          return Uint8List.fromList(
+            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          );
+        } finally {
+          frame.image.dispose();
+        }
+      } finally {
+        codec.dispose();
+      }
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to read folder cover image $imagePath: $error',
+        stackTrace: trace,
+      );
+      return null;
+    }
+  }
+
+  /// 源图未携带修改时间时补一次 stat，避免替换封面后继续命中旧缩略图。
+  Future<int?> _resolveImageModified(String imagePath, int? modified) async {
+    if (modified != null) return modified;
+    try {
+      final stat = await File(imagePath).stat();
+      return stat.modified.millisecondsSinceEpoch ~/ 1000;
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to stat folder cover image $imagePath: $error',
+        stackTrace: trace,
+      );
+      return null;
+    }
+  }
+
+  /// 生成或复用本地图片封面的磁盘缩略图，供 `FileImage` 直接显示。
+  ///
+  /// [physicalWidth] 与 [physicalHeight] 是物理像素，键与 [loadBytes] 的磁盘
+  /// 键一致；同尺寸再次进入时只读缩略图，不再解码原图。
+  Future<File?> localThumbnailFile({
+    required String path,
+    required int physicalWidth,
+    required int physicalHeight,
+    int? modified,
+    bool lowPriority = false,
+  }) async {
+    if (!_isImageCoverPath(path)) return null;
+    final stamp = await _resolveImageModified(path, modified);
+    final diskCache = CoverDiskCache.instance;
+    final cached = diskCache.cachedLocalThumbnailFile(
+      sourcePath: path,
+      width: physicalWidth,
+      height: physicalHeight,
+      modified: stamp,
+    );
+    if (cached != null) return cached;
+    final bytes = await _coverLoadSemaphore.run(
+      () => _loadImageCoverFile(path, physicalWidth, physicalHeight),
+      lowPriority: lowPriority,
+    );
+    if (bytes == null) return null;
+    return diskCache.writeLocalThumbnail(
+      sourcePath: path,
+      width: physicalWidth,
+      height: physicalHeight,
+      modified: stamp,
+      bytes: bytes,
+    );
+  }
+
+  /// 同步查询磁盘缩略图，列表首帧可直接用 `FileImage` 显示。
+  File? cachedLocalThumbnailFile({
+    required String path,
+    required int physicalWidth,
+    required int physicalHeight,
+    int? modified,
+  }) {
+    if (!_isImageCoverPath(path)) return null;
+    var stamp = modified;
+    if (stamp == null) {
+      try {
+        stamp = File(path).lastModifiedSync().millisecondsSinceEpoch ~/ 1000;
+      } catch (_) {
+        stamp = null;
+      }
+    }
+    return CoverDiskCache.instance.cachedLocalThumbnailFile(
+      sourcePath: path,
+      width: physicalWidth,
+      height: physicalHeight,
+      modified: stamp,
+    );
+  }
+
+  /// 后台补生成缩略图；同一路径与尺寸只跑一次。
+  void warmLocalThumbnail({
+    required String path,
+    required int physicalWidth,
+    required int physicalHeight,
+    int? modified,
+  }) {
+    if (!_isImageCoverPath(path)) return;
+    final key = '$path|${modified ?? 0}|${physicalWidth}x$physicalHeight';
+    if (!_thumbnailWarmPending.add(key)) return;
+    unawaited(
+      localThumbnailFile(
+        path: path,
+        physicalWidth: physicalWidth,
+        physicalHeight: physicalHeight,
+        modified: modified,
+        lowPriority: true,
+      ).then<void>((_) {}).catchError((Object error, StackTrace trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] local thumbnail warm failed $path: $error',
+          stackTrace: trace,
+        );
+      }).whenComplete(() {
+        _thumbnailWarmPending.remove(key);
+      }),
+    );
+  }
+
   /// 后台预生成常用缩略图，字节写入磁盘后立即释放。
   void preloadPersistent(Iterable<Audio> audios) {
     if (_indexPath == null) return;
     final targets = <String, int>{};
     for (final audio in audios) {
-      if (audio.path.isNotEmpty) targets[audio.path] = audio.modified;
+      final path = audio.filePath;
+      if (path.isNotEmpty) targets[path] = audio.modified;
     }
     if (targets.isEmpty) return;
     unawaited(_warmPersistent(targets));
@@ -978,12 +1171,13 @@ class CoverImageCache {
   }
 
   void preloadNowPlayingCover(Audio audio) {
-    if (audio.path.isEmpty) return;
+    if (audio.filePath.isEmpty) return;
     unawaited(_preloadNowPlayingCover(audio));
   }
 
   Future<void> _preloadNowPlayingCover(Audio audio) async {
-    final path = audio.path;
+    // 虚拟轨的 path 是合成路径，读取封面必须用真实源文件路径。
+    final path = audio.filePath;
     final modified = audio.modified;
     final colors = ColorExtractionService();
     if (colors.getCachedPaletteForPath(path, modified: modified) != null) {
@@ -1039,6 +1233,7 @@ class CoverImageCache {
     _missing.clear();
     _persistentWarmCompleted.clear();
     _persistentWarmPending.clear();
+    _thumbnailWarmPending.clear();
   }
 
   /// 释放不常用的缓存层，保留小图缓存以维持列表流畅滚动
@@ -1135,5 +1330,6 @@ class CoverImageCache {
     _missing.clear();
     _persistentWarmCompleted.clear();
     _persistentWarmPending.clear();
+    _thumbnailWarmPending.clear();
   }
 }

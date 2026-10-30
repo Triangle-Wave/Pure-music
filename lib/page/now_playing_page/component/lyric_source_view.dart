@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
@@ -13,6 +15,7 @@ import 'package:pure_music/page/now_playing_page/component/player_chrome_foregro
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/services/online_lyric/api/net_lyric_api.dart'
     as net_api;
+import 'package:pure_music/services/online_lyric/models/lyric_candidate.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/core/log/app_log.dart';
@@ -852,6 +855,7 @@ class SetLyricSourceBtn extends StatelessWidget {
             ConnectionState.done => _SetLyricSourceBtn(
               sourceType: activeSourceType,
               isExternal: isExternal,
+              disabled: lyricService.onlineLyricsDisabled,
             ),
           };
         },
@@ -879,16 +883,25 @@ class _SetLyricSourceBtn extends StatelessWidget {
   final LyricSourceType? sourceType;
   // 非在线来源细分：true=外置，false=内嵌，null=尚未确定
   final bool? isExternal;
-  const _SetLyricSourceBtn({this.sourceType, this.isExternal});
+  final bool disabled;
+  const _SetLyricSourceBtn({
+    this.sourceType,
+    this.isExternal,
+    this.disabled = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final icon = switch (sourceType) {
-      null => Symbols.lyrics,
-      LyricSourceType.local => Symbols.lyrics,
-      _ => Symbols.cloud,
-    };
-    final tooltip = _lyricSourceTooltip(sourceType, isExternal);
+    final icon = disabled
+        ? Symbols.cloud_off
+        : switch (sourceType) {
+            null => Symbols.lyrics,
+            LyricSourceType.local => Symbols.lyrics,
+            _ => Symbols.cloud,
+          };
+    final tooltip = disabled
+        ? '歌词：不使用'
+        : _lyricSourceTooltip(sourceType, isExternal);
     return IconButton(
       tooltip: tooltip,
       onPressed: PlayService.instance.playbackService.nowPlaying == null
@@ -903,7 +916,12 @@ class _SetLyricSourceBtn extends StatelessWidget {
                 );
               }
             },
-      icon: Icon(icon, fill: sourceType == LyricSourceType.local ? 1.0 : 0.0),
+      icon: Icon(
+        icon,
+        fill: disabled
+            ? 0.0
+            : (sourceType == LyricSourceType.local ? 1.0 : 0.0),
+      ),
       color: playerChromeForeground(
         context,
         enabled: AppSettings.instance.useMaterialYouForControls,
@@ -925,31 +943,46 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
   late final Future<List<SongSearchResult>> _searchFuture;
   List<SongSearchResult>? _results;
   SongSearchResult? _applyingResult;
+  String? _applyingCandidateId;
   bool _isApplyingLocal = false;
+  bool _isRefreshingCandidates = false;
+
+  bool get _isBusy =>
+      _applyingResult != null ||
+      _applyingCandidateId != null ||
+      _isApplyingLocal ||
+      _isRefreshingCandidates;
 
   @override
   void initState() {
     super.initState();
-    _searchFuture = uniSearch(widget.audio)
-        .timeout(
-          const Duration(seconds: 20),
-          onTimeout: () {
-            log.app.warn('legacy', 'SetLyricSourceDialog uniSearch timeout');
-            return [];
-          },
-        )
-        .then((results) {
-          _results = results;
-          for (int i = 0; i < results.length; i++) {
-            final r = results[i];
-            if (r.source == ResultSource.ne &&
-                r.lyricType == null &&
-                r.neSongId != null) {
-              _confirmNeLyricType(results, i);
-            }
-          }
-          return results;
-        });
+    final lyricService = PlayService.instance.lyricService;
+    unawaited(lyricService.loadCachedLyricCandidates());
+    _searchFuture = lyricService.lyricCandidates.isNotEmpty
+        ? Future.value(const <SongSearchResult>[])
+        : uniSearch(widget.audio)
+              .timeout(
+                const Duration(seconds: 20),
+                onTimeout: () {
+                  log.app.warn(
+                    'legacy',
+                    'SetLyricSourceDialog uniSearch timeout',
+                  );
+                  return [];
+                },
+              )
+              .then((results) {
+                _results = results;
+                for (int i = 0; i < results.length; i++) {
+                  final r = results[i];
+                  if (r.source == ResultSource.ne &&
+                      r.lyricType == null &&
+                      r.neSongId != null) {
+                    _confirmNeLyricType(results, i);
+                  }
+                }
+                return results;
+              });
     // 监听切歌：歌曲切换后自动关闭弹窗
     PlayService.instance.playbackService.nowPlayingNotifier.addListener(
       _onNowPlayingChanged,
@@ -1000,7 +1033,7 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
   }
 
   Future<void> _selectResult(SongSearchResult result) async {
-    if (_applyingResult != null || _isApplyingLocal) return;
+    if (_isBusy) return;
     setState(() => _applyingResult = result);
     try {
       final applied = await applyValidatedOnlineLyricResult(
@@ -1027,8 +1060,93 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
     }
   }
 
+  Future<void> _selectCandidate(LyricCandidate candidate) async {
+    if (_isBusy) return;
+    setState(() => _applyingCandidateId = candidate.id);
+    try {
+      final applied = await PlayService.instance.lyricService
+          .selectLyricCandidate(candidate.id);
+      if (!mounted) return;
+      if (!applied) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('该候选歌词加载失败，已保留原歌词')));
+        return;
+      }
+      Navigator.pop(context);
+    } catch (error, trace) {
+      log.app.warn(
+        'legacy',
+        'Select lyric candidate failed: $error',
+        stackTrace: trace,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('歌词加载失败，请稍后重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _applyingCandidateId = null);
+    }
+  }
+
+  Future<void> _disableLyrics() async {
+    if (_isBusy) return;
+    setState(() => _applyingCandidateId = '__disabled__');
+    try {
+      final lyricService = PlayService.instance.lyricService;
+      await lyricService.disableOnlineLyric();
+      if (!mounted) return;
+      if (!lyricService.onlineLyricsDisabled) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('保存歌词选择失败，请查看日志')));
+        return;
+      }
+      Navigator.pop(context);
+    } catch (error, trace) {
+      log.app.warn(
+        'legacy',
+        'Disable online lyric failed: $error',
+        stackTrace: trace,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('保存歌词选择失败，请查看日志')));
+      }
+    } finally {
+      if (mounted) setState(() => _applyingCandidateId = null);
+    }
+  }
+
+  Future<void> _refreshCandidates() async {
+    if (_isBusy) return;
+    setState(() => _isRefreshingCandidates = true);
+    try {
+      await PlayService.instance.lyricService.refreshLyricCandidates(
+        applyBestIfEmpty: false,
+      );
+      if (!mounted) return;
+      setState(() {});
+    } catch (error, trace) {
+      log.app.warn(
+        'legacy',
+        'Refresh lyric candidates failed: $error',
+        stackTrace: trace,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('刷新歌词候选失败，请稍后重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _isRefreshingCandidates = false);
+    }
+  }
+
   Future<void> _selectLocalLyricFile() async {
-    if (_applyingResult != null || _isApplyingLocal) return;
+    if (_isBusy) return;
     final savedPath = lyricSources[widget.audio.path]?.localLyricPath;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -1072,7 +1190,7 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
   }
 
   Future<void> _restoreAutomaticLocalLyric() async {
-    if (_applyingResult != null || _isApplyingLocal) return;
+    if (_isBusy) return;
     setState(() => _isApplyingLocal = true);
     try {
       await restoreAutomaticLocalLyric(widget.audio);
@@ -1092,6 +1210,117 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
     }
   }
 
+  Widget _buildCandidateSection(BuildContext context) {
+    final lyricService = PlayService.instance.lyricService;
+    return ListenableBuilder(
+      listenable: lyricService,
+      builder: (context, _) {
+        final scheme = Theme.of(context).colorScheme;
+        final candidates = lyricService.lyricCandidates;
+        final disabled = lyricService.onlineLyricsDisabled;
+        final selectedId = lyricService.selectedLyricCandidateId;
+        final bestId = lyricService.lyricCandidateRecord?.bestCandidate?.id;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  '歌词候选',
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontSize: AppType.sectionTitle,
+                    fontWeight: AppType.weightBold,
+                  ),
+                ),
+                const Spacer(),
+                if (_isRefreshingCandidates)
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else
+                  IconButton(
+                    icon: const Icon(Symbols.refresh),
+                    tooltip: '刷新歌词',
+                    onPressed: _isBusy ? null : _refreshCandidates,
+                  ),
+              ],
+            ),
+            if (candidates.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  _isRefreshingCandidates
+                      ? '正在搜索歌词候选…'
+                      : '尚未缓存歌词候选，点击右上角刷新获取',
+                  style: TextStyle(
+                    fontSize: AppType.body,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 132),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: candidates.length,
+                  itemBuilder: (context, index) {
+                    final candidate = candidates[index];
+                    return _LyricCandidateTile(
+                      candidate: candidate,
+                      selected: selectedId == candidate.id,
+                      isBest: selectedId == null && bestId == candidate.id,
+                      isApplying: _applyingCandidateId == candidate.id,
+                      enabled: !_isBusy,
+                      onTap: () => _selectCandidate(candidate),
+                    );
+                  },
+                ),
+              ),
+            Material(
+              type: MaterialType.transparency,
+              shape: RoundedRectangleBorder(
+                borderRadius: AppRadius.smCircular,
+              ),
+              clipBehavior: Clip.hardEdge,
+              child: ListTile(
+                leading: const Icon(Symbols.cloud_off),
+                title: const Text('不使用（显示空白）'),
+                subtitle: const Text('不请求在线歌词；已选的本地歌词仍会显示'),
+                selected: disabled,
+                selectedTileColor: scheme.secondaryContainer.withValues(
+                  alpha: 0.5,
+                ),
+                selectedColor: scheme.onSecondaryContainer,
+                trailing: _applyingCandidateId == '__disabled__'
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : disabled
+                    ? const Icon(Symbols.check)
+                    : null,
+                shape: RoundedRectangleBorder(
+                  borderRadius: AppRadius.smCircular,
+                ),
+                onTap: _isBusy && _applyingCandidateId != '__disabled__'
+                    ? null
+                    : _disableLyrics,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -1102,7 +1331,7 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
     final isAutomaticLocalSelected =
         savedSource?.source == LyricSourceType.local &&
         selectedLocalPath == null;
-    final localActionsEnabled = _applyingResult == null && !_isApplyingLocal;
+    final localActionsEnabled = !_isBusy;
 
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: AppRadius.mdCircular),
@@ -1200,6 +1429,9 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
                 ),
               ),
               const Divider(),
+              _buildCandidateSection(context),
+              const SizedBox(height: 8),
+              const Divider(),
               Flexible(
                 child: FutureBuilder<List<SongSearchResult>>(
                   future: _searchFuture,
@@ -1216,6 +1448,11 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
                     if (snapshot.hasError ||
                         snapshot.data == null ||
                         snapshot.data!.isEmpty) {
+                      final hasCandidates = PlayService
+                          .instance
+                          .lyricService
+                          .lyricCandidates
+                          .isNotEmpty;
                       return Center(
                         child: Padding(
                           padding: const EdgeInsets.all(16.0),
@@ -1223,14 +1460,18 @@ class _SetLyricSourceDialogState extends State<SetLyricSourceDialog> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(
-                                snapshot.hasError ? '搜索失败' : '未找到在线歌词',
+                                snapshot.hasError
+                                    ? '搜索失败'
+                                    : (hasCandidates ? '已缓存歌词候选' : '未找到在线歌词'),
                                 style: TextStyle(
                                   color: scheme.onSurfaceVariant,
                                 ),
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                '试试点击右上角 🔍 手动搜索',
+                                hasCandidates
+                                    ? '可在上方候选列表切换'
+                                    : '试试点击右上角 🔍 手动搜索',
                                 style: TextStyle(
                                   color: scheme.onSurfaceVariant.withValues(
                                     alpha: 0.6,
@@ -1426,6 +1667,111 @@ class _SearchResultItem extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
+      ),
+    );
+  }
+}
+
+class _LyricCandidateTile extends StatelessWidget {
+  const _LyricCandidateTile({
+    required this.candidate,
+    required this.selected,
+    required this.isBest,
+    required this.isApplying,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final LyricCandidate candidate;
+  final bool selected;
+  final bool isBest;
+  final bool isApplying;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final preview = candidate.preview.join(' / ');
+    return Material(
+      type: MaterialType.transparency,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.smCircular),
+      clipBehavior: Clip.hardEdge,
+      child: ListTile(
+        selected: selected,
+        selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.5),
+        selectedColor: scheme.onSecondaryContainer,
+        isThreeLine: preview.isNotEmpty,
+        leading: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              constraints: const BoxConstraints(minWidth: 36),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer,
+                borderRadius: AppRadius.xsCircular,
+              ),
+              child: Text(
+                candidate.sourceLabel,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: AppType.microlabel,
+                  fontWeight: AppType.weightSemibold,
+                  color: scheme.onPrimaryContainer,
+                ),
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              candidate.formatLabel,
+              style: TextStyle(
+                fontSize: AppType.microlabel,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        title: Text(candidate.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${candidate.artist} · ${candidate.album}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: AppType.body),
+            ),
+            if (preview.isNotEmpty)
+              Text(
+                preview,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: AppType.body,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+        trailing: isApplying
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : selected
+            ? const Icon(Symbols.check)
+            : isBest
+            ? Text(
+                '最佳',
+                style: TextStyle(
+                  fontSize: AppType.microlabel,
+                  color: scheme.primary,
+                ),
+              )
+            : null,
+        onTap: enabled ? onTap : null,
       ),
     );
   }

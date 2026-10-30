@@ -1,18 +1,22 @@
 // ignore_for_file: constant_identifier_names
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:fl_charset/fl_charset.dart' show gbk;
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/core/equalizer_action_state.dart';
 import 'package:pure_music/native/bass/bass.dart' as bass;
+import 'package:pure_music/native/bass/bass_error_text.dart';
 import 'package:pure_music/native/bass/bass_fx.dart';
 import 'package:pure_music/native/bass/bass_mix.dart';
 import 'package:pure_music/native/bass/bass_wasapi.dart' as bass_wasapi;
+import 'package:pure_music/native/bass/bass_url.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as path;
@@ -20,10 +24,164 @@ import 'package:path/path.dart' as path;
 const int _bassConfigMidiDeffont = 0x10403;
 
 /// 播放预缓冲。解码可以提前准备，不直接等于听到的延迟。
+/// 拖动定位的卡顿来自 seek 前后的同步重活与额外 DSP 层，
+/// 这里维持 500ms 预缓冲，避免降低缓冲带来的断音回归。
 const int _playbackBufferMs = 500;
 
 /// 设备输出缓冲必须在 Init 前设置。500ms 实际不会生效，还会让人误以为暂停很钝；40ms 用来减少偶发破音。
 const int _deviceBufferMs = 40;
+
+/// 音频输出格式。共享模式由系统混音器决定实际格式，独占模式按此请求。
+enum BassOutputFormat { float32, pcm24, pcm16 }
+
+extension BassOutputFormatInfo on BassOutputFormat {
+  String get label => switch (this) {
+    BassOutputFormat.float32 => 'float32',
+    BassOutputFormat.pcm24 => '24bit',
+    BassOutputFormat.pcm16 => '16bit',
+  };
+
+  String get preferenceValue => switch (this) {
+    BassOutputFormat.float32 => PlaybackPreference.outputFormatFloat32,
+    BassOutputFormat.pcm24 => PlaybackPreference.outputFormatPcm24,
+    BassOutputFormat.pcm16 => PlaybackPreference.outputFormatPcm16,
+  };
+
+  /// BASS_WASAPI_Init 通过 MAKELONG(flags, format) 的高 16 位限定格式。
+  int get wasapiFormatIndex => switch (this) {
+    BassOutputFormat.float32 => bass_wasapi.BASS_WASAPI_FORMAT_FLOAT,
+    BassOutputFormat.pcm24 => bass_wasapi.BASS_WASAPI_FORMAT_24BIT,
+    BassOutputFormat.pcm16 => bass_wasapi.BASS_WASAPI_FORMAT_16BIT,
+  };
+}
+
+BassOutputFormat bassOutputFormatFromPreference(String value) {
+  if (value == PlaybackPreference.outputFormatPcm24) {
+    return BassOutputFormat.pcm24;
+  }
+  if (value == PlaybackPreference.outputFormatPcm16) {
+    return BassOutputFormat.pcm16;
+  }
+  return BassOutputFormat.float32;
+}
+
+/// 输出重建前的完整快照，用于切换失败时回滚。
+typedef _OutputSnapshot = ({
+  int sharedId,
+  String sharedName,
+  int wasapiId,
+  String wasapiName,
+  bool exclusive,
+  int rate,
+  BassOutputFormat format,
+});
+
+/// 一次输出重建的完整参数。
+class BassOutputConfig {
+  const BassOutputConfig({
+    this.deviceId = PlaybackPreference.defaultOutputDeviceId,
+    this.deviceName = '',
+    this.exclusive = false,
+    this.sampleRate = 0,
+    this.format = BassOutputFormat.float32,
+  });
+
+  /// 当前模式下的设备号：共享 1..n，独占 0..n，-1 表示系统默认。
+  final int deviceId;
+  final String deviceName;
+  final bool exclusive;
+
+  /// 0 表示自动：共享回退 44100，独占交给 WASAPI 跟随设备混音格式。
+  final int sampleRate;
+  final BassOutputFormat format;
+
+  BassOutputConfig copyWith({
+    int? deviceId,
+    String? deviceName,
+    bool? exclusive,
+    int? sampleRate,
+    BassOutputFormat? format,
+  }) {
+    return BassOutputConfig(
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
+      exclusive: exclusive ?? this.exclusive,
+      sampleRate: sampleRate ?? this.sampleRate,
+      format: format ?? this.format,
+    );
+  }
+}
+
+/// 可枚举的输出设备。共享与独占的编号空间独立。
+class BassOutputDevice {
+  const BassOutputDevice({
+    required this.id,
+    required this.name,
+    required this.isDefault,
+    this.available = true,
+  });
+
+  final int id;
+  final String name;
+  final bool isDefault;
+  final bool available;
+
+  String get displayName => isDefault ? '系统默认' : name;
+}
+
+/// 设置页展示的实际输出状态。
+class BassOutputState {
+  const BassOutputState({
+    required this.deviceId,
+    required this.deviceName,
+    required this.exclusive,
+    required this.sampleRate,
+    required this.formatLabel,
+  });
+
+  final int deviceId;
+  final String deviceName;
+  final bool exclusive;
+  final int sampleRate;
+  final String formatLabel;
+}
+
+/// 输出切换结果。失败时由调用方决定是否提示与保存。
+class BassOutputApplyResult {
+  const BassOutputApplyResult({
+    required this.success,
+    required this.message,
+    this.rolledBack = false,
+    this.usedDefaultDevice = false,
+    this.sampleRate = 0,
+    this.formatLabel = '',
+  });
+
+  final bool success;
+  final String message;
+  final bool rolledBack;
+  final bool usedDefaultDevice;
+  final int sampleRate;
+  final String formatLabel;
+
+  BassOutputApplyResult copyWith({
+    bool? success,
+    String? message,
+    bool? rolledBack,
+    bool? usedDefaultDevice,
+    int? sampleRate,
+    String? formatLabel,
+  }) {
+    return BassOutputApplyResult(
+      success: success ?? this.success,
+      message: message ?? this.message,
+      rolledBack: rolledBack ?? this.rolledBack,
+      usedDefaultDevice: usedDefaultDevice ?? this.usedDefaultDevice,
+      sampleRate: sampleRate ?? this.sampleRate,
+      formatLabel: formatLabel ?? this.formatLabel,
+    );
+  }
+}
 
 enum PlayerState {
   /// stop() has been called or the end of an audio has been reached
@@ -96,8 +254,8 @@ class BassPlayer {
   static const _limiterFxPriority = 10;
 
   late final ffi.DynamicLibrary _bassLib;
-  late final ffi.DynamicLibrary _bassWasapiLib;
   late final bass.Bass _bass;
+  late final BassUrl _bassUrl;
   late final bass_wasapi.BassWasapi _bassWasapi;
   ffi.DynamicLibrary? _bassFxLib;
   BassFx? _bassFx;
@@ -114,6 +272,13 @@ class BassPlayer {
   String? _fPath;
   int? _fstream;
   int? _mixerStream;
+  // CUE 虚拟轨的段范围（毫秒）。end 为 0 表示到文件尾，普通曲目两者均为 0。
+  int _segmentStartMs = 0;
+  int _segmentEndMs = 0;
+  // 段起点 seek 后 BASS 实际报告的位置。部分解码器（如 TTA）定位会偏离请求值，
+  // 进度零点必须用这个真实位置，否则进度条与声音错位。
+  int _segmentStartActualMs = 0;
+  double _segmentDurationSeconds = 0;
   bool _mixerUsesQueue = false;
   int? _queuedStream;
   bool _queuedStreamAttached = false;
@@ -130,6 +295,26 @@ class BassPlayer {
   int? _smartOutgoingStream;
   int _mixerGeneration = 0;
   bool _streamWasapiExclusive = false;
+  /// WASAPI 独占输出的实际采样率；共享模式固定按 44100 处理。
+  int _wasapiOutputFrequency = 44100;
+  /// 共享设备初始化后的实际采样率，来源于 BASS_GetInfo。
+  int _sharedOutputFrequency = 44100;
+  String _wasapiActualFormatLabel = 'float32';
+  bool _preferredExclusive = false;
+  int _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+  String _sharedOutputDeviceName = '';
+  int _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+  String _wasapiOutputDeviceName = '';
+  int _outputSampleRate = 0;
+  BassOutputFormat _outputFormat = BassOutputFormat.float32;
+  bool _outputRebuildInProgress = false;
+  ({String path, double position, bool wasPlaying, int startMs, int endMs})?
+  _pendingOutputRestore;
+  bool _lastInitUsedDefaultDevice = false;
+  bool _lastWasapiInitUsedDefaultDevice = false;
+  bool _wasapiInitialized = false;
+  bool _wasapiStarted = false;
+  bool _freed = false;
   bool _transitionHandledCompletion = false;
 
   double? _replayGainDb;
@@ -399,6 +584,36 @@ class BassPlayer {
         'wasapi=$_wasapiOutputInfo';
   }
 
+  /// 规范化段范围：起点不早于 0，终点必须晚于起点，否则按到文件尾处理。
+  static ({int startMs, int endMs}) normalizePlaybackSegment(
+    int startMs,
+    int endMs,
+  ) {
+    final start = math.max(0, startMs);
+    return (startMs: start, endMs: endMs > start ? endMs : 0);
+  }
+
+  /// 段时长（秒）。终点为 0 表示到文件尾，此时返回 0。
+  static double segmentDurationSeconds({
+    required int startMs,
+    required int endMs,
+  }) {
+    final start = math.max(0, startMs);
+    return endMs > start ? (endMs - start) / 1000.0 : 0.0;
+  }
+
+  /// 段内相对位置转换为源流内的绝对位置，并夹在段范围内。
+  static double segmentAbsoluteSeconds({
+    required double position,
+    required int startMs,
+    required int endMs,
+  }) {
+    final startSeconds = math.max(0, startMs) / 1000.0;
+    final target = position + startSeconds;
+    if (endMs <= startMs) return target;
+    return target.clamp(startSeconds, endMs / 1000.0);
+  }
+
   /// audio's length in seconds
   double get length {
     _promoteDequeuedSource();
@@ -412,6 +627,10 @@ class BassPlayer {
     if (_fstream == null) {
       _cachedLengthSeconds = null;
       return 1.0;
+    }
+    if (_segmentDurationSeconds > 0) {
+      _cachedLengthSeconds = _segmentDurationSeconds;
+      return _segmentDurationSeconds;
     }
     final len = _bass.BASS_ChannelBytes2Seconds(
       _fstream!,
@@ -434,6 +653,11 @@ class BassPlayer {
         ? _bass.BASS_ChannelGetPosition(source, bass.BASS_POS_BYTE)
         : _bassMix!.channelGetPosition(source, bass.BASS_POS_BYTE);
     if (posBytes == -1) {
+      final segmentPlayback =
+          _segmentStartMs > 0 || _segmentDurationSeconds > 0;
+      final segmentFallback = _segmentDurationSeconds > 0
+          ? _segmentDurationSeconds
+          : (_cachedLengthSeconds ?? 0.0);
       final errCode = _bass.BASS_ErrorGetCode();
       if (errCode == bass.BASS_ERROR_HANDLE) {
         if (_mixerStream != null) {
@@ -442,6 +666,8 @@ class BassPlayer {
           freeFStream();
         }
       }
+      // 段尾源被移除后位置会读不到，返回段尾，避免进度条跳回开头。
+      if (segmentPlayback) return segmentFallback;
       return 0.0;
     }
 
@@ -457,10 +683,11 @@ class BassPlayer {
       }
     }
 
-    return _bass.BASS_ChannelBytes2Seconds(
-      _fstream!,
-      finalBytes,
-    ).clamp(0.0, length);
+    var seconds = _bass.BASS_ChannelBytes2Seconds(_fstream!, finalBytes);
+    if (_segmentStartActualMs > 0) {
+      seconds -= _segmentStartActualMs / 1000.0;
+    }
+    return seconds.clamp(0.0, length);
   }
 
   PlayerState get playerState {
@@ -688,11 +915,13 @@ class BassPlayer {
     final info = calloc<bass_wasapi.BASS_WASAPI_INFO>();
     try {
       if (_bassWasapi.BASS_WASAPI_GetInfo(info) == bass.FALSE) {
+        _wasapiActualFormatLabel = 'unknown';
         _wasapiOutputInfo =
             'unknown requested=2x${(requestedBufferSec * 1000).round()}ms async=1';
         return;
       }
       final value = info.ref;
+      if (value.freq > 0) _wasapiOutputFrequency = value.freq;
       final format = switch (value.format) {
         bass_wasapi.BASS_WASAPI_FORMAT_FLOAT => ('float32', 4),
         bass_wasapi.BASS_WASAPI_FORMAT_8BIT => ('8bit', 1),
@@ -701,6 +930,7 @@ class BassPlayer {
         bass_wasapi.BASS_WASAPI_FORMAT_32BIT => ('32bit', 4),
         _ => ('format${value.format}', 0),
       };
+      _wasapiActualFormatLabel = format.$1;
       final frameBytes = value.chans * format.$2;
       final bufferMs = value.freq > 0 && frameBytes > 0
           ? (value.buflen * 1000 / value.freq / frameBytes).round()
@@ -1596,12 +1826,100 @@ class BassPlayer {
   }
 
   void _bassInit({bool resetHandles = true}) {
-    // 先释放旧设备，确保可以使用 -1 (默认设备) 重新初始化
+    // 独占输出由独立 add-on 持有，重建 BASS 基座前必须先释放。
+    _stopWasapiOutputIfNeeded();
+    // 先释放旧设备，确保可以重新初始化
     _bass.BASS_Free();
     if (resetHandles) _resetBassHandles();
     _applyOutputBufferConfig();
 
-    if (_bass.BASS_Init(-1, 44100, 0, ffi.nullptr, ffi.nullptr) == 0) {
+    _lastInitUsedDefaultDevice = false;
+    final requestedDevice = _sharedOutputDeviceId;
+    var device = _validatedSharedDeviceId(requestedDevice);
+    if (device != requestedDevice) {
+      // 设备增删会让编号变化，按保存的设备名精确解析一次。
+      final remapped = _matchDeviceIdByName(
+        _enumerateSharedOutputDevices(),
+        _sharedOutputDeviceName,
+        scope: 'shared',
+      );
+      if (remapped >= 0) {
+        device = remapped;
+        _sharedOutputDeviceId = remapped;
+        log.bass.info(
+          'legacy',
+          '[bass] shared output device $requestedDevice remapped to '
+              '$remapped by name "${_sharedOutputDeviceName.trim()}"',
+        );
+      } else {
+        _lastInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output device $requestedDevice is unavailable, '
+              'falling back to system default',
+        );
+      }
+    }
+
+    final requestedRate = !_preferredExclusive && _outputSampleRate > 0
+        ? _outputSampleRate
+        : 44100;
+    var initialized = _bass.BASS_Init(
+      device,
+      requestedRate,
+      0,
+      ffi.nullptr,
+      ffi.nullptr,
+    );
+    if (initialized == 0 && requestedRate != 44100) {
+      final code = _bass.BASS_ErrorGetCode();
+      if (code == bass.BASS_ERROR_FORMAT || code == bass.BASS_ERROR_UNKNOWN) {
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output does not accept ${requestedRate}Hz, '
+              'falling back to 44100Hz',
+        );
+        _bass.BASS_Free();
+        initialized = _bass.BASS_Init(
+          device,
+          44100,
+          0,
+          ffi.nullptr,
+          ffi.nullptr,
+        );
+      }
+    }
+    if (initialized == 0 && device != -1) {
+      final code = _bass.BASS_ErrorGetCode();
+      if (code == bass.BASS_ERROR_DEVICE || code == bass.BASS_ERROR_DRIVER) {
+        _lastInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] shared output device $device failed to initialize, '
+              'falling back to system default',
+        );
+        _bass.BASS_Free();
+        initialized = _bass.BASS_Init(
+          -1,
+          requestedRate,
+          0,
+          ffi.nullptr,
+          ffi.nullptr,
+        );
+        if (initialized == 0 && requestedRate != 44100) {
+          _bass.BASS_Free();
+          initialized = _bass.BASS_Init(
+            -1,
+            44100,
+            0,
+            ffi.nullptr,
+            ffi.nullptr,
+          );
+        }
+      }
+    }
+
+    if (initialized == 0) {
       switch (_bass.BASS_ErrorGetCode()) {
         case bass.BASS_ERROR_DEVICE:
           throw const FormatException('device is invalid.');
@@ -1634,6 +1952,11 @@ class BassPlayer {
       }
     }
 
+    _refreshSharedOutputInfo();
+
+    // BASS_SetConfig 只影响之后创建的流：设备重建后先对齐 DSD 解码频率。
+    _applyDsdFreqConfig();
+
     // BASS_Free() 会释放所有 BASS 对象，包括 bass_fx.dll 创建的 tempo 流。
     _bassFx = null;
     _bassFxLib?.close();
@@ -1648,9 +1971,630 @@ class BassPlayer {
     _reapplyMidiSoundfont();
   }
 
+  void _refreshSharedOutputInfo() {
+    final info = calloc<bass.BASS_INFO>();
+    try {
+      if (_bass.BASS_GetInfo(info) != bass.FALSE) {
+        final frequency = info.ref.freq;
+        if (frequency > 0) _sharedOutputFrequency = frequency;
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to read shared output info',
+        error: err,
+        stackTrace: trace,
+      );
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  /// 共享设备号从 1 开始；-1 表示系统默认。
+  int _validatedSharedDeviceId(int id) {
+    if (id == PlaybackPreference.defaultOutputDeviceId) return id;
+    if (id < 1) return PlaybackPreference.defaultOutputDeviceId;
+    final info = calloc<bass.BASS_DEVICEINFO>();
+    try {
+      if (_bass.BASS_GetDeviceInfo(id, info) == bass.FALSE) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      final flags = info.ref.flags;
+      if ((flags & bass.BASS_DEVICE_INPUT) != 0 ||
+          (flags & bass.BASS_DEVICE_DISABLED) != 0 ||
+          (flags & bass.BASS_DEVICE_UNPLUGGED) != 0) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      return id;
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to inspect shared device $id',
+        error: err,
+        stackTrace: trace,
+      );
+      return PlaybackPreference.defaultOutputDeviceId;
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  /// WASAPI 设备号从 0 开始；-1 表示系统默认。
+  int _validatedWasapiDeviceId(int id) {
+    if (id == PlaybackPreference.defaultOutputDeviceId) return id;
+    if (id < 0) return PlaybackPreference.defaultOutputDeviceId;
+    final info = calloc<bass_wasapi.BASS_WASAPI_DEVICEINFO>();
+    try {
+      if (_bassWasapi.BASS_WASAPI_GetDeviceInfo(id, info) == bass.FALSE) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      final flags = info.ref.flags;
+      if ((flags & bass.BASS_DEVICE_INPUT) != 0 ||
+          (flags & bass.BASS_DEVICE_DISABLED) != 0 ||
+          (flags & bass.BASS_DEVICE_UNPLUGGED) != 0) {
+        return PlaybackPreference.defaultOutputDeviceId;
+      }
+      return id;
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to inspect WASAPI device $id',
+        error: err,
+        stackTrace: trace,
+      );
+      return PlaybackPreference.defaultOutputDeviceId;
+    } finally {
+      calloc.free(info);
+    }
+  }
+
+  String _readDeviceString(ffi.Pointer<ffi.Char> pointer) {
+    if (pointer == ffi.nullptr) return '';
+    var length = 0;
+    while (length < 1024 && pointer.elementAt(length).value != 0) {
+      length++;
+    }
+    if (length == 0) return '';
+    final bytes = pointer.cast<ffi.Uint8>().asTypedList(length);
+    try {
+      return utf8.decode(bytes);
+    } catch (err) {
+      // BASS 的设备名来自系统 ANSI 代码页，中文 Windows 上为 GBK。
+      log.bass.debug(
+        'legacy',
+        '[bass] device name is not UTF-8: $err',
+      );
+    }
+    try {
+      return gbk.decode(bytes);
+    } catch (err) {
+      // 未知代码页交给 latin1 保证不崩溃。
+      log.bass.debug(
+        'legacy',
+        '[bass] device name is not GBK: $err',
+      );
+    }
+    return latin1.decode(bytes);
+  }
+
+  List<BassOutputDevice> _enumerateSharedOutputDevices() {
+    final devices = <BassOutputDevice>[
+      const BassOutputDevice(
+        id: PlaybackPreference.defaultOutputDeviceId,
+        name: '系统默认',
+        isDefault: true,
+      ),
+    ];
+    try {
+      for (var index = 1; index <= 256; index++) {
+        final info = calloc<bass.BASS_DEVICEINFO>();
+        try {
+          if (_bass.BASS_GetDeviceInfo(index, info) == bass.FALSE) break;
+          final flags = info.ref.flags;
+          if ((flags & bass.BASS_DEVICE_ENABLED) == 0) continue;
+          if ((flags & bass.BASS_DEVICE_INPUT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DEFAULT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DISABLED) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_UNPLUGGED) != 0) continue;
+          final name = _readDeviceString(info.ref.name).trim();
+          devices.add(
+            BassOutputDevice(
+              id: index,
+              name: name.isEmpty ? '输出设备 $index' : name,
+              isDefault: false,
+            ),
+          );
+        } finally {
+          calloc.free(info);
+        }
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to enumerate shared output devices',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+    return devices;
+  }
+
+  List<BassOutputDevice> _enumerateWasapiOutputDevices() {
+    final devices = <BassOutputDevice>[
+      const BassOutputDevice(
+        id: PlaybackPreference.defaultOutputDeviceId,
+        name: '系统默认',
+        isDefault: true,
+      ),
+    ];
+    try {
+      for (var index = 0; index <= 256; index++) {
+        final info = calloc<bass_wasapi.BASS_WASAPI_DEVICEINFO>();
+        try {
+          if (_bassWasapi.BASS_WASAPI_GetDeviceInfo(index, info) ==
+              bass.FALSE) {
+            break;
+          }
+          final flags = info.ref.flags;
+          if ((flags & bass.BASS_DEVICE_ENABLED) == 0) continue;
+          if ((flags & bass.BASS_DEVICE_INPUT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_LOOPBACK) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DEFAULT) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_DISABLED) != 0) continue;
+          if ((flags & bass.BASS_DEVICE_UNPLUGGED) != 0) continue;
+          final name = _readDeviceString(info.ref.name).trim();
+          devices.add(
+            BassOutputDevice(
+              id: index,
+              name: name.isEmpty ? '独占设备 $index' : name,
+              isDefault: false,
+            ),
+          );
+        } finally {
+          calloc.free(info);
+        }
+      }
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to enumerate WASAPI output devices',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+    return devices;
+  }
+
+  /// 按设备名精确匹配设备号：trim 后小写相等，不做包含匹配。
+  ///
+  /// 未命中返回 -1（系统默认），并记录 WARN 便于定位设备被替换或改名的情况。
+  int _matchDeviceIdByName(
+    List<BassOutputDevice> devices,
+    String name, {
+    required String scope,
+  }) {
+    final target = name.trim();
+    if (target.isEmpty) return PlaybackPreference.defaultOutputDeviceId;
+    final lower = target.toLowerCase();
+    for (final device in devices) {
+      if (device.id < 0) continue;
+      if (device.name.trim().toLowerCase() == lower) return device.id;
+    }
+    log.bass.warn(
+      'legacy',
+      '[bass] $scope output device "$target" not found by exact name, '
+          'using system default',
+    );
+    return PlaybackPreference.defaultOutputDeviceId;
+  }
+
+  /// 枚举输出设备。共享与独占使用各自的编号空间，默认项 id 均为 -1。
+  Future<List<BassOutputDevice>> enumerateOutputDevices({
+    bool exclusive = false,
+  }) async {
+    return exclusive
+        ? _enumerateWasapiOutputDevices()
+        : _enumerateSharedOutputDevices();
+  }
+
+  String get _activeOutputDeviceName =>
+      _preferredExclusive ? _wasapiOutputDeviceName : _sharedOutputDeviceName;
+
+  BassOutputState get outputState {
+    final exclusive = wasapiExclusive || _streamWasapiExclusive;
+    final usedDefault = exclusive
+        ? _lastWasapiInitUsedDefaultDevice
+        : _lastInitUsedDefaultDevice;
+    final configuredName =
+        (exclusive ? _wasapiOutputDeviceName : _sharedOutputDeviceName).trim();
+    return BassOutputState(
+      deviceId: exclusive ? _wasapiOutputDeviceId : _sharedOutputDeviceId,
+      deviceName: usedDefault || configuredName.isEmpty
+          ? '系统默认'
+          : configuredName,
+      exclusive: exclusive,
+      sampleRate: exclusive ? _wasapiOutputFrequency : _sharedOutputFrequency,
+      formatLabel: exclusive
+          ? _wasapiActualFormatLabel
+          : '系统混音（由设备决定）',
+    );
+  }
+
+  BassOutputConfig get outputConfig => _currentOutputConfig();
+
+  /// 更新当前模式的设备号。真正生效需要调用 [rebuildOutput]。
+  void setOutputDevice(int id) {
+    if (_preferredExclusive) {
+      _wasapiOutputDeviceId = id;
+    } else {
+      _sharedOutputDeviceId = id;
+    }
+  }
+
+  void _applyStoredOutputPreference() {
+    try {
+      final pref = AppPreference.instance.playbackPref;
+      _preferredExclusive = pref.isExclusiveOutput;
+      _outputSampleRate = pref.outputSampleRate;
+      _outputFormat = bassOutputFormatFromPreference(pref.outputFormat);
+      _sharedOutputDeviceId = pref.sharedOutputDeviceId;
+      _sharedOutputDeviceName = pref.sharedOutputDeviceName;
+      _wasapiOutputDeviceId = pref.wasapiOutputDeviceId;
+      _wasapiOutputDeviceName = pref.wasapiOutputDeviceName;
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to read stored output preference, using defaults',
+        error: err,
+        stackTrace: trace,
+      );
+      _preferredExclusive = false;
+      _sharedOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _sharedOutputDeviceName = '';
+      _wasapiOutputDeviceId = PlaybackPreference.defaultOutputDeviceId;
+      _wasapiOutputDeviceName = '';
+      _outputSampleRate = 0;
+      _outputFormat = BassOutputFormat.float32;
+    }
+  }
+
+  BassOutputConfig _currentOutputConfig() {
+    return BassOutputConfig(
+      deviceId: _preferredExclusive
+          ? _wasapiOutputDeviceId
+          : _sharedOutputDeviceId,
+      deviceName: _activeOutputDeviceName,
+      exclusive: _preferredExclusive,
+      sampleRate: _outputSampleRate,
+      format: _outputFormat,
+    );
+  }
+
+  _OutputSnapshot _outputSnapshot() {
+    return (
+      sharedId: _sharedOutputDeviceId,
+      sharedName: _sharedOutputDeviceName,
+      wasapiId: _wasapiOutputDeviceId,
+      wasapiName: _wasapiOutputDeviceName,
+      exclusive: _preferredExclusive,
+      rate: _outputSampleRate,
+      format: _outputFormat,
+    );
+  }
+
+  void _restoreOutputSnapshot(_OutputSnapshot snapshot) {
+    _sharedOutputDeviceId = snapshot.sharedId;
+    _sharedOutputDeviceName = snapshot.sharedName;
+    _wasapiOutputDeviceId = snapshot.wasapiId;
+    _wasapiOutputDeviceName = snapshot.wasapiName;
+    _preferredExclusive = snapshot.exclusive;
+    _outputSampleRate = snapshot.rate;
+    _outputFormat = snapshot.format;
+  }
+
+  void _adoptOutputConfig(BassOutputConfig config) {
+    _preferredExclusive = config.exclusive;
+    _outputSampleRate = config.sampleRate;
+    _outputFormat = config.format;
+    final name = config.deviceName.trim();
+    if (config.exclusive) {
+      _wasapiOutputDeviceId = config.deviceId;
+      _wasapiOutputDeviceName = name;
+    } else {
+      _sharedOutputDeviceId = config.deviceId;
+      _sharedOutputDeviceName = name;
+    }
+  }
+
+  /// 应用新的输出设备/模式/采样率/格式。失败时回退到调用前的输出并返回失败。
+  Future<BassOutputApplyResult> applyOutputConfig(BassOutputConfig config) async {
+    if (_outputRebuildInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _outputRebuildInProgress = true;
+    final previous = _outputSnapshot();
+    try {
+      _adoptOutputConfig(config);
+      final result = await _rebuildOutputInternal();
+      if (result.success) return result;
+
+      log.bass.warn(
+        'legacy',
+        '[bass] output switch failed, rolling back: ${result.message}',
+      );
+      _restoreOutputSnapshot(previous);
+      final rollback = await _rebuildOutputInternal();
+      return result.copyWith(
+        rolledBack: rollback.success,
+        message: rollback.success
+            ? '${result.message}；已回退到原输出'
+            : '${result.message}；回退原输出也失败：${rollback.message}',
+      );
+    } catch (err, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] output switch crashed',
+        error: err,
+        stackTrace: trace,
+      );
+      _restoreOutputSnapshot(previous);
+      try {
+        await _rebuildOutputInternal();
+      } catch (rollbackError, rollbackTrace) {
+        log.bass.error(
+          'legacy',
+          '[bass] output rollback crashed',
+          error: rollbackError,
+          stackTrace: rollbackTrace,
+        );
+      }
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+      );
+    } finally {
+      _outputRebuildInProgress = false;
+    }
+  }
+
+  /// 按当前保存的输出参数重建输出。用于设备热插拔后的手动恢复。
+  Future<BassOutputApplyResult> rebuildOutput() async {
+    if (_outputRebuildInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _outputRebuildInProgress = true;
+    try {
+      final result = await _rebuildOutputInternal();
+      return result;
+    } finally {
+      _outputRebuildInProgress = false;
+    }
+  }
+
+  Future<BassOutputApplyResult> _rebuildOutputInternal() async {
+    final restore = _pendingOutputRestore;
+    final previousState = restore != null
+        ? (restore.wasPlaying ? PlayerState.playing : PlayerState.paused)
+        : (_fstream != null ? playerState : PlayerState.unknown);
+    final path = restore?.path ?? _fPath;
+    final hasRestore = restore != null;
+    final hadSource = hasRestore || (_fstream != null && path != null);
+    final savedPosition = restore?.position ?? (hadSource ? position : 0.0);
+    final wasPlaying = previousState == PlayerState.playing;
+    final savedVolume = _baseOutputVolume;
+    final savedReplayGain = _replayGainDb;
+    final savedStartMs = restore?.startMs ?? _segmentStartMs;
+    final savedEndMs = restore?.endMs ?? _segmentEndMs;
+    final wasExclusive = wasapiExclusive || _streamWasapiExclusive;
+    final targetExclusive = _preferredExclusive;
+    _lastWasapiInitUsedDefaultDevice = false;
+    if (hadSource && path != null) {
+      // 失败回退时 _fstream 已经释放，恢复信息必须留到期重建结束。
+      _pendingOutputRestore = (
+        path: path,
+        position: savedPosition,
+        wasPlaying: wasPlaying,
+        startMs: savedStartMs,
+        endMs: savedEndMs,
+      );
+    }
+
+    _logAudioState('rebuildOutput(begin,exclusive=$targetExclusive)');
+
+    try {
+      if (wasExclusive) _stopWasapiOutputIfNeeded();
+      _removeEQ();
+      _removeAudioEffects();
+      _releaseOutputHandles();
+
+      // 共享基座始终先初始化；独占输出随后由 BASS_WASAPI 接管。
+      _bassInit();
+      wasapiExclusive = targetExclusive;
+      _streamWasapiExclusive = false;
+
+      if (targetExclusive && hadSource) {
+        _streamWasapiExclusive = true;
+        final handle = _createDecodeStream(path!);
+        if (handle == 0) {
+          throw Exception('Failed to create exclusive decode stream');
+        }
+        _fstream = handle;
+        _segmentStartMs = savedStartMs;
+        _segmentEndMs = savedEndMs;
+        _applySegmentRange(handle, startMs: savedStartMs, endMs: savedEndMs);
+        _segmentStartActualMs = _resolveSegmentStartActualMs(
+          handle,
+          savedStartMs,
+        );
+        _refreshCachedLength();
+        _bassWasapiInit();
+        if (savedPosition > 0) seek(savedPosition);
+        if (wasPlaying &&
+            _bassWasapi.BASS_WASAPI_Start() == bass.FALSE) {
+          throw Exception('Failed to start WASAPI output');
+        }
+        if (wasPlaying) _wasapiStarted = true;
+      } else if (!targetExclusive && hadSource) {
+        _createSharedStream(
+          path!,
+          savedPosition,
+          startPlayback: wasPlaying,
+          startMs: savedStartMs,
+          endMs: savedEndMs,
+        );
+      }
+
+      _baseOutputVolume = savedVolume;
+      _replayGainDb = savedReplayGain;
+      _applyPlaybackGains();
+      _refreshStreamSampleRate();
+      _spectrumTickPeriod = _computeSpectrumTickPeriod();
+      _lastSpectrumUpdateUs = 0;
+      if (hadSource) {
+        _playerStateStreamController.add(
+          wasPlaying ? PlayerState.playing : PlayerState.paused,
+        );
+        if (wasPlaying) _startPositionUpdater();
+      }
+      _pendingOutputRestore = null;
+
+      final state = outputState;
+      final usedDefault = targetExclusive
+          ? _lastWasapiInitUsedDefaultDevice
+          : _lastInitUsedDefaultDevice;
+      _logAudioState('rebuildOutput(done)');
+      return BassOutputApplyResult(
+        success: true,
+        message: usedDefault ? '输出设备不可用，已回退到系统默认设备' : '音频输出已切换',
+        usedDefaultDevice: usedDefault,
+        sampleRate: state.sampleRate,
+        formatLabel: state.formatLabel,
+      );
+    } catch (err, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] output rebuild failed: ${_activeOutputDeviceName.isEmpty ? '默认设备' : _activeOutputDeviceName}',
+        error: err,
+        stackTrace: trace,
+      );
+      _playerStateStreamController.add(PlayerState.paused);
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+        usedDefaultDevice:
+            _lastInitUsedDefaultDevice || _lastWasapiInitUsedDefaultDevice,
+      );
+    }
+  }
+
+  /// BASS_Free 之前显式断开所有原生句柄，避免混音器/队列/淡出流悬挂。
+  void _releaseOutputHandles() {
+    _cancelOutputGainFade(keepTarget: true);
+    _fadeInTimer?.cancel();
+    _fadeInTimer = null;
+    _cancelEqSmoothing();
+    _fadeOutTimer?.cancel();
+    _fadeOutTimer = null;
+    _transitionTimer?.cancel();
+    _transitionTimer = null;
+    _handledCompletionClearTimer?.cancel();
+    _handledCompletionClearTimer = null;
+    _positionUpdaterVersion++;
+    _positionUpdater?.cancel();
+    _positionUpdater = null;
+
+    final fadeOut = _fadeOutHandle;
+    final fadeOutRemove = _fadeOutRemoveFromMixer;
+    _fadeOutHandle = null;
+    _fadeOutRemoveFromMixer = false;
+    if (fadeOut != null) {
+      if (fadeOutRemove) _bassMix?.channelRemove(fadeOut);
+      _bass.BASS_ChannelStop(fadeOut);
+      _bass.BASS_StreamFree(fadeOut);
+    }
+
+    final oldTransition = _transitionOldStream;
+    _transitionOldStream = null;
+    _cancelTransition();
+    if (oldTransition != null &&
+        oldTransition != _fstream &&
+        oldTransition != fadeOut) {
+      _bass.BASS_StreamFree(oldTransition);
+    }
+
+    final smartPreparation = _smartPreparation;
+    final smartIncomingOwned = _smartIncomingNativeOwned;
+    _smartPreparation = null;
+    _smartIncomingNativeOwned = false;
+    if (smartPreparation != null && !smartIncomingOwned) {
+      _bass.BASS_StreamFree(smartPreparation.incomingHandle);
+    }
+
+    final smartOutgoing = _smartOutgoingStream;
+    _smartOutgoingStream = null;
+    _activeSmartTransitionId = null;
+    if (smartOutgoing != null && smartOutgoing != _fstream) {
+      _bass.BASS_StreamFree(smartOutgoing);
+    }
+    _smartOutgoingPath = null;
+    _lingeringPath = null;
+
+    _dropQueuedGaplessSource();
+
+    final mixer = _mixerStream;
+    final mixerOwnsSource = _mixerUsesQueue;
+    _mixerStream = null;
+    _mixerUsesQueue = false;
+    if (mixer != null) {
+      _bass.BASS_ChannelStop(mixer);
+      _bass.BASS_StreamFree(mixer);
+    }
+
+    final source = _fstream;
+    _fstream = null;
+    if (source != null &&
+        source != fadeOut &&
+        source != oldTransition &&
+        !(mixer != null && mixerOwnsSource)) {
+      _bass.BASS_ChannelStop(source);
+      _bass.BASS_StreamFree(source);
+    }
+
+    _cachedLengthSeconds = null;
+    _streamWasapiExclusive = false;
+    wasapiExclusive = false;
+    _wasapiOutputInfo = 'off';
+    _eqChannel = null;
+    _bfxEqHandle = 0;
+    _eqHandles.clear();
+    _dspFxHandles.clear();
+    _dspChannel = null;
+    _publishAudioFiles();
+  }
+
   void _applyOutputBufferConfig() {
     _bass.BASS_SetConfig(bass.BASS_CONFIG_BUFFER, _playbackBufferMs);
     _bass.BASS_SetConfig(bass.BASS_CONFIG_DEV_BUFFER, _deviceBufferMs);
+  }
+
+  /// 让 DSD 解码频率跟随当前输出采样率，避免解码到 88200Hz 后再重采样。
+  /// BASS_SetConfig 只影响之后创建的流，因此每个建流入口都会重新应用。
+  void _applyDsdFreqConfig() {
+    final target = (wasapiExclusive || _streamWasapiExclusive)
+        ? _wasapiOutputFrequency
+        : _sharedOutputFrequency;
+    if (_bass.BASS_SetConfig(bass.BASS_CONFIG_DSD_FREQ, target) == bass.FALSE) {
+      log.bass.warn(
+        'legacy',
+        '[bass] failed to set DSD freq=$target: ${_bass.BASS_ErrorGetCode()}',
+      );
+    }
   }
 
   bool _startDevice() {
@@ -1678,13 +2622,19 @@ class BassPlayer {
 
   void _restoreSharedSource(String audioPath, double position) {
     _fPath = audioPath;
-    _createSharedStream(audioPath, position);
+    _createSharedStream(
+      audioPath,
+      position,
+      startMs: _segmentStartMs,
+      endMs: _segmentEndMs,
+    );
   }
 
   /// load bass.dll from the exe's path\\dll\\BASS
   /// ensure that there's bass.dll at path of .exe\\dll\\BASS
   /// leave the device's output freq as it is
   BassPlayer() {
+    _applyStoredOutputPreference();
     _positionStreamController = StreamController<double>.broadcast(
       onListen: _syncPositionUpdaterPeriod,
       onCancel: _syncPositionUpdaterPeriod,
@@ -1789,6 +2739,7 @@ class BassPlayer {
     }
     _bassLib = bassLib;
     _bass = bass.Bass(bassLib);
+    _bassUrl = BassUrl(bassLib);
     try {
       _bassChannelGetData = bassLib
           .lookupFunction<
@@ -1808,7 +2759,6 @@ class BassPlayer {
       final wasapiLib = ffi.DynamicLibrary.open(
         path.join(_bassDir, 'basswasapi.dll'),
       );
-      _bassWasapiLib = wasapiLib;
       _bassWasapi = bass_wasapi.BassWasapi(wasapiLib);
     } catch (e) {
       log.bass.error('legacy', '[bass] FATAL: Cannot load basswasapi.dll: $e');
@@ -1840,8 +2790,16 @@ class BassPlayer {
             'legacy',
             '[bass] Plugin load failed: $pluginFullPath (error $errCode)',
           );
+          log.app.warn(
+            'legacy',
+            '[bass] Plugin load failed: path=$pluginFullPath error=$errCode',
+          );
         } else {
           log.bass.debug('legacy', '[bass] Plugin loaded: $name');
+          log.app.debug(
+            'legacy',
+            '[bass] Plugin loaded: $name ($pluginFullPath)',
+          );
         }
         malloc.free(pluginPathP);
       }
@@ -1853,6 +2811,9 @@ class BassPlayer {
     } catch (err) {
       log.bass.error('legacy', '[bass] Init failed: $err');
     }
+    // 偏好独占时先标记模式；真正初始化 WASAPI 推迟到有解码流之后。
+    wasapiExclusive = _preferredExclusive;
+    _streamWasapiExclusive = false;
 
     // ─── 7. 预加载 BASS_FX（在 bass.dll 已就绪时加载，避免后续依赖解析问题） ─
     _loadBassFx();
@@ -1989,49 +2950,73 @@ class BassPlayer {
   }
 
   int _createSharedSource(String audioPath) {
+    _applyDsdFreqConfig();
     const flags =
         bass.BASS_UNICODE |
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    var handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      flags,
-    );
-    malloc.free(pathPointer);
+    var handle = _isUrl(audioPath)
+        ? _createUrlStream(
+            audioPath,
+            flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+          )
+        : _createFileStream(audioPath, flags);
     if (handle == 0) return 0;
 
-    if (_bassFx != null) {
+    // 默认速率与音高下不套 tempo：少一层 DSP，整轨文件定位更快。
+    final hasRate = (_rate - 1.0).abs() > 1e-6;
+    final hasPitch = _pitch.abs() > 1e-6;
+    final needsTempo = _bassFx != null && (hasRate || hasPitch);
+    if (needsTempo) {
       final tempoHandle = _bassFx!.BASS_FX_TempoCreate(
         handle,
         BASS_FX_FREESOURCE | bass.BASS_STREAM_DECODE,
       );
       if (tempoHandle != 0) {
         handle = tempoHandle;
+      } else {
+        log.bass.warn(
+          'legacy',
+          '[bass] tempo stream unavailable, fallback to decode stream: '
+              '${_bass.BASS_ErrorGetCode()}',
+        );
       }
     }
-    if (_rate != 1.0) {
-      _bass.BASS_ChannelSetAttribute(
-        handle,
-        BASS_ATTRIB_TEMPO,
-        (_rate - 1.0) * 100.0,
+    if (hasRate &&
+        _bass.BASS_ChannelSetAttribute(
+              handle,
+              BASS_ATTRIB_TEMPO,
+              (_rate - 1.0) * 100.0,
+            ) ==
+            0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] set tempo on new source failed: ${_bass.BASS_ErrorGetCode()}',
       );
     }
-    if (_pitch != 0.0) {
-      _bass.BASS_ChannelSetAttribute(handle, BASS_ATTRIB_TEMPO_PITCH, _pitch);
+    if (hasPitch &&
+        _bass.BASS_ChannelSetAttribute(
+              handle,
+              BASS_ATTRIB_TEMPO_PITCH,
+              _pitch,
+            ) ==
+            0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] set pitch on new source failed: ${_bass.BASS_ErrorGetCode()}',
+      );
     }
     return handle;
   }
 
   int _createDirectSharedStream(String audioPath) {
-    const playableFlags =
-        bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
+    _applyDsdFreqConfig();
 
-    if (_bassFx != null) {
+    final needsTempo =
+        _bassFx != null &&
+        ((_rate - 1.0).abs() > 1e-6 || _pitch.abs() > 1e-6);
+    if (needsTempo) {
       final source = _createDecodeStream(audioPath);
       if (source != 0) {
         try {
@@ -2066,23 +3051,30 @@ class BassPlayer {
       }
     }
 
-    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    final handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      playableFlags,
-    );
-    malloc.free(pathPointer);
-    return handle;
+    if (_isUrl(audioPath)) {
+      return _createUrlStream(audioPath, flags: bass.BASS_SAMPLE_FLOAT);
+    }
+
+    const playableFlags =
+        bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
+    return _createFileStream(audioPath, playableFlags);
   }
 
-  int _createSharedPlaybackSource(String audioPath) {
+  int _createSharedPlaybackSource(
+    String audioPath, {
+    int startMs = 0,
+    int endMs = 0,
+  }) {
     if (_bassMix != null) {
       final source = _createSharedSource(audioPath);
       if (source == 0) return 0;
-      if (_createMixerForSource(source)) {
+      // 段起点必须在加入混音器之前定位，混音器按 source 当前位置取数据。
+      _seekSegmentStart(source, startMs);
+      final segmentSeconds = segmentDurationSeconds(
+        startMs: startMs,
+        endMs: endMs,
+      );
+      if (_createMixerForSource(source, segmentSeconds)) {
         _muteSharedOutputForFadeIn();
         return source;
       }
@@ -2094,10 +3086,119 @@ class BassPlayer {
     }
     final direct = _createDirectSharedStream(audioPath);
     if (direct != 0) {
+      _applySegmentRange(direct, startMs: startMs, endMs: endMs);
       _setDspVolumePriority(direct);
       _bass.BASS_ChannelSetAttribute(direct, bass.BASS_ATTRIB_VOL, 0.0);
     }
     return direct;
+  }
+
+  /// 读取流当前绝对位置（毫秒）；读不到返回 -1。
+  int _currentPositionMs(int handle) {
+    final posBytes = _bass.BASS_ChannelGetPosition(handle, bass.BASS_POS_BYTE);
+    if (posBytes < 0) return -1;
+    final seconds = _bass.BASS_ChannelBytes2Seconds(handle, posBytes);
+    return seconds < 0 ? -1 : (seconds * 1000).round();
+  }
+
+  /// 把段起点定位到 [startMs]；解码器偏离目标时归零后重试一次。
+  void _seekSegmentStart(int handle, int startMs) {
+    if (startMs <= 0) return;
+    final startBytes = _bass.BASS_ChannelSeconds2Bytes(
+      handle,
+      startMs / 1000.0,
+    );
+    if (startBytes <= 0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment start conversion failed: start=${startMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+      return;
+    }
+    final seeked =
+        _bass.BASS_ChannelSetPosition(
+          handle,
+          startBytes,
+          bass.BASS_POS_BYTE,
+        ) !=
+        0;
+    if (!seeked) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment start seek failed: start=${startMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+    }
+    final firstMs = seeked ? _currentPositionMs(handle) : -1;
+    if (firstMs >= 0 && (firstMs - startMs).abs() <= 50) return;
+    // 部分解码器首次定位会停在旧位置，先归零再定位一次。
+    _bass.BASS_ChannelSetPosition(handle, 0, bass.BASS_POS_BYTE);
+    final retried =
+        _bass.BASS_ChannelSetPosition(
+          handle,
+          startBytes,
+          bass.BASS_POS_BYTE,
+        ) !=
+        0;
+    final retryMs = retried ? _currentPositionMs(handle) : -1;
+    if (retryMs < 0 || (retryMs - startMs).abs() > 50) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment start seek off target: start=${startMs}ms '
+            'first=${firstMs}ms retry=${retryMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+    }
+  }
+
+  /// 段起点 seek 后的真实绝对位置，作为进度零点；读不到时回退请求值。
+  int _resolveSegmentStartActualMs(int handle, int requestedMs) {
+    // 普通曲目没有段偏移，零点必须保持 0。
+    if (requestedMs <= 0) return 0;
+    final actualMs = _currentPositionMs(handle);
+    if (actualMs < 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment start position unavailable: requested=${requestedMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+      return requestedMs;
+    }
+    return actualMs;
+  }
+
+  /// 直连/独占流没有混音器，段起点用 BASS_POS_BYTE 定位，段尾用 BASS_POS_END 截断。
+  void _applySegmentRange(
+    int handle, {
+    required int startMs,
+    required int endMs,
+  }) {
+    _seekSegmentStart(handle, startMs);
+    if (endMs <= startMs) return;
+    final endBytes = _bass.BASS_ChannelSeconds2Bytes(handle, endMs / 1000.0);
+    final totalBytes = _bass.BASS_ChannelGetLength(handle, bass.BASS_POS_BYTE);
+    if (endBytes <= 0 || totalBytes <= 0 || endBytes >= totalBytes) {
+      log.app.warn(
+        'legacy',
+        '[bass] segment end skipped: end=${endMs}ms endBytes=$endBytes '
+            'totalBytes=$totalBytes',
+      );
+      return;
+    }
+    // BASS_POS_END 表示距流末尾的距离，不是绝对位置。
+    if (_bass.BASS_ChannelSetPosition(
+          handle,
+          totalBytes - endBytes,
+          bass.BASS_POS_END,
+        ) ==
+        0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] segment end set failed: end=${endMs}ms '
+            'error=${_bass.BASS_ErrorGetCode()}',
+      );
+    }
   }
 
   void _muteSharedOutputForFadeIn() {
@@ -2107,7 +3208,7 @@ class BassPlayer {
     }
   }
 
-  bool _createMixerForSource(int source) {
+  bool _createMixerForSource(int source, [double segmentSeconds = 0]) {
     final mix = _bassMix;
     final channel = _bassChannel;
     final sync = _bassSync;
@@ -2163,12 +3264,18 @@ class BassPlayer {
           return false;
         }
       }
-      if (!mix.streamAddChannel(
+      // 段尾靠混音器播放长度截断；长度按混音器输出格式换算，0 表示不限。
+      final lengthBytes = segmentSeconds > 0
+          ? _bass.BASS_ChannelSeconds2Bytes(output, segmentSeconds)
+          : 0;
+      if (!mix.streamAddChannelEx(
         output,
         source,
         bassMixerChanDownmix |
             bassMixerChanNoRampIn |
             (seamless ? bassStreamAutofree : 0),
+        0,
+        lengthBytes,
       )) {
         _bass.BASS_StreamFree(output);
         return false;
@@ -2859,10 +3966,16 @@ class BassPlayer {
 
   /// true: 操作成功；false: 操作失败
   bool useExclusiveMode(bool exclusive) {
+    _pendingOutputRestore = null;
     _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     final prevState = wasapiExclusive;
-    if (exclusive == prevState) return true;
+    if (exclusive == prevState) {
+      _preferredExclusive = exclusive;
+      return true;
+    }
+    // 两种模式各用自己记录的设备；目标模式未记录时按系统默认初始化。
+    _preferredExclusive = exclusive;
     try {
       if (exclusive && !hasAudioSource) {
         const message = '独占模式未切换：当前没有可用的音频流';
@@ -2891,6 +4004,15 @@ class BassPlayer {
         if (decodeHandle == 0) {
           throw Exception('Failed to create decode stream');
         }
+        _applySegmentRange(
+          decodeHandle,
+          startMs: _segmentStartMs,
+          endMs: _segmentEndMs,
+        );
+        final actualStartMs = _resolveSegmentStartActualMs(
+          decodeHandle,
+          _segmentStartMs,
+        );
 
         // 2) 预初始化 WASAPI，旧流继续通过 BASS 播放
         _positionUpdaterVersion++;
@@ -2927,6 +4049,7 @@ class BassPlayer {
 
         // 4) 启动 WASAPI 输出
         _fstream = decodeHandle;
+        _segmentStartActualMs = actualStartMs;
         _bass.BASS_ChannelSetAttribute(
           decodeHandle,
           bass.BASS_ATTRIB_VOLDSP,
@@ -2939,8 +4062,10 @@ class BassPlayer {
           return false;
         }
         if (wasPlaying) {
+          _wasapiStarted = true;
           _fadeInWasapiVolume(targetVolume);
         } else {
+          _wasapiStarted = false;
           setVolumeDsp(targetVolume);
         }
         _playerStateStreamController.add(
@@ -2956,15 +4081,20 @@ class BassPlayer {
         _positionUpdaterVersion++;
         _positionUpdater?.cancel();
         _positionUpdater = null;
-        _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
-        _bassWasapi.BASS_WASAPI_Free();
+        _releaseWasapiOutput();
         _bass.BASS_StreamFree(_fstream!);
         _fstream = null;
         _streamWasapiExclusive = false;
         wasapiExclusive = false;
         _bassInit(resetHandles: false);
         if (_fPath != null) {
-          _createSharedStream(_fPath!, lastPos, startPlayback: wasPlaying);
+          _createSharedStream(
+            _fPath!,
+            lastPos,
+            startPlayback: wasPlaying,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          );
         }
       } else {
         wasapiExclusive = exclusive;
@@ -2974,6 +4104,7 @@ class BassPlayer {
       }
 
       onExclusiveModeChanged?.call(wasapiExclusive);
+      _preferredExclusive = wasapiExclusive;
       return wasapiExclusive == exclusive;
     } catch (err, trace) {
       log.bass.error('legacy', '切换独占模式失败', error: err, stackTrace: trace);
@@ -2981,15 +4112,31 @@ class BassPlayer {
       _playerStateStreamController.add(playerState);
     }
     wasapiExclusive = _fstream != null && _streamWasapiExclusive;
+    _preferredExclusive = wasapiExclusive;
     onExclusiveModeChanged?.call(wasapiExclusive);
     return false;
   }
 
   void _stopWasapiOutputIfNeeded() {
-    if (!wasapiExclusive && !_streamWasapiExclusive) return;
-    _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
-    _bassWasapi.BASS_WASAPI_Free();
-    _wasapiOutputInfo = 'off';
+    if (!wasapiExclusive &&
+        !_streamWasapiExclusive &&
+        !_wasapiInitialized &&
+        !_wasapiStarted) {
+      return;
+    }
+    _releaseWasapiOutput();
+  }
+
+  void _releaseWasapiOutput({bool updateInfo = true}) {
+    if (_wasapiStarted) {
+      _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
+    }
+    if (_wasapiInitialized || _wasapiStarted) {
+      _bassWasapi.BASS_WASAPI_Free();
+    }
+    _wasapiInitialized = false;
+    _wasapiStarted = false;
+    if (updateInfo) _wasapiOutputInfo = 'off';
   }
 
   /// Rebuilds the audio stream after output-mode changes.
@@ -3024,27 +4171,132 @@ class BassPlayer {
     _cachedLengthSeconds = null;
 
     wasapiExclusive
-        ? _createWasapiStream(path, seekTo, startPlayback: startPlayback)
-        : _createSharedStream(path, seekTo, startPlayback: startPlayback);
+        ? _createWasapiStream(
+            path,
+            seekTo,
+            startPlayback: startPlayback,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          )
+        : _createSharedStream(
+            path,
+            seekTo,
+            startPlayback: startPlayback,
+            startMs: _segmentStartMs,
+            endMs: _segmentEndMs,
+          );
     _logAudioState('_rebuildStream(done)');
   }
 
+  /// 创建文件流。插件格式在 `BASS_ASYNCFILE` 下可能被判定为不支持，
+  /// 首次失败后去掉该标志重试一次；`.tak` 直接按同步方式打开。
+  int _createFileStream(String audioPath, int flags) {
+    final syncFirst = path.extension(audioPath).toLowerCase() == '.tak';
+    final firstFlags = syncFirst ? flags & ~bass.BASS_ASYNCFILE : flags;
+    var handle = _streamCreateFile(audioPath, firstFlags);
+    if (handle != 0) return handle;
+    final firstError = _bass.BASS_ErrorGetCode();
+    final fileFields = _audioFileLogFields(audioPath);
+    if ((firstFlags & bass.BASS_ASYNCFILE) == 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] stream create failed: file=${path.basename(audioPath)} '
+            '$fileFields flags=0x${firstFlags.toRadixString(16)} '
+            'error=$firstError(${bassErrorText(firstError)})',
+      );
+      return 0;
+    }
+    final retryFlags = firstFlags & ~bass.BASS_ASYNCFILE;
+    handle = _streamCreateFile(audioPath, retryFlags);
+    if (handle != 0) {
+      log.app.warn(
+        'legacy',
+        '[bass] stream create required sync io: '
+            'file=${path.basename(audioPath)} $fileFields '
+            'flags=0x${firstFlags.toRadixString(16)} '
+            'error=$firstError(${bassErrorText(firstError)})',
+      );
+      return handle;
+    }
+    final retryError = _bass.BASS_ErrorGetCode();
+    log.app.warn(
+      'legacy',
+      '[bass] stream create failed after retry: '
+          'file=${path.basename(audioPath)} $fileFields '
+          'flags=0x${firstFlags.toRadixString(16)} '
+          'retryFlags=0x${retryFlags.toRadixString(16)} '
+          'error=$firstError(${bassErrorText(firstError)}) '
+          'retryError=$retryError(${bassErrorText(retryError)})',
+    );
+    return 0;
+  }
+
+  /// 失败日志附带的扩展名与文件大小；读取失败时大小为 -1，不抛到调用方。
+  String _audioFileLogFields(String audioPath) {
+    final extension = path.extension(audioPath).toLowerCase();
+    final extensionText = extension.isEmpty ? '<none>' : extension;
+    var size = -1;
+    try {
+      size = File(audioPath).lengthSync();
+    } catch (err, trace) {
+      log.app.debug(
+        'legacy',
+        '[bass] failed to read audio file size: ext=$extensionText '
+            'error=${err.runtimeType}',
+        stackTrace: trace,
+      );
+    }
+    return 'ext=$extensionText sizeBytes=$size';
+  }
+
+  int _streamCreateFile(String audioPath, int flags) {
+    final pathPointer = audioPath.toNativeUtf16() as ffi.Pointer<ffi.Void>;
+    try {
+      return _bass.BASS_StreamCreateFile(bass.FALSE, pathPointer, 0, 0, flags);
+    } finally {
+      malloc.free(pathPointer);
+    }
+  }
+
+  static bool _isUrl(String value) {
+    final lower = value.toLowerCase();
+    return lower.startsWith('http://') || lower.startsWith('https://');
+  }
+
+  int _createUrlStream(String url, {required int flags}) {
+    final handle = _bassUrl.streamCreateUrl(url, flags: flags);
+    if (handle == 0) {
+      log.bass.warn(
+        'legacy',
+        '[bass] URL stream failed: ${_redactUrlForLog(url)}',
+      );
+    }
+    return handle;
+  }
+
+  static String _redactUrlForLog(String url) {
+    final newline = url.indexOf('\r\n');
+    final address = newline < 0 ? url : url.substring(0, newline);
+    final uri = Uri.tryParse(address);
+    if (uri == null || uri.host.isEmpty) return '<url>';
+    final port = uri.hasPort ? ':${uri.port}' : '';
+    return '${uri.scheme}://${uri.host}$port${uri.path}';
+  }
+
   int _createDecodeStream(String path) {
+    _applyDsdFreqConfig();
+    if (_isUrl(path)) {
+      return _createUrlStream(
+        path,
+        flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+      );
+    }
     const flags =
         bass.BASS_UNICODE |
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    final pathPointer = path.toNativeUtf16() as ffi.Pointer<ffi.Void>;
-    final handle = _bass.BASS_StreamCreateFile(
-      bass.FALSE,
-      pathPointer,
-      0,
-      0,
-      flags,
-    );
-    malloc.free(pathPointer);
-    return handle;
+    return _createFileStream(path, flags);
   }
 
   /// 创建独占模式流
@@ -3052,14 +4304,18 @@ class BassPlayer {
     String path,
     double seekTo, {
     bool startPlayback = true,
+    int startMs = 0,
+    int endMs = 0,
   }) {
     final handle = _createDecodeStream(path);
     if (handle == 0) {
       throw Exception('Failed to create WASAPI exclusive stream');
     }
+    _applySegmentRange(handle, startMs: startMs, endMs: endMs);
 
     _fstream = handle;
     _streamWasapiExclusive = true;
+    _segmentStartActualMs = _resolveSegmentStartActualMs(handle, startMs);
     _refreshStreamSampleRate();
     _refreshCachedLength();
 
@@ -3079,14 +4335,21 @@ class BassPlayer {
     String path,
     double seekTo, {
     bool startPlayback = true,
+    int startMs = 0,
+    int endMs = 0,
   }) {
-    final handle = _createSharedPlaybackSource(path);
+    final handle = _createSharedPlaybackSource(
+      path,
+      startMs: startMs,
+      endMs: endMs,
+    );
     if (handle == 0) {
       throw Exception('Failed to create shared source');
     }
 
     _fstream = handle;
     _streamWasapiExclusive = false;
+    _segmentStartActualMs = _resolveSegmentStartActualMs(handle, startMs);
     _refreshStreamSampleRate();
     _refreshCachedLength();
     if (seekTo > 0.0) {
@@ -3206,8 +4469,17 @@ class BassPlayer {
 
   /// if setSource has been called once,
   /// it will pause current channel and free current stream.
-  void setSource(String path) {
+  /// [startMs]/[endMs] 是 CUE 虚拟轨的段范围，普通曲目保持默认 0。
+  void setSource(String path, {int startMs = 0, int endMs = 0}) {
+    _pendingOutputRestore = null;
     _cancelPendingPause();
+    final segment = normalizePlaybackSegment(startMs, endMs);
+    final effectiveStart = segment.startMs;
+    final effectiveEnd = segment.endMs;
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
+    _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _replayGainDb = null;
     _activeGaplessTransitionId = null;
@@ -3243,13 +4515,37 @@ class BassPlayer {
       _cachedLengthSeconds = null;
       _streamWasapiExclusive = false;
     }
-    final handle = wasapiExclusive
-        ? _createDecodeStream(path)
-        : _createSharedPlaybackSource(path);
+    final int handle;
+    if (wasapiExclusive) {
+      handle = _createDecodeStream(path);
+      if (handle != 0) {
+        _applySegmentRange(
+          handle,
+          startMs: effectiveStart,
+          endMs: effectiveEnd,
+        );
+      }
+    } else {
+      handle = _createSharedPlaybackSource(
+        path,
+        startMs: effectiveStart,
+        endMs: effectiveEnd,
+      );
+    }
 
     if (handle != 0) {
       _fstream = handle;
       _fPath = path;
+      _segmentStartMs = effectiveStart;
+      _segmentEndMs = effectiveEnd;
+      _segmentStartActualMs = _resolveSegmentStartActualMs(
+        handle,
+        effectiveStart,
+      );
+      _segmentDurationSeconds = segmentDurationSeconds(
+        startMs: effectiveStart,
+        endMs: effectiveEnd,
+      );
       // 标记当前流是否为独占模式流
       _streamWasapiExclusive = wasapiExclusive;
       _refreshStreamSampleRate();
@@ -3272,7 +4568,7 @@ class BassPlayer {
       switch (_bass.BASS_ErrorGetCode()) {
         case bass.BASS_ERROR_INIT:
           _bassInit();
-          setSource(path);
+          setSource(path, startMs: effectiveStart, endMs: effectiveEnd);
           break;
         case bass.BASS_ERROR_NOTAVAIL:
           throw const FormatException(
@@ -3363,6 +4659,78 @@ class BassPlayer {
     if (keepTarget && target != null) _baseOutputVolume = target;
   }
 
+  /// tempo 句柄支持读取 BASS_ATTRIB_TEMPO；普通 decode 流读取失败。
+  bool _sourceSupportsTempo(int handle) {
+    final value = malloc.allocate<ffi.Float>(ffi.sizeOf<ffi.Float>());
+    try {
+      return _bass.BASS_ChannelGetAttribute(
+            handle,
+            BASS_ATTRIB_TEMPO,
+            value,
+          ) !=
+          0;
+    } finally {
+      malloc.free(value);
+    }
+  }
+
+  /// 开启变速/变调时，当前源若没有 tempo 层就按原加载路径重建，
+  /// 并恢复播放位置与播放状态，避免属性设置静默失效。
+  void _ensureTempoCapableSource() {
+    final current = _fstream;
+    final sourcePath = _fPath;
+    if (_bassFx == null || current == null || sourcePath == null) return;
+    if (wasapiExclusive || _streamWasapiExclusive) return;
+    if (_sourceSupportsTempo(current)) return;
+    if (_fadeOutHandle != null || _transitionOldStream != null) {
+      log.bass.warn(
+        'legacy',
+        '[bass] tempo source rebuild skipped during transition',
+      );
+      return;
+    }
+    final resumePosition = _getPosition();
+    final replayGainDb = _replayGainDb;
+    final wasPlaying =
+        _bass.BASS_ChannelIsActive(_sharedOutputHandle!) ==
+        bass.BASS_ACTIVE_PLAYING;
+    try {
+      setSource(sourcePath, startMs: _segmentStartMs, endMs: _segmentEndMs);
+    } catch (error, trace) {
+      log.bass.error(
+        'legacy',
+        '[bass] tempo source rebuild failed: $error\n$trace',
+      );
+      return;
+    }
+    if (_fstream == null) return;
+    // setSource 会清空 ReplayGain，重建后恢复当前增益。
+    if (_replayGainDb != replayGainDb) {
+      _replayGainDb = replayGainDb;
+      _applyPlaybackGains();
+    }
+    if (resumePosition > 0.0) {
+      try {
+        seek(resumePosition);
+      } catch (error, trace) {
+        log.bass.warn(
+          'legacy',
+          '[bass] tempo source reposition failed: $error\n$trace',
+        );
+      }
+    }
+    if (wasPlaying) {
+      try {
+        start();
+      } catch (error, trace) {
+        log.bass.error(
+          'legacy',
+          '[bass] tempo source resume failed: $error\n$trace',
+        );
+      }
+    }
+  }
+
   void setRate(double rate) {
     _rate = rate;
     if (_fstream == null) return;
@@ -3380,6 +4748,10 @@ class BassPlayer {
     // 尝试设置 Tempo (百分比变化)
     // 1.0 -> 0%, 1.5 -> 50%, 0.5 -> -50%
     final tempo = (_rate - 1.0) * 100.0;
+    if ((_rate - 1.0).abs() > 1e-6) {
+      _ensureTempoCapableSource();
+      if (_fstream == null) return;
+    }
 
     // 优先尝试使用 BASS_FX 的 Tempo 属性
     if (_bass.BASS_ChannelSetAttribute(_fstream!, BASS_ATTRIB_TEMPO, tempo) ==
@@ -3421,6 +4793,11 @@ class BassPlayer {
       return;
     }
 
+    if (_pitch.abs() > 1e-6) {
+      _ensureTempoCapableSource();
+      if (_fstream == null) return;
+    }
+
     _bass.BASS_ChannelSetAttribute(_fstream!, BASS_ATTRIB_TEMPO_PITCH, pitch);
     final queued = _queuedStream;
     if (queued != null) {
@@ -3433,25 +4810,54 @@ class BassPlayer {
 
     // 重置WASAPI状态
     _wasapiOutputInfo = 'initializing';
-    _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
-    _bassWasapi.BASS_WASAPI_Free();
+    _releaseWasapiOutput(updateInfo: false);
+
+    _lastWasapiInitUsedDefaultDevice = false;
+    final requestedDevice = _wasapiOutputDeviceId;
+    var device = _validatedWasapiDeviceId(requestedDevice);
+    if (device != requestedDevice) {
+      // WASAPI 端点编号同样会随设备增删变化，按保存的设备名精确解析一次。
+      final remapped = _matchDeviceIdByName(
+        _enumerateWasapiOutputDevices(),
+        _wasapiOutputDeviceName,
+        scope: 'wasapi',
+      );
+      if (remapped >= 0) {
+        device = remapped;
+        _wasapiOutputDeviceId = remapped;
+        log.bass.info(
+          'legacy',
+          '[bass] WASAPI device $requestedDevice remapped to $remapped '
+              'by name "${_wasapiOutputDeviceName.trim()}"',
+        );
+      } else {
+        _lastWasapiInitUsedDefaultDevice = true;
+        log.bass.warn(
+          'legacy',
+          '[bass] WASAPI device $requestedDevice is unavailable, '
+              'falling back to system default',
+        );
+      }
+    }
 
     // 添加 AUTOFORMAT 和 BUFFER 标志
-    const flags =
+    final flags =
         bass_wasapi.BASS_WASAPI_EXCLUSIVE |
         bass_wasapi.BASS_WASAPI_AUTOFORMAT |
         bass_wasapi.BASS_WASAPI_EVENT |
         bass_wasapi.BASS_WASAPI_BUFFER |
-        bass_wasapi.BASS_WASAPI_ASYNC;
+        bass_wasapi.BASS_WASAPI_ASYNC |
+        (_outputFormat.wasapiFormatIndex << 16);
     // 根据音频采样率动态计算缓冲区，高码率文件自动获得更大缓冲
     final bufferSec = _computeWasapiBufferSec();
-    const initFreq = 0; // 让 WASAPI 自动选择合适的采样率
+    // 0 = 跟随设备的混音格式采样率
+    final initFreq = _outputSampleRate > 0 ? _outputSampleRate : 0;
 
     // WASAPI 初始化重试机制：最多重试 3 次以解决 BASS_ERROR_BUSY
     int result = bass.FALSE;
     for (int attempt = 0; attempt < 3; attempt++) {
       result = _bassWasapi.BASS_WASAPI_Init(
-        -1, // 默认设备
+        device,
         initFreq,
         0, // 自动选择声道数
         flags,
@@ -3477,8 +4883,7 @@ class BassPlayer {
         case bass.BASS_ERROR_DEVICE:
           throw const FormatException('device is invalid.');
         case bass.BASS_ERROR_ALREADY:
-          _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
-          _bassWasapi.BASS_WASAPI_Free();
+          _releaseWasapiOutput(updateInfo: false);
           _bassWasapiInit();
           break;
         case bass.BASS_ERROR_NOTAVAIL:
@@ -3517,7 +4922,10 @@ class BassPlayer {
           throw const FormatException('Some other mystery problem!');
       }
     } else {
+      _wasapiInitialized = true;
+      _wasapiStarted = false;
       _refreshWasapiOutputInfo(bufferSec);
+      _applyDsdFreqConfig();
     }
   }
 
@@ -3544,6 +4952,8 @@ class BassPlayer {
         case bass.BASS_ERROR_UNKNOWN:
           throw const FormatException('Some other mystery problem!');
       }
+    } else {
+      _wasapiStarted = true;
     }
 
     // 正常启动（切歌/恢复），直接应用当前输出增益，不做淡入
@@ -3562,9 +4972,7 @@ class BassPlayer {
     _cancelPendingPause();
     final seekPos = position;
     final sourcePath = _fPath;
-    _bassWasapi.BASS_WASAPI_Stop(bass.TRUE);
-    _bassWasapi.BASS_WASAPI_Free();
-    _wasapiOutputInfo = 'off';
+    _releaseWasapiOutput();
     if (_fstream != null) {
       _bass.BASS_StreamFree(_fstream!);
       _fstream = null;
@@ -3655,6 +5063,7 @@ class BassPlayer {
 
   void _pauseWasapiExclusive() {
     if (_bassWasapi.BASS_WASAPI_Stop(bass.FALSE) == bass.TRUE) {
+      _wasapiStarted = false;
       _playerStateStreamController.add(playerState);
       _positionUpdater?.cancel();
       _emitPositionSnapshot();
@@ -3689,6 +5098,7 @@ class BassPlayer {
         handle != null &&
         _fstream == handle &&
         _bassWasapi.BASS_WASAPI_Stop(bass.FALSE) == bass.TRUE;
+    if (stopped) _wasapiStarted = false;
     _pauseFadeGain = 1.0;
     _applyPlaybackGains();
     _playerStateStreamController.add(playerState);
@@ -3801,10 +5211,19 @@ class BassPlayer {
   /// do nothing if [setSource] hasn't been called
   void seek(double position) {
     if (_fstream == null) return;
-    _logAudioState('seek(begin,$position)');
+    log.bass.debug('legacy', '[bass] seek(begin,$position)');
 
     final source = _fstream!;
-    final pos = _bass.BASS_ChannelSeconds2Bytes(source, position);
+    final output = _mixerStream;
+    final wasPlaying =
+        output != null &&
+        _bass.BASS_ChannelIsActive(output) == bass.BASS_ACTIVE_PLAYING;
+    final absolute = segmentAbsoluteSeconds(
+      position: position,
+      startMs: _segmentStartMs,
+      endMs: _segmentEndMs,
+    );
+    final pos = _bass.BASS_ChannelSeconds2Bytes(source, absolute);
     final positioned = _mixerStream == null
         ? _bass.BASS_ChannelSetPosition(source, pos, bass.BASS_POS_BYTE) != 0
         : _bassMix!.channelSetPosition(
@@ -3813,7 +5232,8 @@ class BassPlayer {
             bass.BASS_POS_BYTE | bassPosMixerReset,
           );
     if (!positioned) {
-      switch (_bass.BASS_ErrorGetCode()) {
+      final errorCode = _bass.BASS_ErrorGetCode();
+      switch (errorCode) {
         case bass.BASS_ERROR_HANDLE:
           throw const FormatException('handle is not a valid channel.');
         case bass.BASS_ERROR_NOTFILE:
@@ -3828,11 +5248,23 @@ class BassPlayer {
           );
         case bass.BASS_ERROR_UNKNOWN:
           throw const FormatException('Some other mystery problem!');
+        default:
+          log.bass.warn(
+            'legacy',
+            '[bass] seek failed at $position: $errorCode',
+          );
       }
     }
     _resetSpectrumSmoothing();
     _emitPositionSnapshot();
-    _logAudioState('seek(end,$position)');
+    // BASS_POS_MIXER_RESET 可能让输出停在 STOPPED；只恢复原本在播的输出，
+    // 不改动段尾截断语义，暂停/停止状态保持原样。
+    if (wasPlaying && output != null) {
+      final boundary = _cachedLengthSeconds ?? _segmentDurationSeconds;
+      final hasRoom = boundary <= 0 || position < boundary - 0.05;
+      if (hasRoom) _resumeOutputIfNeeded();
+    }
+    scheduleMicrotask(() => _logAudioState('seek(end,$position)'));
   }
 
   /// It is not necessary to individually free the samples/streams/musics
@@ -3840,6 +5272,11 @@ class BassPlayer {
   ///
   /// do nothing if [setSource] hasn't been called
   void freeFStream() {
+    _pendingOutputRestore = null;
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
+    _segmentDurationSeconds = 0;
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
@@ -3916,6 +5353,9 @@ class BassPlayer {
   ///
   /// Also free the bass.dll.
   void free() {
+    if (_freed) return;
+    _freed = true;
+    _pendingOutputRestore = null;
     _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
@@ -3960,6 +5400,10 @@ class BassPlayer {
     _fstream = null;
     _fPath = null;
     _cachedLengthSeconds = null;
+    _segmentStartMs = 0;
+    _segmentEndMs = 0;
+    _segmentStartActualMs = 0;
+    _segmentDurationSeconds = 0;
     _lingeringPath = null;
     _smartOutgoingPath = null;
     _queuedPath = null;
@@ -3993,7 +5437,7 @@ class BassPlayer {
     _bassFxLib?.close();
     _bassFxLib = null;
     _bassFx = null;
-    _bassWasapiLib.close();
+    // BASS_WASAPI 可能仍有系统音频回调，进程内不卸载其 DLL。
     _bassLib.close();
     _playerStateStreamController.close();
     _positionStreamController.close();

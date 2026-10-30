@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pure_music/lyric/japanese_romanizer.dart';
 import 'package:pure_music/lyric/lrc.dart';
 import 'package:pure_music/lyric/lrc_serializer.dart';
 import 'package:pure_music/lyric/lyric.dart';
@@ -68,6 +69,33 @@ void main() {
       expect(text, isNot(contains('<tt>')));
       expect(text, startsWith('[ar:Artist]\n[ti:Title]\n'));
       expect(text, contains('[00:01.000]<00:01.100>怕'));
+    });
+
+    test('locally generated romanization stays out of the written LRC', () {
+      final lyric = Lyric([
+        SyncLyricLine(
+          const Duration(seconds: 1),
+          const Duration(seconds: 2),
+          [
+            SyncLyricWord(
+              const Duration(seconds: 1),
+              const Duration(seconds: 2),
+              'ありがとう',
+            ),
+          ],
+        ),
+      ]);
+
+      applyAutoRomanization(lyric);
+      expect((lyric.lines.first as SyncLyricLine).romanLyric, 'arigatou');
+
+      final text = serializeLyricToLrc(
+        lyric,
+        wordFormat: LyricTagWordFormat.standard,
+      );
+
+      expect(text, contains('ありがとう'));
+      expect(text, isNot(contains('arigatou')));
     });
 
     for (final format in LyricTagWordFormat.values) {

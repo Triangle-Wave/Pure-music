@@ -5,8 +5,12 @@ import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
+import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/log/log_format.dart';
+import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/update_checker.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/window_lifecycle.dart';
 
@@ -46,6 +50,17 @@ bool isSafePortableEntryPath(String root, String relative) {
   }
   final dest = p.normalize(p.join(root, normalized.split('/').join(p.separator)));
   return p.isWithin(p.normalize(root), dest);
+}
+
+/// 安装助手日志是否在本次启动后产生：文件长度增长，或最后写入时间不早于启动时刻。
+bool installerLogShowsStart({
+  required DateTime startedAt,
+  required DateTime? modified,
+  required int? baselineLength,
+  required int currentLength,
+}) {
+  if (baselineLength != null && currentLength > baselineLength) return true;
+  return modified != null && !modified.isBefore(startedAt);
 }
 
 Future<void> verifyExtractedPortablePackage(String appDir) async {
@@ -266,6 +281,12 @@ class UpdateDownloadRecord {
         this.fileName != fileName) {
       return false;
     }
+    // 不同线路的残余字节不能续接：代理、Gitee 与直连的主机必须一致。
+    final savedHost = _recordUrlHost(this.url);
+    final nextHost = _recordUrlHost(url);
+    if (savedHost.isEmpty || nextHost.isEmpty || savedHost != nextHost) {
+      return false;
+    }
     if (expectedSize != null &&
         this.expectedSize != null &&
         this.expectedSize != expectedSize) {
@@ -303,6 +324,11 @@ String? _recordString(Object? value) {
   if (value is! String) return null;
   final normalized = value.trim();
   return normalized.isEmpty ? null : normalized;
+}
+
+String _recordUrlHost(String value) {
+  final uri = Uri.tryParse(value.trim());
+  return uri?.host.toLowerCase() ?? '';
 }
 
 String? updatePayloadPath(Directory directory, String fileName) {
@@ -402,7 +428,8 @@ Future<VerifiedUpdateNotice?> readVerifiedUpdateNotice({
   if (info.tagName.isEmpty) return null;
   return VerifiedUpdateNotice(
     info: info,
-    channel: UpdateChannel.parse(record.channelName) ?? UpdateChannel.github,
+    // 历史下载记录统一按 GitHub 渠道处理。
+    channel: UpdateChannel.supported,
     path: payload,
   );
 }
@@ -427,6 +454,9 @@ class UpdateInstaller {
   UpdateInstaller._();
 
   static const _portableSupportDirectory = '.update';
+  static const _installerHelperDirectory = 'tool';
+  static const _installerHelperFileName = 'apply_installer_update.ps1';
+  static const _installerUpdateLogFileName = 'installer_update.log';
 
   static Future<UpdateInstallOutcome> run({
     required UpdateInfo info,
@@ -445,6 +475,9 @@ class UpdateInstaller {
     return installDownloaded(savePath: savePath, onPhase: onPhase);
   }
 
+  /// 下载并按 version.json 的 SHA256 校验更新包。
+  ///
+  /// [channel] 仅保留调用方语义；实际下载线路由设置决定。
   static Future<String> downloadVerified({
     required UpdateInfo info,
     required UpdateChannel channel,
@@ -452,80 +485,235 @@ class UpdateInstaller {
     required UpdateProgressCallback onProgress,
     required UpdatePhaseCallback onPhase,
   }) async {
-    final url = info.downloadUrl(
-      channel: channel,
-      portableBuild: portableBuild,
+    final candidates = updateDownloadCandidates(
+      route: AppPreference.instance.updateDownloadRoute,
+      directUrl: info.downloadUrl(
+        channel: UpdateChannel.github,
+        portableBuild: portableBuild,
+      ),
+      giteeUrl: info.downloadUrl(
+        channel: UpdateChannel.gitee,
+        portableBuild: portableBuild,
+      ),
     );
-    if (url == null || url.isEmpty) {
+    log.update.debug(
+      'legacy',
+      '[UpdateInstaller] 下载线路 '
+      '${AppPreference.instance.updateDownloadRoute.name}',
+      fields: {
+        'channel': channel.name,
+        'candidates': candidates.length,
+      },
+    );
+    if (candidates.isEmpty) {
       throw UpdateInstallException('缺少下载地址');
-    }
-    if (!isAllowedUpdateDownloadUrl(url, channel)) {
-      throw UpdateInstallException('下载地址不可信');
     }
     ensureUpdateHasChecksum(
       info: info,
-      channel: channel,
+      channel: UpdateChannel.github,
       portableBuild: portableBuild,
     );
 
-    final expectedSha = await _resolveExpectedSha256(
+    // 校验值只取官方清单的 sha256（或官方源上的独立校验文件），与安装包
+    // 下载线路无关；代理只传输安装包，不能改写这里的期望值。
+    final expectedSha = await _resolveExpectedSha256ForDownload(
       info: info,
-      channel: channel,
       portableBuild: portableBuild,
       cancelToken: cancelToken,
     );
     final expectedSize = info.downloadSize(portableBuild: portableBuild);
-    final savePath = await _prepareResumeSave(
-      tagName: info.tagName,
-      url: url,
-      sha256: expectedSha,
-      expectedSize: expectedSize,
-    );
 
-    onPhase('正在下载');
     try {
+      final savePath = await runUpdateDownloadAttempts<String>(
+        candidates: candidates,
+        attempt: (candidate) => _downloadCandidate(
+          candidate: candidate,
+          tagName: info.tagName,
+          expectedSha: expectedSha,
+          expectedSize: expectedSize,
+          cancelToken: cancelToken,
+          onProgress: onProgress,
+          onPhase: onPhase,
+        ),
+        onFailure: (failure) {
+          log.update.warn(
+            'legacy',
+            '[UpdateInstaller] 下载线路失败：${failure.candidate.label} '
+            '${failure.detail}',
+            fields: {
+              'source': failure.candidate.source.name,
+              'host': failure.candidate.host,
+              'reason': failure.reason.name,
+              if (failure.statusCode != null) 'status': failure.statusCode,
+            },
+          );
+        },
+      );
+      return savePath;
+    } on UpdateDownloadAggregateException catch (error) {
+      throw UpdateInstallException(error.message);
+    }
+  }
+
+  /// 单条线路：下载、长度检查、SHA256 校验；任一步失败都只让该线路失败。
+  static Future<String> _downloadCandidate({
+    required UpdateDownloadCandidate candidate,
+    required String tagName,
+    required String expectedSha,
+    required int? expectedSize,
+    required CancelToken cancelToken,
+    required UpdateProgressCallback onProgress,
+    required UpdatePhaseCallback onPhase,
+  }) async {
+    try {
+      if (!isAllowedUpdateDownloadUrlForRoute(candidate.url)) {
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.invalidUrl,
+        );
+      }
+      final savePath = await _prepareResumeSave(
+        tagName: tagName,
+        url: candidate.url,
+        sha256: expectedSha,
+        expectedSize: expectedSize,
+      );
+
+      onPhase('正在下载');
       await _downloadResumable(
-        url: url,
+        url: candidate.url,
         savePath: savePath,
         expectedSize: expectedSize,
         cancelToken: cancelToken,
         onProgress: onProgress,
       );
-    } on DioException {
-      rethrow;
-    } on UpdateInstallException {
-      rethrow;
-    } catch (_) {
-      throw UpdateInstallException('下载失败');
-    }
 
-    final downloaded = File(savePath);
-    final downloadedLength = await downloaded.exists()
-        ? await downloaded.length()
-        : 0;
-    if (downloadedLength == 0) {
-      await _discardDownloadedUpdate(savePath);
-      throw UpdateInstallException('下载文件为空');
-    }
-    if (expectedSize != null && downloadedLength > expectedSize) {
-      await _discardDownloadedUpdate(savePath);
-      throw UpdateInstallException('下载失败');
-    }
-    if (expectedSize != null && downloadedLength < expectedSize) {
-      throw UpdateInstallException('下载未完成');
-    }
+      final downloaded = File(savePath);
+      final downloadedLength = await downloaded.exists()
+          ? await downloaded.length()
+          : 0;
+      if (downloadedLength == 0) {
+        await _discardDownloadedUpdate(savePath);
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.empty,
+        );
+      }
+      if (expectedSize != null && downloadedLength > expectedSize) {
+        await _discardDownloadedUpdate(savePath);
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.unknown,
+        );
+      }
+      if (expectedSize != null && downloadedLength < expectedSize) {
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.incomplete,
+        );
+      }
 
-    onPhase('正在校验');
-    try {
+      onPhase('正在校验');
       final ok = await _verifySha256(savePath, expectedSha);
       if (!ok) {
-        throw UpdateInstallException('校验失败，文件已删除');
+        await _discardDownloadedUpdate(savePath);
+        log.update.warn(
+          'legacy',
+          '[UpdateInstaller] 线路 SHA256 校验不通过，标记为不可信：'
+          '${candidate.label}',
+          fields: {
+            'source': candidate.source.name,
+            'host': candidate.host,
+            'sha256': expectedSha,
+          },
+        );
+        throw const UpdateDownloadAttemptException(
+          UpdateDownloadFailureReason.checksum,
+        );
       }
-    } catch (_) {
-      await _discardDownloadedUpdate(savePath);
+      log.update.info(
+        'legacy',
+        '[UpdateInstaller] 线路 SHA256 校验通过：${candidate.label}',
+        fields: {
+          'source': candidate.source.name,
+          'host': candidate.host,
+        },
+      );
+      return savePath;
+    } on UpdateDownloadAttemptException {
       rethrow;
+    } on DioException catch (error) {
+      throw UpdateDownloadAttemptException(
+        _failureReasonForDio(error),
+        statusCode: error.response?.statusCode,
+        cause: error,
+      );
+    } on UpdateInstallException catch (error) {
+      throw UpdateDownloadAttemptException(
+        _failureReasonForInstallMessage(error.message),
+        cause: error,
+      );
+    } on FileSystemException catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 写入更新文件失败：${error.message}',
+        fields: {
+          'host': candidate.host,
+          'path': error.path ?? '',
+        },
+        error: error,
+      );
+      throw UpdateDownloadAttemptException(
+        UpdateDownloadFailureReason.disk,
+        cause: error,
+      );
+    } catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 下载线路异常：${error.runtimeType}',
+        fields: {'host': candidate.host},
+        error: error,
+      );
+      throw UpdateDownloadAttemptException(
+        UpdateDownloadFailureReason.unknown,
+        cause: error,
+      );
     }
-    return savePath;
+  }
+
+  static UpdateDownloadFailureReason _failureReasonForDio(
+    DioException error,
+  ) {
+    final type = error.type;
+    if (type == DioExceptionType.connectionTimeout ||
+        type == DioExceptionType.receiveTimeout ||
+        type == DioExceptionType.sendTimeout) {
+      return UpdateDownloadFailureReason.timeout;
+    }
+    if (type == DioExceptionType.cancel) {
+      return UpdateDownloadFailureReason.cancelled;
+    }
+    if (type == DioExceptionType.badResponse) {
+      final status = error.response?.statusCode;
+      if (status == HttpStatus.notFound || status == HttpStatus.gone) {
+        return UpdateDownloadFailureReason.notFound;
+      }
+      if (status != null && status >= 500) {
+        return UpdateDownloadFailureReason.server;
+      }
+      return UpdateDownloadFailureReason.unknown;
+    }
+    return UpdateDownloadFailureReason.connection;
+  }
+
+  static UpdateDownloadFailureReason _failureReasonForInstallMessage(
+    String message,
+  ) {
+    if (message.contains('校验')) return UpdateDownloadFailureReason.checksum;
+    if (message.contains('路径非法') || message.contains('缺少下载地址')) {
+      return UpdateDownloadFailureReason.invalidUrl;
+    }
+    if (message.contains('为空')) return UpdateDownloadFailureReason.empty;
+    if (message.contains('未完成')) {
+      return UpdateDownloadFailureReason.incomplete;
+    }
+    return UpdateDownloadFailureReason.unknown;
   }
 
   static Future<UpdateInstallOutcome> installDownloaded({
@@ -535,19 +723,298 @@ class UpdateInstaller {
     if (portableBuild) {
       return _startPortableUpdate(archivePath: savePath, onPhase: onPhase);
     }
+    return _startInstallerUpdate(installerPath: savePath, onPhase: onPhase);
+  }
+
+  /// 安装版更新：助手等当前进程退出后再启动安装程序，保留交互式安装向导。
+  /// 安装完成后由安装程序的 Run 段启动新版，这里不额外重启。
+  static Future<UpdateInstallOutcome> _startInstallerUpdate({
+    required String installerPath,
+    required UpdatePhaseCallback onPhase,
+  }) async {
+    final appDir = p.dirname(Platform.resolvedExecutable);
+    final helperSourcePath = p.join(
+      appDir,
+      _installerHelperDirectory,
+      _installerHelperFileName,
+    );
+    final helperSource = File(helperSourcePath);
+
+    Directory updateDirectory;
+    try {
+      updateDirectory = await _updateSupportDirectory();
+    } catch (error, stackTrace) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 创建更新目录失败：$error',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UpdateInstallException(
+        '准备安装程序失败：无法创建更新目录。可手动运行：$installerPath',
+      );
+    }
+    final logPath = p.join(updateDirectory.path, _installerUpdateLogFileName);
+
+    await _recordInstallerStep(
+      logPath,
+      '进入安装：installerPath=$installerPath, appDir=$appDir, '
+      'exe=${Platform.resolvedExecutable}',
+    );
+    await _recordInstallerStep(
+      logPath,
+      '更新目录=${updateDirectory.path}, installerLog=$logPath',
+    );
+
+    var helperExists = false;
+    try {
+      helperExists = await helperSource.exists();
+    } catch (error, stackTrace) {
+      await _recordInstallerStep(
+        logPath,
+        '检查助手源文件失败：$helperSourcePath',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UpdateInstallException(
+        '启动安装程序失败：无法读取更新助手。可手动运行：$installerPath',
+      );
+    }
+    await _recordInstallerStep(
+      logPath,
+      '助手源文件=$helperSourcePath, exists=$helperExists',
+    );
+    if (!helperExists) {
+      await _recordInstallerStep(
+        logPath,
+        '更新组件缺失：$helperSourcePath',
+        isError: true,
+      );
+      throw UpdateInstallException(
+        '更新组件缺失，请手动运行已下载的安装包：$installerPath',
+      );
+    }
 
     onPhase('正在启动安装程序');
-    final process = await Process.start(
-      savePath,
-      const [],
-      workingDirectory: p.dirname(savePath),
-      mode: ProcessStartMode.detached,
+    final helperPath = p.join(
+      updateDirectory.path,
+      'pure_music_apply_installer_${DateTime.now().microsecondsSinceEpoch}.ps1',
+    );
+    await _recordInstallerStep(
+      logPath,
+      '复制助手：$helperSourcePath -> $helperPath',
+    );
+    try {
+      await helperSource.copy(helperPath);
+    } catch (error, stackTrace) {
+      await _recordInstallerStep(
+        logPath,
+        '复制助手失败：$helperPath',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      await _deleteQuietly(helperPath);
+      throw UpdateInstallException(
+        '准备安装程序失败：无法复制更新助手。可手动运行：$installerPath',
+      );
+    }
+    await _recordInstallerStep(logPath, '复制助手完成：$helperPath');
+
+    final arguments = <String>[
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      helperPath,
+      '-InstallerPath',
+      installerPath,
+      '-TargetProcessId',
+      '$pid',
+      '-AppExe',
+      Platform.resolvedExecutable,
+      '-LogPath',
+      logPath,
+    ];
+    await _recordInstallerStep(
+      logPath,
+      '启动命令：powershell.exe ${arguments.join(' ')}',
+    );
+
+    int? baselineLength = 0;
+    try {
+      final logFile = File(logPath);
+      if (await logFile.exists()) baselineLength = await logFile.length();
+    } catch (error, stackTrace) {
+      baselineLength = null;
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 读取安装助手日志基线失败：$error',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    final startedAt = DateTime.now();
+
+    Process process;
+    try {
+      process = await Process.start(
+        'powershell.exe',
+        arguments,
+        workingDirectory: updateDirectory.path,
+        mode: ProcessStartMode.detached,
+      );
+    } catch (error, stackTrace) {
+      await _recordInstallerStep(
+        logPath,
+        '启动安装助手失败：powershell.exe 启动异常',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UpdateInstallException(
+        '启动安装程序失败：$error。可手动运行：$installerPath',
+      );
+    }
+    log.update.info(
+      'legacy',
+      '[UpdateInstaller] Process.start 返回 pid=${process.pid}',
     );
     if (process.pid <= 0) {
-      throw UpdateInstallException('启动安装程序失败');
+      await _recordInstallerStep(
+        logPath,
+        '启动安装助手失败：进程未创建，保留脚本 $helperPath',
+        isError: true,
+      );
+      throw UpdateInstallException(
+        '启动安装程序失败：更新助手进程未创建。可手动运行：$installerPath',
+      );
     }
-    await WindowLifecycleService.instance.exitApp();
+
+    final confirmed = await _waitForInstallerLog(
+      logPath: logPath,
+      startedAt: startedAt,
+      baselineLength: baselineLength,
+    );
+    if (!confirmed) {
+      await _recordInstallerStep(
+        logPath,
+        '等待助手日志超时（1500ms），pid=${process.pid}，助手未启动，'
+        '保留脚本：$helperPath',
+        isError: true,
+      );
+      throw UpdateInstallException(
+        '安装助手未能启动，请手动运行：$installerPath',
+      );
+    }
+
+    await _recordInstallerStep(
+      logPath,
+      '助手已启动（pid=${process.pid}），准备退出当前程序',
+    );
+    await _recordInstallerStep(logPath, '调用 exitApp');
+    try {
+      await WindowLifecycleService.instance.exitApp();
+    } catch (error, stackTrace) {
+      await _recordInstallerStep(
+        logPath,
+        '退出当前程序失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UpdateInstallException(
+        '安装助手已启动，但无法退出当前程序，请手动关闭。可手动运行：$installerPath',
+      );
+    }
     return UpdateInstallOutcome.installerStarted;
+  }
+
+  /// 同时写入应用日志与安装助手日志；安装助手日志失败不阻断安装流程。
+  static Future<void> _recordInstallerStep(
+    String logPath,
+    String message, {
+    Object? error,
+    StackTrace? stackTrace,
+    bool isError = false,
+  }) async {
+    if (error != null || isError) {
+      log.update.error(
+        'legacy',
+        '[UpdateInstaller] $message',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    } else {
+      log.update.info('legacy', '[UpdateInstaller] $message');
+    }
+
+    final failed = error != null || isError;
+    final marker = failed ? ' [ERROR]' : '';
+    final buffer = StringBuffer(
+      '[${formatLogTime(DateTime.now())}] [Dart]$marker $message',
+    );
+    if (error != null) buffer.write('\n  error: $error');
+    final lines = stackTrace?.toString().split('\n');
+    if (lines != null) {
+      for (final line in lines) {
+        if (line.trim().isEmpty) continue;
+        buffer.write('\n  $line');
+      }
+    }
+    try {
+      await File(logPath).writeAsString(
+        '$buffer\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (writeError, writeStackTrace) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 写入安装助手日志失败：$writeError',
+        error: writeError,
+        stackTrace: writeStackTrace,
+      );
+    }
+  }
+
+  /// 轮询安装助手日志，确认助手确实写入了启动记录；超时返回 false。
+  static Future<bool> _waitForInstallerLog({
+    required String logPath,
+    required DateTime startedAt,
+    required int? baselineLength,
+    Duration timeout = const Duration(milliseconds: 1500),
+    Duration interval = const Duration(milliseconds: 100),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    final file = File(logPath);
+    var reportedError = false;
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        if (await file.exists()) {
+          final currentLength = await file.length();
+          final modified = await file.lastModified();
+          if (installerLogShowsStart(
+            startedAt: startedAt,
+            modified: modified,
+            baselineLength: baselineLength,
+            currentLength: currentLength,
+          )) {
+            return true;
+          }
+        }
+      } catch (error, stackTrace) {
+        if (!reportedError) {
+          reportedError = true;
+          log.update.warn(
+            'legacy',
+            '[UpdateInstaller] 检查安装助手日志失败：$error',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+      await Future<void>.delayed(interval);
+    }
+    return false;
   }
 
   static Future<UpdateInstallOutcome> _startPortableUpdate({
@@ -591,8 +1058,9 @@ class UpdateInstaller {
         throw UpdateInstallException('便携版更新包不完整');
       }
 
+      final updateDirectory = await _updateSupportDirectory();
       helperPath = p.join(
-        Directory.systemTemp.path,
+        updateDirectory.path,
         'pure_music_apply_update_${DateTime.now().microsecondsSinceEpoch}.ps1',
       );
       await applyScript.copy(helperPath);
@@ -614,7 +1082,7 @@ class UpdateInstaller {
           '-ProcessId',
           '$pid',
         ],
-        workingDirectory: Directory.systemTemp.path,
+        workingDirectory: updateDirectory.path,
         mode: ProcessStartMode.detached,
       );
       if (process.pid <= 0) {
@@ -624,14 +1092,36 @@ class UpdateInstaller {
       await _discardDownloadedUpdate(archivePath);
       await WindowLifecycleService.instance.exitApp();
       return UpdateInstallOutcome.portableStarted;
-    } catch (error) {
+    } catch (error, stackTrace) {
       if (!helperStarted) {
         await _deleteDirectoryQuietly(newAppDir.path);
         if (helperPath != null) await _deleteQuietly(helperPath);
       }
-      if (error is UpdateInstallException) rethrow;
+      if (error is UpdateInstallException) {
+        log.update.warn(
+          'legacy',
+          '便携版更新准备失败：${error.message}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        rethrow;
+      }
+      log.update.warn(
+        'legacy',
+        '便携版更新准备失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw UpdateInstallException('准备便携版更新失败');
     }
+  }
+
+  /// 更新助手脚本所在目录：`<数据根>\updates`，与更新包下载目录一致。
+  static Future<Directory> _updateSupportDirectory() async {
+    final root = await getAppDataDir();
+    return Directory(
+      p.join(root.path, updateDownloadDirectoryName),
+    ).create(recursive: true);
   }
 
   static Future<Directory> _createPortableUpdateDirectory(
@@ -685,7 +1175,7 @@ class UpdateInstaller {
     }
 
     try {
-      final response = await Dio().get<String>(
+      final response = await AppHttp.instance.dio.get<String>(
         checksumUrl,
         cancelToken: cancelToken,
         options: Options(
@@ -710,6 +1200,40 @@ class UpdateInstaller {
     } on UpdateInstallException {
       rethrow;
     } catch (_) {
+      throw UpdateInstallException('获取更新校验值失败');
+    }
+  }
+
+  /// 校验值的获取与下载线路无关；网络与读取异常统一转为可展示的安装错误。
+  static Future<String> _resolveExpectedSha256ForDownload({
+    required UpdateInfo info,
+    required bool portableBuild,
+    required CancelToken cancelToken,
+  }) async {
+    try {
+      final sha = await _resolveExpectedSha256(
+        info: info,
+        channel: UpdateChannel.github,
+        portableBuild: portableBuild,
+        cancelToken: cancelToken,
+      );
+      return sha;
+    } on UpdateInstallException {
+      rethrow;
+    } on DioException catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 获取更新校验值失败：${error.type.name}',
+        fields: {'status': error.response?.statusCode ?? 0},
+        error: error,
+      );
+      throw UpdateInstallException('获取更新校验值失败');
+    } catch (error) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 读取更新校验值异常：${error.runtimeType}',
+        error: error,
+      );
       throw UpdateInstallException('获取更新校验值失败');
     }
   }
@@ -828,7 +1352,7 @@ class UpdateInstaller {
     required CancelToken cancelToken,
     required UpdateProgressCallback onProgress,
   }) async {
-    final response = await Dio().get<ResponseBody>(
+    final response = await AppHttp.instance.dio.get<ResponseBody>(
       url,
       cancelToken: cancelToken,
       options: Options(
@@ -906,7 +1430,12 @@ class UpdateInstaller {
 
   static Future<void> _discardDownloadedUpdate(String savePath) async {
     await _deleteQuietly(savePath);
-    if (await File(savePath).exists()) return;
+    try {
+      if (await File(savePath).exists()) return;
+    } on FileSystemException {
+      // 无法确认删除结果时保留下载记录，避免下次续传错位。
+      return;
+    }
     await _deleteQuietly(
       p.join(p.dirname(savePath), updateDownloadStateFileName),
     );

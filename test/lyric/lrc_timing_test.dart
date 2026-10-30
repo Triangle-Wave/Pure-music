@@ -104,6 +104,30 @@ void main() {
     expect(firstLyric.words.first.start, const Duration(milliseconds: 21320));
   });
 
+  test('enhanced LRC does not duplicate the intro around kept metadata', () {
+    final lyric = Lrc.fromLrcTextAuto(
+      '[00:00.000]<00:00.000>作<00:00.510>词<00:01.020>：<00:01.520>GunkeyP<00:02.030>\n'
+      '[00:06.100]<00:06.100>作<00:06.600>曲<00:07.110>：<00:07.620>GunkeyP<00:08.130>\n'
+      '[00:12.190]<00:12.190>编<00:12.700>曲<00:13.210>：<00:13.720>GunkeyP<00:14.230>\n'
+      '[00:21.850]<00:21.850>不<00:22.190>经<00:22.670>意<00:22.910>被<00:23.250>钟<00:23.560>提<00:23.900>醒<00:24.720>未<00:25.060>读<00:25.380>的<00:25.660>讯<00:26.030>息<00:26.530>',
+      LyricFormat.local,
+      separator: '┃',
+      keepMetadata: true,
+    )!;
+
+    final lines = lyric.lines.whereType<SyncLyricLine>().toList();
+    final blankLines = lines.where((line) => line.words.isEmpty).toList();
+
+    expect(lines.first.words.single.content, contains('作词'));
+    expect(blankLines, isEmpty);
+    expect(lines.map((line) => line.start).toList(), [
+      Duration.zero,
+      const Duration(milliseconds: 6100),
+      const Duration(milliseconds: 12190),
+      const Duration(milliseconds: 21850),
+    ]);
+  });
+
   test(
     'enhanced LRC keeps adjacent original and translation groups separate',
     () {

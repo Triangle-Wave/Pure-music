@@ -1,21 +1,24 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:github/github.dart' as gh;
+import 'package:pure_music/core/app_http.dart';
+import 'package:pure_music/core/network_proxy.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/core/update_route.dart';
 import 'package:pure_music/core/utils.dart';
 
 enum UpdateChannel {
   github,
   gitee;
 
-  String get label => switch (this) {
-    UpdateChannel.github => 'GitHub 直连',
-    UpdateChannel.gitee => 'Gitee 镜像',
-  };
+  /// 清单与校验值的基准渠道；下载线路由设置单独决定。
+  static const supported = UpdateChannel.github;
 
-  UpdateChannel get alternate => switch (this) {
-    UpdateChannel.github => UpdateChannel.gitee,
-    UpdateChannel.gitee => UpdateChannel.github,
+  String get label => switch (this) {
+    UpdateChannel.github => 'GitHub',
+    UpdateChannel.gitee => 'Gitee 镜像',
   };
 
   static UpdateChannel? parse(Object? value) => switch (value) {
@@ -25,13 +28,50 @@ enum UpdateChannel {
   };
 }
 
+/// 更新检查失败的可区分原因，设置页据此给出可操作的提示。
+enum UpdateCheckFailure { rateLimited, timeout, connection, server, unknown }
+
 class UpdateCheckException implements Exception {
-  const UpdateCheckException(this.channel);
+  const UpdateCheckException(
+    this.channel, {
+    this.failure = UpdateCheckFailure.unknown,
+    this.statusCode,
+  });
 
   final UpdateChannel channel;
+  final UpdateCheckFailure failure;
+  final int? statusCode;
+
+  String get message => switch (failure) {
+    UpdateCheckFailure.rateLimited => 'GitHub 接口限流，请稍后再试',
+    UpdateCheckFailure.timeout => '连接更新源超时，请检查代理设置后重试',
+    UpdateCheckFailure.connection => '无法连接更新源，请检查代理设置后重试',
+    UpdateCheckFailure.server =>
+      '更新源返回异常（HTTP ${statusCode ?? '未知'}），请稍后再试',
+    UpdateCheckFailure.unknown => '检查更新失败，请稍后再试',
+  };
 
   @override
-  String toString() => '无法连接${channel.label}更新源';
+  String toString() => message;
+}
+
+/// 从 GitHub `releases/latest` 的 `Location` 头解析标签名。
+///
+/// 支持绝对地址与相对路径：`.../releases/tag/v2.3.7`。
+String? latestTagFromReleaseLocation(String? location) {
+  final raw = location?.trim();
+  if (raw == null || raw.isEmpty) return null;
+  final uri = Uri.tryParse(raw);
+  if (uri == null) return null;
+  final segments = uri.pathSegments
+      .where((segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  for (var i = segments.length - 3; i >= 0; i--) {
+    if (segments[i] != 'releases' || segments[i + 1] != 'tag') continue;
+    final tag = segments[i + 2].trim();
+    return tag.isEmpty ? null : tag;
+  }
+  return null;
 }
 
 /// 版本更新信息（来源无关的数据模型）
@@ -460,7 +500,11 @@ String? _releaseAssetUrl(
   String assetName,
 ) {
   final host = channel == UpdateChannel.github ? 'github.com' : 'gitee.com';
-  return 'https://$host/$repositorySlug/releases/download/'
+  final slug = _mappedRepoSlug(
+    repositorySlug,
+    toGitee: channel == UpdateChannel.gitee,
+  );
+  return 'https://$host/$slug/releases/download/'
       '${Uri.encodeComponent(tagName)}/${Uri.encodeComponent(assetName)}';
 }
 
@@ -470,15 +514,58 @@ String _releasePageUrl(
   String tagName,
 ) {
   final host = channel == UpdateChannel.github ? 'github.com' : 'gitee.com';
-  return 'https://$host/$repositorySlug/releases/tag/'
+  final slug = _mappedRepoSlug(
+    repositorySlug,
+    toGitee: channel == UpdateChannel.gitee,
+  );
+  return 'https://$host/$slug/releases/tag/'
       '${Uri.encodeComponent(tagName)}';
+}
+
+/// GitHub 与 Gitee 是同一项目的两个发布平台，slug 不同。
+///
+/// `repositorySlug` 始终是 GitHub 仓库 slug；生成 Gitee 地址时只映射官方
+/// 仓库 `Triangle-Wave/Pure-music` → `qingyueyin/Pure-music`。自定义仓库
+/// 没有对应镜像，保持原 slug。
+String _mappedRepoSlug(String slug, {required bool toGitee}) {
+  if (!toGitee) return slug;
+  final normalized = slug.trim().toLowerCase();
+  if (normalized == AppPreference.defaultUpdateRepoSlug.toLowerCase()) {
+    return AppPreference.giteeUpdateRepoSlug;
+  }
+  return slug;
 }
 
 String? _replaceHost(String? value, String host) {
   if (value == null || value.isEmpty) return null;
   final uri = Uri.tryParse(value);
   if (uri == null || uri.host.isEmpty) return null;
-  return uri.replace(scheme: 'https', host: host).toString();
+  final target = host.toLowerCase();
+  var path = uri.path;
+  if (target == 'gitee.com') {
+    path = _mapRepoPath(
+      path,
+      from: AppPreference.defaultUpdateRepoSlug,
+      to: AppPreference.giteeUpdateRepoSlug,
+    );
+  } else if (target == 'github.com') {
+    path = _mapRepoPath(
+      path,
+      from: AppPreference.giteeUpdateRepoSlug,
+      to: AppPreference.defaultUpdateRepoSlug,
+    );
+  }
+  return uri.replace(scheme: 'https', host: host, path: path).toString();
+}
+
+/// 只替换路径开头的仓库 slug，保留 release 标签与文件的原始编码。
+String _mapRepoPath(String path, {required String from, required String to}) {
+  final prefix = '/$from';
+  final lowerPath = path.toLowerCase();
+  final lowerPrefix = prefix.toLowerCase();
+  if (lowerPath == lowerPrefix) return '/$to';
+  if (!lowerPath.startsWith('$lowerPrefix/')) return path;
+  return '/$to${path.substring(prefix.length)}';
 }
 
 String? _assetDigest(Map<String, dynamic>? asset) =>
@@ -525,52 +612,100 @@ int? _optionalIntOrFallback(
 
 /// 更新检查服务
 ///
-/// 只访问用户选择的渠道，失败时由更新界面让用户切换。
+/// 版本清单与校验值以 GitHub 为基准；下载按设置线路回退到 Gitee 与加速代理。
 class UpdateChecker {
   UpdateChecker._();
 
   static const _githubApiBase = 'https://api.github.com/repos';
-  static const _giteeApiBase = 'https://gitee.com/api/v5/repos';
   static const _githubFallbackUrl =
-      'https://raw.githubusercontent.com/qingyueyin/Pure-music/main/update/version.json';
+      'https://raw.githubusercontent.com/${AppPreference.defaultUpdateRepoSlug}/main/update/version.json';
   static const _giteeFallbackUrl =
-      'https://gitee.com/qingyueyin/Pure-music/raw/main/update/version.json';
+      'https://gitee.com/${AppPreference.giteeUpdateRepoSlug}/raw/main/update/version.json';
 
-  static Future<UpdateInfo?> checkForUpdate({
-    required UpdateChannel channel,
-  }) async {
+  static Future<UpdateInfo?> checkForUpdate() async {
+    const channel = UpdateChannel.supported;
+    _logProxyContext();
     final slug = AppPreference.instance.updateRepoSlug;
-    final apiUrl = switch (channel) {
-      UpdateChannel.github => '$_githubApiBase/$slug/releases/latest',
-      UpdateChannel.gitee => '$_giteeApiBase/$slug/releases/latest',
-    };
-    final fromApi = await _checkReleaseApi(apiUrl, channel, slug);
+    final apiUrl = '$_githubApiBase/$slug/releases/latest';
+    final api = await _checkReleaseApi(apiUrl, channel, slug);
+    final fromApi = api.info;
     if (fromApi != null &&
         fromApi.hasChecksum(channel: channel, portableBuild: portableBuild)) {
       return fromApi;
     }
 
+    final tagInfo = api.rateLimited
+        ? await _checkLatestTagFromReleasePage(slug)
+        : null;
     final fallback = await _firstFallbackInfo(channel);
     if (fromApi != null) return fromApi.withFallbackChecksums(fallback);
+    if (tagInfo != null) {
+      log.update.info(
+        'legacy',
+        '[UpdateChecker] GitHub API 限流，已从发布页解析最新版本 '
+        '${tagInfo.tagName}',
+      );
+      return tagInfo.withFallbackChecksums(fallback);
+    }
     if (fallback != null) return fallback;
-    throw UpdateCheckException(channel);
+    throw UpdateCheckException(
+      channel,
+      failure: api.failure,
+      statusCode: api.statusCode,
+    );
+  }
+
+  /// 记录本次更新检查使用的代理目标，便于定位代理连接与请求失败。
+  static void _logProxyContext() {
+    final proxy = NetworkProxy.instance.config;
+    log.update.debug(
+      'legacy',
+      '[UpdateChecker] 检查更新，代理模式 ${proxy.mode.name}',
+      fields: {
+        'mode': proxy.mode.name,
+        if (proxy.mode == ProxyMode.manual)
+          'target': '${proxy.normalizedHost}:${proxy.resolvedPort}',
+      },
+    );
   }
 
   static Future<UpdateInfo?> _firstFallbackInfo(UpdateChannel channel) async {
-    for (final url in _fallbackUrls(channel)) {
-      final info = await _checkHttpJson(url, channel);
+    final route = AppPreference.instance.updateDownloadRoute;
+    // 清单只从官方源读取，代理不参与元数据请求。
+    final candidates = updateMetadataCandidates(
+      route: route,
+      directUrl: _githubFallbackUrl,
+      giteeUrl: _giteeFallbackUrl,
+      extraUrls: AppPreference.instance.updateCheckUrls,
+    );
+    final seen = <String>{};
+    for (final candidate in candidates) {
+      if (!seen.add(candidate.url)) continue;
+      if (!isAllowedUpdateMetadataUrlForRoute(candidate.url)) {
+        log.update.warn(
+          'legacy',
+          '[UpdateChecker] 跳过不可信的更新清单线路：${candidate.label}',
+          fields: {'host': candidate.host},
+        );
+        continue;
+      }
+      final info = await _checkHttpJson(
+        candidate.url,
+        channel,
+        source: candidate.label,
+      );
       if (info != null) return info;
     }
     return null;
   }
 
-  static Future<UpdateInfo?> _checkReleaseApi(
+  static Future<_ReleaseApiResult> _checkReleaseApi(
     String url,
     UpdateChannel channel,
     String repositorySlug,
   ) async {
     try {
-      final response = await Dio().get<Map<String, dynamic>>(
+      final response = await AppHttp.instance.dio.get<Map<String, dynamic>>(
         url,
         options: Options(
           connectTimeout: const Duration(seconds: 12),
@@ -587,56 +722,122 @@ class UpdateChecker {
         ),
       );
       final data = response.data;
-      if (data == null) return null;
+      if (data == null) {
+        return _ReleaseApiResult(statusCode: response.statusCode);
+      }
       final info = UpdateInfo.fromReleaseJson(
         data,
         channel: channel,
         repositorySlug: repositorySlug,
       );
-      if (info.tagName.isEmpty) return null;
-      return info;
+      if (info.tagName.isEmpty) {
+        return _ReleaseApiResult(statusCode: response.statusCode);
+      }
+      return _ReleaseApiResult(
+        info: info,
+        statusCode: response.statusCode,
+      );
+    } catch (error) {
+      final status = error is DioException
+          ? error.response?.statusCode
+          : null;
+      log.update.warn(
+        'legacy',
+        '[UpdateChecker] ${channel.name} release API failed: '
+        '${_describeNetworkError(error)}',
+        fields: {'error': _describeNetworkError(error)},
+      );
+      return _ReleaseApiResult(
+        statusCode: status,
+        rateLimited: status == 403 || status == 429,
+        errorType: error is DioException ? error.type : null,
+      );
+    }
+  }
+
+  /// API 限流时读取 GitHub 发布页的 302 `Location`，仅用于取版本号。
+  static Future<UpdateInfo?> _checkLatestTagFromReleasePage(
+    String repositorySlug,
+  ) async {
+    final url = 'https://github.com/$repositorySlug/releases/latest';
+    try {
+      final response = await AppHttp.instance.dio.get<void>(
+        url,
+        options: Options(
+          followRedirects: false,
+          responseType: ResponseType.plain,
+          connectTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+          headers: const {
+            'User-Agent': 'Pure-Music-Updater',
+            'Accept': 'text/html,application/xhtml+xml',
+          },
+          validateStatus: (status) =>
+              status != null && status >= 200 && status < 400,
+        ),
+      );
+      final tag = latestTagFromReleaseLocation(
+        response.headers.value('location'),
+      );
+      if (tag == null) {
+        log.update.warn(
+          'legacy',
+          '[UpdateChecker] GitHub 发布页未返回可解析的版本标签',
+          fields: {
+            'host': 'github.com',
+            'status': response.statusCode ?? 0,
+          },
+        );
+        return null;
+      }
+      return UpdateInfo(
+        tagName: tag,
+        htmlUrl: 'https://github.com/$repositorySlug/releases/tag/$tag',
+      );
     } catch (error) {
       log.update.warn(
         'legacy',
-        '[UpdateChecker] ${channel.name} release API failed: ${error.runtimeType}',
+        '[UpdateChecker] GitHub 发布页解析失败: '
+        '${_describeNetworkError(error)}',
+        fields: {'error': _describeNetworkError(error)},
       );
       return null;
     }
   }
 
-  static List<String> _fallbackUrls(UpdateChannel channel) {
-    final preferred = switch (channel) {
-      UpdateChannel.github => _githubFallbackUrl,
-      UpdateChannel.gitee => _giteeFallbackUrl,
-    };
-    final stored = AppPreference.instance.updateCheckUrls.where(
-      (url) => isAllowedUpdateMetadataUrl(url, channel),
-    );
-    return <String>{preferred, ...stored}.toList(growable: false);
-  }
-
   static Future<UpdateInfo?> _checkHttpJson(
     String url,
-    UpdateChannel channel,
-  ) async {
+    UpdateChannel channel, {
+    String? source,
+  }) async {
     try {
-      final response = await Dio().get<Map<String, dynamic>>(
+      // raw.githubusercontent.com 以 text/plain 返回 JSON；先按文本取回再
+      // 手动解析，避免 Dio 按 Content-Type 返回 String 后与 Map 泛型冲突。
+      final response = await AppHttp.instance.dio.get<String>(
         url,
         options: Options(
           connectTimeout: const Duration(seconds: 8),
           receiveTimeout: const Duration(seconds: 10),
-          responseType: ResponseType.json,
+          responseType: ResponseType.plain,
         ),
       );
-      final data = response.data;
-      if (data == null) return null;
-      final info = UpdateInfo.fromJson(data);
+      final raw = response.data;
+      if (raw == null || raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<dynamic, dynamic>) return null;
+      final info = UpdateInfo.fromJson(Map<String, dynamic>.from(decoded));
       if (info.tagName.isEmpty) return null;
       return info;
     } catch (error) {
       log.update.warn(
         'legacy',
-        '[UpdateChecker] ${channel.name} fallback failed: ${error.runtimeType}',
+        '[UpdateChecker] ${channel.name} fallback failed: '
+        '${_describeNetworkError(error)}',
+        fields: {
+          'host': Uri.tryParse(url)?.host ?? '',
+          if (source != null) 'source': source,
+          'error': _describeNetworkError(error),
+        },
       );
       return null;
     }
@@ -662,6 +863,51 @@ class UpdateChecker {
         remoteTag != lastSeen &&
         hasNewVersion(remoteTag, AppSettings.version);
   }
+}
+
+class _ReleaseApiResult {
+  const _ReleaseApiResult({
+    this.info,
+    this.statusCode,
+    this.rateLimited = false,
+    this.errorType,
+  });
+
+  final UpdateInfo? info;
+  final int? statusCode;
+  final bool rateLimited;
+  final DioExceptionType? errorType;
+
+  UpdateCheckFailure get failure {
+    if (rateLimited) return UpdateCheckFailure.rateLimited;
+    if (errorType == DioExceptionType.connectionTimeout ||
+        errorType == DioExceptionType.receiveTimeout ||
+        errorType == DioExceptionType.sendTimeout) {
+      return UpdateCheckFailure.timeout;
+    }
+    if (errorType == DioExceptionType.connectionError) {
+      return UpdateCheckFailure.connection;
+    }
+    final status = statusCode;
+    if (status != null && status >= 500) return UpdateCheckFailure.server;
+    return UpdateCheckFailure.unknown;
+  }
+}
+
+/// 网络错误只保留类型、主机与状态码，便于判断是代理不通、超时还是限流。
+String _describeNetworkError(Object error) {
+  if (error is DioException) {
+    final status = error.response?.statusCode;
+    final host = error.requestOptions.uri.host;
+    final cause = error.error;
+    return [
+      'DioException(${error.type.name})',
+      'host=$host',
+      if (status != null) 'status=$status',
+      if (cause != null) 'cause=${cause.runtimeType}',
+    ].join(', ');
+  }
+  return error.runtimeType.toString();
 }
 
 class _SemVer implements Comparable<_SemVer> {
@@ -725,31 +971,97 @@ class _SemVer implements Comparable<_SemVer> {
 }
 
 
-const _githubDownloadHosts = {
-  'github.com',
-  'www.github.com',
+const _githubDownloadCdnHosts = {
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
   'github-releases.githubusercontent.com',
 };
 
 bool isAllowedUpdateMetadataUrl(String url, UpdateChannel channel) {
+  if (channel != UpdateChannel.supported) return false;
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) return false;
+  return _isAllowedGithubMetadataUri(uri);
+}
+
+/// 按下载线路校验 version.json 地址：只允许 GitHub 直连与 Gitee 镜像。
+///
+/// 第三方代理能改写清单并伪造其中的校验值，因此元数据地址不接受代理前缀。
+bool isAllowedUpdateMetadataUrlForRoute(String url) {
   final uri = Uri.tryParse(url.trim());
   if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
-  final host = uri.host.toLowerCase();
-  return switch (channel) {
-    UpdateChannel.github =>
-      host == 'raw.githubusercontent.com' || host == 'github.com',
-    UpdateChannel.gitee => host == 'gitee.com',
-  };
+  if (_isAllowedGithubMetadataUri(uri)) return true;
+  if (uri.host.toLowerCase() == 'gitee.com') {
+    return _matchesUpdateRepoPath(uri);
+  }
+  return false;
 }
 
 bool isAllowedUpdateDownloadUrl(String url, UpdateChannel channel) {
+  if (channel != UpdateChannel.supported) return false;
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) return false;
+  return _isAllowedGithubDownloadUri(uri);
+}
+
+/// 按下载线路校验安装包与便携包地址：GitHub 直连、Gitee 与内置代理。
+bool isAllowedUpdateDownloadUrlForRoute(String url) {
   final uri = Uri.tryParse(url.trim());
   if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return false;
+  if (_isAllowedGithubDownloadUri(uri)) return true;
+  if (uri.host.toLowerCase() == 'gitee.com') {
+    return _matchesUpdateRepoPath(uri, releasesOnly: true);
+  }
+  final inner = updateProxyInnerUri(url);
+  return inner != null && _isAllowedGithubDownloadUri(inner);
+}
+
+bool _isAllowedGithubMetadataUri(Uri uri) {
+  if (uri.scheme != 'https' || uri.host.isEmpty) return false;
   final host = uri.host.toLowerCase();
-  return switch (channel) {
-    UpdateChannel.github => _githubDownloadHosts.contains(host),
-    UpdateChannel.gitee => host == 'gitee.com' || host == 'www.gitee.com',
+  return switch (host) {
+    'raw.githubusercontent.com' || 'github.com' || 'www.github.com' =>
+      _matchesUpdateRepoPath(uri),
+    'api.github.com' => _matchesUpdateRepoPath(uri, skip: 1),
+    _ => false,
   };
+}
+
+bool _isAllowedGithubDownloadUri(Uri uri) {
+  if (uri.scheme != 'https' || uri.host.isEmpty) return false;
+  final host = uri.host.toLowerCase();
+  if (host == 'github.com' || host == 'www.github.com') {
+    return _matchesUpdateRepoPath(uri, releasesOnly: true);
+  }
+  return _githubDownloadCdnHosts.contains(host);
+}
+
+/// 当前配置仓库与默认仓库都放行，用户自定义的其他仓库仍会被拒绝。
+Set<String> _githubUpdateRepoSlugs() {
+  final slugs = <String>{AppPreference.defaultUpdateRepoSlug.toLowerCase()};
+  final configured = AppPreference.instance.updateRepoSlug.trim().toLowerCase();
+  if (configured.split('/').length == 2) slugs.add(configured);
+  return slugs;
+}
+
+/// Gitee 只认官方镜像仓库；GitHub 与 Gitee 的 slug 不混用。
+Set<String> _giteeUpdateRepoSlugs() => {
+  AppPreference.giteeUpdateRepoSlug.toLowerCase(),
+};
+
+bool _matchesUpdateRepoPath(
+  Uri uri, {
+  int skip = 0,
+  bool releasesOnly = false,
+}) {
+  final segments = uri.pathSegments
+      .where((segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  if (segments.length < skip + 3) return false;
+  final slug = '${segments[skip]}/${segments[skip + 1]}'.toLowerCase();
+  final slugs = uri.host.toLowerCase() == 'gitee.com'
+      ? _giteeUpdateRepoSlugs()
+      : _githubUpdateRepoSlugs();
+  if (!slugs.contains(slug)) return false;
+  return !releasesOnly || segments[skip + 2].toLowerCase() == 'releases';
 }

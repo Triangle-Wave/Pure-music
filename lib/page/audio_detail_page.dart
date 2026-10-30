@@ -16,6 +16,7 @@ import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/library/track_override.dart';
 import 'package:pure_music/lyric/lrc_serializer.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/native/rust/api/utils.dart';
@@ -24,6 +25,7 @@ import 'package:pure_music/page/audio_detail_metadata_cache.dart';
 import 'package:pure_music/play_service/audio_tag_write_scheduler.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/play_service/taskbar_thumbnail_service.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:pure_music/services/online_lyric/api/net_lyric_api.dart'
     as net_api;
 
@@ -40,7 +42,8 @@ String _formatBytes(int bytes) {
 }
 
 final _audioExtraCache = AudioDetailMetadataCache(
-  loader: (audio) => rust_tag_reader.readAudioExtraMetadata(path: audio.path),
+  loader: (audio) =>
+      rust_tag_reader.readAudioExtraMetadata(path: audio.filePath),
 );
 
 rust_tag_reader.AudioExtraMetadata _emptyAudioExtraMetadata() =>
@@ -56,8 +59,17 @@ rust_tag_reader.AudioExtraMetadata _emptyAudioExtraMetadata() =>
       replaygainAlbumPeak: null,
     );
 
-Future<rust_tag_reader.AudioExtraMetadata> _getAudioExtra(Audio audio) =>
-    _audioExtraCache.get(audio).catchError((_) => _emptyAudioExtraMetadata());
+Future<rust_tag_reader.AudioExtraMetadata> _getAudioExtra(Audio audio) {
+  // SACD 虚拟轨与远程曲目都不读取本地标签，避免解析容器或发起网络请求。
+  if (audio.isSacdTrack || RemoteLibrary.isRemotePath(audio.path)) {
+    return Future<rust_tag_reader.AudioExtraMetadata>.value(
+      _emptyAudioExtraMetadata(),
+    );
+  }
+  return _audioExtraCache
+      .get(audio)
+      .catchError((_) => _emptyAudioExtraMetadata());
+}
 
 class AudioDetailPageSurface extends StatelessWidget {
   const AudioDetailPageSurface({super.key, required this.child});
@@ -96,6 +108,7 @@ class _FieldControllers {
   final title = TextEditingController();
   final artist = TextEditingController();
   final album = TextEditingController();
+  final albumArtist = TextEditingController();
   final genre = TextEditingController();
   final year = TextEditingController();
   final track = TextEditingController();
@@ -115,6 +128,7 @@ class _FieldControllers {
     title.text = audio.title;
     artist.text = audio.artist;
     album.text = audio.album;
+    albumArtist.text = audio.albumArtist ?? '';
     genre.text = _findItem(items, 'genre') ?? '';
     year.text = _findItem(items, 'year') ?? '';
     track.text = audio.track > 0 ? audio.track.toString() : '';
@@ -135,6 +149,7 @@ class _FieldControllers {
     title.dispose();
     artist.dispose();
     album.dispose();
+    albumArtist.dispose();
     genre.dispose();
     year.dispose();
     track.dispose();
@@ -156,6 +171,9 @@ class _FieldControllers {
       title: title.text,
       artist: artist.text,
       album: album.text,
+      albumArtist: albumArtist.text.trim().isEmpty
+          ? null
+          : albumArtist.text.trim(),
       genre: genre.text,
       year: year.text,
       track: track.text,
@@ -214,10 +232,14 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _showCurrentAudioInExplorer() async {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      showTextOnSnackBar('远程曲目不支持在文件管理器中显示');
+      return;
+    }
     if (_isOpeningInExplorer) return;
     setState(() => _isOpeningInExplorer = true);
     try {
-      final result = await showInExplorer(path: audio.path);
+      final result = await showInExplorer(path: audio.filePath);
       if (!result && mounted) {
         showTextOnSnackBar('打开失败');
       }
@@ -232,7 +254,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     if (_isCopyingPath) return;
     setState(() => _isCopyingPath = true);
     try {
-      await Clipboard.setData(ClipboardData(text: audio.path));
+      await Clipboard.setData(ClipboardData(text: audio.filePath));
       if (mounted) {
         showTextOnSnackBar('已复制路径');
       }
@@ -259,7 +281,12 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _enterEditMode() async {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      showTextOnSnackBar('远程曲目暂不支持编辑标签');
+      return;
+    }
     final requestToken = ++_editRequestToken;
+    // SACD 虚拟轨的编辑值只写入本地覆盖层，不读取或写入 ISO。
     await applyAudioDetailMetadataIfMounted(
       future: _getAudioExtra(audio),
       isMounted: () => mounted && requestToken == _editRequestToken,
@@ -298,6 +325,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Future<void> _saveEdit() async {
+    if (audio.isVirtualTrack) {
+      await _saveVirtualOverride();
+      return;
+    }
     setState(() => _isSaving = true);
     var coverWritten = false;
     try {
@@ -337,6 +368,11 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         },
       );
       _audioExtraCache.evict(audio);
+      final albumArtistText = payload.albumArtist;
+      audio.albumArtist =
+          albumArtistText == null || albumArtistText.trim().isEmpty
+          ? null
+          : albumArtistText.trim();
       AudioLibrary.instance.updateAudioTags(
         audio,
         title: _controllers.title.text,
@@ -359,6 +395,69 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         showTextOnSnackBar(
           coverWritten ? '封面已写入，标签保存失败，请查看日志' : '保存标签失败，请查看日志',
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  /// 把编辑结果写入本地覆盖层；SACD 与 CUE 轨都不会写源容器文件。
+  Future<void> _saveVirtualOverride() async {
+    final segment = audio.cueSegment;
+    if (segment == null) return;
+    if (_pendingCoverBytes != null) {
+      showTextOnSnackBar('虚拟轨暂不支持修改封面');
+      return;
+    }
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+    try {
+      final payload = _controllers.buildPayload();
+      final title = (payload.title ?? audio.title).trim();
+      final artist = (payload.artist ?? audio.artist).trim();
+      final album = (payload.album ?? audio.album).trim();
+      final albumArtistText = payload.albumArtist;
+      final albumArtist =
+          albumArtistText == null || albumArtistText.trim().isEmpty
+          ? audio.albumArtist
+          : albumArtistText.trim();
+      final track = int.tryParse((payload.track ?? '').trim()) ?? audio.track;
+      final disc = int.tryParse((payload.disc ?? '').trim()) ?? audio.disc;
+      await TrackOverrideStore.instance.save(
+        TrackOverride(
+          trackUid: segment.trackUid,
+          title: title,
+          artist: artist,
+          album: album,
+          albumArtist: albumArtist,
+          track: track,
+          disc: disc,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      audio.albumArtist = albumArtist;
+      AudioLibrary.instance.updateAudioTags(
+        audio,
+        title: title,
+        artist: artist,
+        album: album,
+        track: track,
+        disc: disc,
+      );
+      if (!mounted) return;
+      _cancelEdit();
+      showTextOnSnackBar('已保存到本地标签', variant: ToastVariant.success);
+    } catch (error, trace) {
+      log.library.error(
+        'legacy',
+        '保存虚拟轨标签失败',
+        error: error,
+        stackTrace: trace,
+      );
+      if (mounted) {
+        showTextOnSnackBar('保存标签失败，请查看日志', variant: ToastVariant.error);
       }
     } finally {
       if (mounted) {
@@ -531,7 +630,21 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _buildLyricTab(ColorScheme scheme) {
-    _lyricFuture ??= rust_tag_reader.getLyricFromPath(path: audio.path);
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+            '远程曲目暂不支持内嵌歌词',
+            style: TextStyle(
+              color: scheme.onSurfaceVariant,
+              fontSize: AppType.body,
+            ),
+          ),
+        ),
+      );
+    }
+    _lyricFuture ??= rust_tag_reader.getLyricFromPath(path: audio.filePath);
     return Stack(
       children: [
         SingleChildScrollView(
@@ -613,7 +726,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     );
     if (written != true || !mounted) return;
     setState(() {
-      _lyricFuture = rust_tag_reader.getLyricFromPath(path: audio.path);
+      _lyricFuture = rust_tag_reader.getLyricFromPath(path: audio.filePath);
     });
   }
 
@@ -706,28 +819,33 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _viewHeaderActions() {
+    final isRemote = RemoteLibrary.isRemotePath(audio.path);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
-        IconButton.filledTonal(
-          tooltip: '编辑标签',
-          onPressed: _enterEditMode,
-          style: _headerActionStyle(),
-          icon: const Icon(Symbols.edit),
-        ),
-        IconButton.filledTonal(
-          tooltip: '在文件管理器中显示',
-          onPressed: _isOpeningInExplorer ? null : _showCurrentAudioInExplorer,
-          style: _headerActionStyle(),
-          icon: _isOpeningInExplorer
-              ? const SizedBox(
-                  width: 20.0,
-                  height: 20.0,
-                  child: CircularProgressIndicator(strokeWidth: 2.0),
-                )
-              : const Icon(Symbols.folder_open),
-        ),
+        if (!isRemote)
+          IconButton.filledTonal(
+            tooltip: '编辑标签',
+            onPressed: _enterEditMode,
+            style: _headerActionStyle(),
+            icon: const Icon(Symbols.edit),
+          ),
+        if (!isRemote)
+          IconButton.filledTonal(
+            tooltip: '在文件管理器中显示',
+            onPressed: _isOpeningInExplorer
+                ? null
+                : _showCurrentAudioInExplorer,
+            style: _headerActionStyle(),
+            icon: _isOpeningInExplorer
+                ? const SizedBox(
+                    width: 20.0,
+                    height: 20.0,
+                    child: CircularProgressIndicator(strokeWidth: 2.0),
+                  )
+                : const Icon(Symbols.folder_open),
+          ),
         IconButton.filledTonal(
           tooltip: '复制路径',
           onPressed: _isCopyingPath ? null : _copyCurrentAudioPath,
@@ -866,6 +984,12 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
           controller: _controllers.album,
           decoration: _chipDecoration(scheme),
         ),
+        const SizedBox(height: 10),
+        _DetailTextField(
+          label: '专辑艺术家',
+          controller: _controllers.albumArtist,
+          decoration: _chipDecoration(scheme, '多个用 / 分隔'),
+        ),
         const SizedBox(height: 14),
         _editInfoActions(),
       ],
@@ -953,6 +1077,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
 
   List<Widget> _viewTechnicalFields(rust_tag_reader.AudioExtraMetadata? data) {
     final bpm = _extraItemValue(data, 'bpm');
+    final bitDepth = audio.bitDepth ?? data?.bitDepth;
     return [
       _DetailField(
         label: '时长',
@@ -970,8 +1095,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         label: '采样率',
         value: audio.sampleRate == null ? '-' : '${audio.sampleRate} Hz',
       ),
-      if (data?.bitDepth != null)
-        _DetailField(label: '位深', value: '${data!.bitDepth} bit'),
+      if (audio.isSacdTrack)
+        const _DetailField(label: '位深', value: '1 bit')
+      else if (bitDepth != null)
+        _DetailField(label: '位深', value: '$bitDepth bit'),
       if (data?.channels != null)
         _DetailField(label: '声道', value: data!.channels.toString()),
       ..._replayGainFields(data),
@@ -1007,13 +1134,25 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   List<Widget> _viewFileFields(rust_tag_reader.AudioExtraMetadata? data) {
+    final isRemote = RemoteLibrary.isRemotePath(audio.path);
     return [
       _DetailField(
         label: '格式',
-        value: p.extension(audio.path).replaceFirst('.', '').toUpperCase(),
+        value: audio.isSacdTrack
+            ? 'SACD ISO'
+            : isRemote
+            ? '-'
+            : p.extension(audio.filePath).replaceFirst('.', '').toUpperCase(),
       ),
+      if (audio.isVirtualTrack)
+        _DetailField(
+          label: audio.isSacdTrack ? 'SACD 轨' : '虚拟轨',
+          value: audio.isSacdTrack
+              ? '${audio.cueSegment?.sacdArea ?? '-'}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）'
+              : '${audio.track}（${audio.segmentStartMs} - ${audio.segmentEndMs} ms）',
+        ),
       _DetailField(label: '文件大小', child: _buildFileSize(data)),
-      _DetailField(label: '路径', value: audio.path, allowWrap: true),
+      _DetailField(label: '路径', value: audio.filePath, allowWrap: true),
       _DetailField(label: '修改时间', value: _formatTimestamp(audio.modified)),
       _DetailField(label: '创建时间', value: _formatTimestamp(audio.created)),
     ];
@@ -1037,12 +1176,15 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
   }
 
   Widget _buildFileSize(rust_tag_reader.AudioExtraMetadata? data) {
+    if (RemoteLibrary.isRemotePath(audio.path)) {
+      return const Text('远程');
+    }
     final fileSize = data?.fileSize;
     if (fileSize != null && fileSize > BigInt.zero) {
       return Text(_formatBytes(fileSize.toInt()));
     }
     return FutureBuilder<io.FileStat>(
-      future: io.File(audio.path).stat(),
+      future: io.File(audio.filePath).stat(),
       builder: (context, snapshot) {
         final size = snapshot.data?.size;
         return Text(size == null ? '-' : _formatBytes(size));
@@ -1421,7 +1563,7 @@ class _LyricsEditDialogState extends State<_LyricsEditDialog> {
   Future<void> _loadEmbeddedLyric() async {
     try {
       final lyric = await rust_tag_reader.getLyricFromPath(
-        path: widget.audio.path,
+        path: widget.audio.filePath,
       );
       if (!mounted) return;
       setState(() {
@@ -1439,6 +1581,10 @@ class _LyricsEditDialogState extends State<_LyricsEditDialog> {
 
   Future<void> _save() async {
     if (_isSaving) return;
+    if (widget.audio.isVirtualTrack) {
+      showTextOnSnackBar('虚拟轨暂不支持写入内嵌歌词');
+      return;
+    }
     setState(() => _isSaving = true);
     try {
       final timing = await audioTagWriteScheduler.submit(
@@ -1687,10 +1833,14 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
         return;
       }
       if (writeDirectly) {
+        if (widget.audio.isVirtualTrack) {
+          showTextOnSnackBar('虚拟轨暂不支持写入内嵌歌词');
+          return;
+        }
         final timing = await audioTagWriteScheduler.submit(
-          path: widget.audio.path,
+          path: widget.audio.filePath,
           write: () => rust_tag_reader.writeLyricToPath(
-            path: widget.audio.path,
+            path: widget.audio.filePath,
             lyric: text,
           ),
           onWritten: () => _refreshNowPlayingLyricIfCurrent(widget.audio.path),

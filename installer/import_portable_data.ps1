@@ -4,7 +4,10 @@ param(
     [string]$SourceData,
 
     [Parameter(Mandatory = $true)]
-    [string]$DestinationData
+    [string]$DestinationData,
+
+    # 旧版安装的数据目录没有 Flutter 运行时文件，迁移时放宽源目录校验。
+    [switch]$SourceIsAppData
 )
 
 #Requires -Version 5.1
@@ -26,22 +29,29 @@ function Test-ProcessFromDirectory([string]$directory) {
 
 $source = (Resolve-Path -LiteralPath $SourceData).Path
 $destination = [System.IO.Path]::GetFullPath($DestinationData).TrimEnd('\')
+$destinationName = [System.IO.Path]::GetFileName($destination)
 if ([string]::IsNullOrWhiteSpace($destination) -or
     $destination -eq [System.IO.Path]::GetPathRoot($destination) -or
-    [System.IO.Path]::GetFileName($destination) -ne "pure_music") {
-    throw "安装版数据目录无效：$destination"
+    ($destinationName -ne "pure_music" -and $destinationName -ne "user_data")) {
+    throw "目标数据目录无效：$destination"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $source "app.so") -PathType Leaf) -or
-    -not (Test-Path -LiteralPath (Join-Path $source "flutter_assets") -PathType Container)) {
-    throw "所选目录不是完整的便携版运行数据目录。"
+if (-not $SourceIsAppData) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source "app.so") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $source "flutter_assets") -PathType Container)) {
+        throw "所选目录不是完整的便携版运行数据目录。"
+    }
 }
-if (Test-ProcessFromDirectory (Split-Path $source -Parent)) {
+if (-not $SourceIsAppData -and (Test-ProcessFromDirectory (Split-Path $source -Parent))) {
     throw "导入数据前请先关闭正在运行的便携版 Pure Music。"
+}
+if ($SourceIsAppData -and
+    @(Get-Process -Name "pure_music" -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw "迁移旧版安装数据前请先关闭正在运行的 Pure Music。"
 }
 if (Test-Path -LiteralPath $destination) {
     $existing = @(Get-ChildItem -LiteralPath $destination -Force)
     if ($existing.Count -gt 0) {
-        throw "安装版数据目录不是空目录，已停止导入以避免覆盖现有数据。"
+        throw "目标数据目录不是空目录，已停止导入以避免覆盖现有数据。"
     }
 }
 
@@ -60,7 +70,7 @@ $entries = @($durableEntries | ForEach-Object {
     if (Test-Path -LiteralPath $entry) { Get-Item -LiteralPath $entry }
 })
 if ($entries.Count -eq 0) {
-    throw "所选便携版中没有可迁移的用户数据。"
+    throw "来源目录中没有可迁移的用户数据。"
 }
 
 $destinationParent = Split-Path $destination -Parent

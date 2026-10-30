@@ -30,6 +30,12 @@ pub(super) fn is_dff_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("dff"))
 }
 
+/// 扩展名是否为 ISO，大小写不敏感。
+pub(super) fn is_iso_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("iso"))
+}
+
 pub(super) fn is_asf_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("asf") || ext.eq_ignore_ascii_case("wma"))

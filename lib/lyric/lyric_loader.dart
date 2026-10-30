@@ -194,7 +194,7 @@ Future<String?> _safeReadFile(String filePath) async {
       if (!asText.trimLeft().startsWith('[ti:') &&
           !asText.trimLeft().contains(']\u003C0') &&
           !asText.trimLeft().startsWith('[')) {
-        final decrypted = await compute(krcDecrypt, asText);
+        final decrypted = await krcDecryptSingle(asText);
         if (decrypted != null) return decrypted;
       }
       return asText;
@@ -307,8 +307,10 @@ Lyric? _parseExternalToPureLyric(
   _ExternalLyricResult result, {
   String? separator = '┃',
 }) {
+  final krcLanguage =
+      result.ext == '.krc' ? extractKrcLanguage(result.content) : null;
   final transContent = result.ext == '.krc'
-      ? result.transContent ?? extractKrcLanguage(result.content)?.translation
+      ? result.transContent ?? krcLanguage?.translation
       : result.transContent;
 
   switch (result.ext) {
@@ -316,7 +318,14 @@ Lyric? _parseExternalToPureLyric(
     case '.qrc':
     case '.krc':
       // YRC/QRC/KRC 使用 KaraOK 解析器（正则健壮、时间戳正确）
-      return parseKaraokToPureLyric(result.ext, result.content, transContent);
+      return parseKaraokToPureLyric(
+        result.ext,
+        result.content,
+        transContent: transContent,
+        romanizationText: result.ext == '.krc'
+            ? krcLanguage?.romanization
+            : null,
+      );
     case '.lrc':
       return Lrc.fromLrcTextAuto(
         result.content,

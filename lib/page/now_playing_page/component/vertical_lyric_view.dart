@@ -536,6 +536,8 @@ class _VerticalLyricViewState extends State<VerticalLyricView>
                 builder: (context, snapshot) {
                   final lyricNullable = snapshot.data;
                   final scheme = Theme.of(context).colorScheme;
+                  final lyricsDisabled =
+                      PlayService.instance.lyricService.onlineLyricsDisabled;
                   final noLyricWidget = Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -561,7 +563,9 @@ class _VerticalLyricViewState extends State<VerticalLyricView>
                         ConnectionState.active => loadingWidget,
                         ConnectionState.done =>
                           lyricNullable == null
-                              ? noLyricWidget
+                              ? (lyricsDisabled
+                                    ? const SizedBox.shrink()
+                                    : noLyricWidget)
                               : _VerticalLyricScrollView(
                                   lyric: lyricNullable,
                                   enableSeekOnTap: widget.enableSeekOnTap,

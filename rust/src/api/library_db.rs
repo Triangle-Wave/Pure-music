@@ -42,6 +42,7 @@ pub struct IndexAudio {
     pub duration: u64,
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u8>,
     pub path: String,
     pub modified: u64,
     pub created: u64,
@@ -106,6 +107,9 @@ pub(crate) struct IndexFolderSnapshot {
 pub(crate) struct IndexSnapshot {
     pub version: u64,
     pub folders: Vec<IndexFolderSnapshot>,
+    /// 同时含 CUE/ISO 虚拟轨与普通条目的目录：旧版本可能留下整轨源文件记录，
+    /// 即使目录戳未变也需要走一次增量扫描清理。
+    pub mixed_virtual_folders: Vec<String>,
 }
 
 fn sqlite_path(index_dir: &Path) -> PathBuf {
@@ -451,7 +455,7 @@ fn rebuild_database_from_legacy(index_dir: &Path) -> Result<()> {
             "ATTACH DATABASE ?1 AS legacy",
             params![legacy_path.to_string_lossy().as_ref()],
         )?;
-        let legacy_catalog_columns = ["genre", "year", "composer", "bpm"]
+        let legacy_optional_columns = ["genre", "year", "composer", "bpm", "bit_depth"]
             .into_iter()
             .map(|column| {
                 if legacy_audio_column_exists(&conn, column)? {
@@ -473,16 +477,17 @@ fn rebuild_database_from_legacy(index_dir: &Path) -> Result<()> {
                 "INSERT INTO audios(
                    path, folder_path, title, artist, album, album_artist,
                    genre, year, composer, bpm, track, disc, duration, bitrate,
-                   sample_rate, modified, created, by, play_count, media_id, metadata_key
+                   sample_rate, bit_depth, modified, created, by, play_count, media_id, metadata_key
                  ) SELECT
                    path, folder_path, title, artist, album, album_artist,
                    {}, {}, {}, {}, track, disc, duration, bitrate,
-                   sample_rate, modified, created, by, play_count, media_id, metadata_key
+                   sample_rate, {}, modified, created, by, play_count, media_id, metadata_key
                  FROM legacy.audios;",
-                legacy_catalog_columns[0],
-                legacy_catalog_columns[1],
-                legacy_catalog_columns[2],
-                legacy_catalog_columns[3],
+                legacy_optional_columns[0],
+                legacy_optional_columns[1],
+                legacy_optional_columns[2],
+                legacy_optional_columns[3],
+                legacy_optional_columns[4],
             ))?;
             tx.execute(
                 "INSERT OR REPLACE INTO meta(key, value)
@@ -600,7 +605,39 @@ pub(crate) fn read_current_index_snapshot(index_dir: &Path) -> Result<Option<Ind
         })
     })?;
     let folders = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Some(IndexSnapshot { version, folders }))
+    let mixed_virtual_folders = read_mixed_virtual_folders(&conn)?;
+    Ok(Some(IndexSnapshot {
+        version,
+        folders,
+        mixed_virtual_folders,
+    }))
+}
+
+/// 列出同时含 CUE/ISO 虚拟轨与普通条目的目录。
+///
+/// 库里没有虚拟轨时只做一次 EXISTS 探测，普通音乐库不承担额外扫描成本。
+fn read_mixed_virtual_folders(conn: &Connection) -> Result<Vec<String>> {
+    let has_virtual: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM audios WHERE by IN ('cue', 'sacd'))",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_virtual {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT v.folder_path FROM audios v
+         WHERE v.by IN ('cue', 'sacd')
+           AND EXISTS (
+             SELECT 1 FROM audios p
+             WHERE p.folder_path = v.folder_path
+               AND p.path NOT LIKE '%::track=%'
+               AND p.path NOT LIKE '%::sacd=%'
+           )
+         ORDER BY v.folder_path",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn backfill_audio_identities(conn: &Connection) -> Result<()> {
@@ -616,7 +653,7 @@ fn backfill_audio_identities(conn: &Connection) -> Result<()> {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<i64>>(8)?,
@@ -638,7 +675,7 @@ fn backfill_audio_identities(conn: &Connection) -> Result<()> {
             &artist,
             &album,
             album_artist.as_deref(),
-            track.max(0) as u64,
+            track.unwrap_or(0).max(0) as u64,
             duration.max(0) as u64,
             bitrate.map(|value| value.max(0) as u64),
             sample_rate.map(|value| value.max(0) as u64),
@@ -683,6 +720,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
           duration INTEGER NOT NULL,
           bitrate INTEGER,
           sample_rate INTEGER,
+          bit_depth INTEGER,
           modified INTEGER NOT NULL,
           created INTEGER NOT NULL,
           by TEXT,
@@ -768,6 +806,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
     let bpm_col = conn.prepare("SELECT bpm FROM audios LIMIT 1").is_ok();
     if !bpm_col {
         conn.execute_batch("ALTER TABLE audios ADD COLUMN bpm TEXT;")?;
+    }
+    let bit_depth_col = conn.prepare("SELECT bit_depth FROM audios LIMIT 1").is_ok();
+    if !bit_depth_col {
+        conn.execute_batch("ALTER TABLE audios ADD COLUMN bit_depth INTEGER;")?;
     }
     let cover_last_accessed_col = conn
         .prepare("SELECT last_accessed FROM cover_thumbnails LIMIT 1")
@@ -1063,6 +1105,42 @@ fn optional_audio_text(audio: &serde_json::Value, key: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// 把索引 JSON 中的位深规范为 `1..=64` 的 `u8`。
+///
+/// 接受整数、整数值浮点与数字字符串；负数、NaN、非整数、越界与其它类型返回
+/// `None`，不中断索引加载。
+fn parse_optional_bit_depth(value: Option<&serde_json::Value>) -> Option<u8> {
+    fn integral_in_range(value: f64) -> Option<u8> {
+        // 1..=64 全部可被 f64 精确表示，转换前先按范围过滤。
+        if !value.is_finite() || value.fract() != 0.0 || !(1.0..=64.0).contains(&value) {
+            return None;
+        }
+        u8::try_from(value as u32).ok()
+    }
+
+    let value = value?;
+    if let Some(bits) = value.as_u64() {
+        return u8::try_from(bits)
+            .ok()
+            .filter(|bits| (1..=64).contains(bits));
+    }
+    if let Some(bits) = value.as_f64() {
+        return integral_in_range(bits);
+    }
+    let text = value.as_str()?.trim();
+    text.parse::<f64>().ok().and_then(integral_in_range)
+}
+
+/// 把 SQLite 读回的位深规范为 `1..=64` 的 `u8`。
+///
+/// 旧库或手工写入的越界值（0、65..=255）返回 `None`，避免上层把无效位深
+/// 误判为 Hi-Res。
+fn sanitize_stored_bit_depth(value: Option<i64>) -> Option<u8> {
+    value
+        .and_then(|bits| u8::try_from(bits).ok())
+        .filter(|bits| (1..=64).contains(bits))
+}
+
 struct ParsedAudioEntry {
     path: String,
     path_key: String,
@@ -1079,6 +1157,7 @@ struct ParsedAudioEntry {
     duration: u64,
     bitrate: Option<u64>,
     sample_rate: Option<u64>,
+    bit_depth: Option<u8>,
     modified: u64,
     created: u64,
     by: Option<String>,
@@ -1147,6 +1226,7 @@ fn parse_index_folders(folders: &[serde_json::Value]) -> Result<Vec<ParsedFolder
                 duration: audio.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
                 bitrate: audio.get("bitrate").and_then(|v| v.as_u64()),
                 sample_rate: audio.get("sample_rate").and_then(|v| v.as_u64()),
+                bit_depth: parse_optional_bit_depth(audio.get("bit_depth")),
                 modified: audio.get("modified").and_then(|v| v.as_u64()).unwrap_or(0),
                 created: audio.get("created").and_then(|v| v.as_u64()).unwrap_or(0),
                 by: audio.get("by").and_then(|v| v.as_str()).map(String::from),
@@ -1336,8 +1416,8 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                 OR folders.latest IS NOT excluded.latest",
         )?;
         let mut audio_stmt = tx.prepare(
-            "INSERT INTO audios(path, folder_path, title, artist, album, album_artist, genre, year, composer, bpm, track, disc, duration, bitrate, sample_rate, modified, created, by, play_count, media_id, metadata_key, file_size, valid, hidden)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0)
+            "INSERT INTO audios(path, folder_path, title, artist, album, album_artist, genre, year, composer, bpm, track, disc, duration, bitrate, sample_rate, bit_depth, modified, created, by, play_count, media_id, metadata_key, file_size, valid, hidden)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, 0)
              ON CONFLICT(path) DO UPDATE SET
                 folder_path = excluded.folder_path,
                 title = excluded.title,
@@ -1353,6 +1433,7 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                duration = excluded.duration,
                bitrate = excluded.bitrate,
                sample_rate = excluded.sample_rate,
+               bit_depth = excluded.bit_depth,
                modified = excluded.modified,
                created = excluded.created,
                by = excluded.by,
@@ -1375,6 +1456,7 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                 OR audios.duration IS NOT excluded.duration
                 OR audios.bitrate IS NOT excluded.bitrate
                 OR audios.sample_rate IS NOT excluded.sample_rate
+                OR audios.bit_depth IS NOT excluded.bit_depth
                 OR audios.modified IS NOT excluded.modified
                 OR audios.created IS NOT excluded.created
                 OR audios.by IS NOT excluded.by
@@ -1434,6 +1516,7 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
                     audio.duration as i64,
                     audio.bitrate.map(|v| v as i64),
                     audio.sample_rate.map(|v| v as i64),
+                    audio.bit_depth.map(i64::from),
                     audio.modified as i64,
                     audio.created as i64,
                     audio.by,
@@ -1533,7 +1616,7 @@ pub fn read_index_from_sqlite(index_path: String) -> Result<Vec<IndexFolder>> {
     let mut folder_index = 0;
     {
         let mut stmt = conn.prepare(
-            "SELECT folder_path, title, artist, album, album_artist, track, disc, duration, bitrate, sample_rate, path, modified, created, by, play_count
+            "SELECT folder_path, title, artist, album, album_artist, track, disc, duration, bitrate, sample_rate, bit_depth, path, modified, created, by, play_count
              FROM audios WHERE valid != 0 AND hidden = 0 ORDER BY folder_path, path",
         )?;
         let mut rows = stmt.query([])?;
@@ -1548,11 +1631,12 @@ pub fn read_index_from_sqlite(index_path: String) -> Result<Vec<IndexFolder>> {
             let duration: i64 = row.get(7)?;
             let bitrate: Option<i64> = row.get(8)?;
             let sample_rate: Option<i64> = row.get(9)?;
-            let path: String = row.get(10)?;
-            let modified: i64 = row.get(11)?;
-            let created: i64 = row.get(12)?;
-            let by: Option<String> = row.get(13)?;
-            let play_count: i64 = row.get(14)?;
+            let bit_depth: Option<i64> = row.get(10)?;
+            let path: String = row.get(11)?;
+            let modified: i64 = row.get(12)?;
+            let created: i64 = row.get(13)?;
+            let by: Option<String> = row.get(14)?;
+            let play_count: i64 = row.get(15)?;
 
             let audio = IndexAudio {
                 title,
@@ -1564,6 +1648,7 @@ pub fn read_index_from_sqlite(index_path: String) -> Result<Vec<IndexFolder>> {
                 duration: duration.max(0) as u64,
                 bitrate: bitrate.map(|v| v.max(0) as u32),
                 sample_rate: sample_rate.map(|v| v.max(0) as u32),
+                bit_depth: sanitize_stored_bit_depth(bit_depth),
                 path,
                 modified: modified.max(0) as u64,
                 created: created.max(0) as u64,
@@ -1619,7 +1704,7 @@ pub fn read_hidden_audios(index_path: String) -> Result<Vec<IndexAudio>, String>
     init_schema(&conn).map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT folder_path, title, artist, album, album_artist, track, disc, duration, bitrate, sample_rate, path, modified, created, by, play_count
+            "SELECT folder_path, title, artist, album, album_artist, track, disc, duration, bitrate, sample_rate, bit_depth, path, modified, created, by, play_count
              FROM audios WHERE hidden != 0 ORDER BY folder_path, path",
         )
         .map_err(|e| e.to_string())?;
@@ -1645,11 +1730,14 @@ pub fn read_hidden_audios(index_path: String) -> Result<Vec<IndexAudio>, String>
                 .get::<_, Option<i64>>(9)
                 .map_err(|e| e.to_string())?
                 .map(|v| v.max(0) as u32),
-            path: row.get(10).map_err(|e| e.to_string())?,
-            modified: row.get::<_, i64>(11).map_err(|e| e.to_string())?.max(0) as u64,
-            created: row.get::<_, i64>(12).map_err(|e| e.to_string())?.max(0) as u64,
-            by: row.get(13).map_err(|e| e.to_string())?,
-            play_count: row.get(14).map_err(|e| e.to_string())?,
+            bit_depth: sanitize_stored_bit_depth(
+                row.get::<_, Option<i64>>(10).map_err(|e| e.to_string())?,
+            ),
+            path: row.get(11).map_err(|e| e.to_string())?,
+            modified: row.get::<_, i64>(12).map_err(|e| e.to_string())?.max(0) as u64,
+            created: row.get::<_, i64>(13).map_err(|e| e.to_string())?.max(0) as u64,
+            by: row.get(14).map_err(|e| e.to_string())?,
+            play_count: row.get(15).map_err(|e| e.to_string())?,
         });
     }
     Ok(result)
@@ -1688,6 +1776,7 @@ mod tests {
             "duration": 180,
             "bitrate": 320,
             "sample_rate": 44100,
+            "bit_depth": 24,
             "path": path.to_string_lossy(),
             "modified": 4,
             "created": 5,
@@ -1743,6 +1832,7 @@ mod tests {
                     "duration": 3,
                     "bitrate": 320,
                     "sample_rate": 44100,
+                    "bit_depth": 24,
                     "path": "C:\\\\Music\\\\t.mp3",
                     "modified": 4,
                     "created": 5,
@@ -1759,6 +1849,7 @@ mod tests {
         assert_eq!(folders[0].audios.len(), 1);
         assert_eq!(folders[0].audios[0].title, "t");
         assert_eq!(folders[0].audios[0].disc, 2);
+        assert_eq!(folders[0].audios[0].bit_depth, Some(24));
         let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
         let catalog_tags = conn
             .query_row("SELECT genre, year, composer, bpm FROM audios", [], |row| {
@@ -1780,6 +1871,194 @@ mod tests {
             )
         );
         drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn bit_depth_roundtrips_through_sqlite_with_null_and_24() {
+        let base = test_dir("bit_depth_roundtrip");
+        let deep = base.join("deep.flac");
+        let unknown = base.join("unknown.flac");
+        std::fs::write(&deep, [1, 2]).unwrap();
+        std::fs::write(&unknown, [3, 4]).unwrap();
+        let mut deep_audio = test_audio(&deep);
+        deep_audio["bit_depth"] = serde_json::json!(24);
+        let mut unknown_audio = test_audio(&unknown);
+        unknown_audio["bit_depth"] = serde_json::Value::Null;
+        sync_test_index(&base, &test_index(&base, vec![deep_audio, unknown_audio]));
+
+        let folders = read_index_from_sqlite(base.to_string_lossy().to_string()).unwrap();
+        let folder = folders.first().expect("folder row");
+        let deep_path = deep.to_string_lossy().to_string();
+        let unknown_path = unknown.to_string_lossy().to_string();
+        let stored_deep = folder
+            .audios
+            .iter()
+            .find(|audio| audio.path == deep_path.as_str())
+            .expect("deep audio row");
+        let stored_unknown = folder
+            .audios
+            .iter()
+            .find(|audio| audio.path == unknown_path.as_str())
+            .expect("unknown audio row");
+        assert_eq!(stored_deep.bit_depth, Some(24));
+        assert_eq!(stored_unknown.bit_depth, None);
+
+        let conn = open_connection(&base).unwrap();
+        let raw_deep: Option<i64> = conn
+            .query_row(
+                "SELECT bit_depth FROM audios WHERE path = ?1",
+                params![deep_path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let raw_unknown: Option<i64> = conn
+            .query_row(
+                "SELECT bit_depth FROM audios WHERE path = ?1",
+                params![unknown_path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(raw_deep, Some(24));
+        assert_eq!(raw_unknown, None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn sqlite_read_drops_out_of_range_bit_depth() {
+        let base = test_dir("bit_depth_out_of_range");
+        let valid = base.join("valid.flac");
+        let dirty = base.join("dirty.flac");
+        std::fs::write(&valid, [1, 2]).unwrap();
+        std::fs::write(&dirty, [3, 4]).unwrap();
+        sync_test_index(
+            &base,
+            &test_index(&base, vec![test_audio(&valid), test_audio(&dirty)]),
+        );
+
+        let valid_path = valid.to_string_lossy().to_string();
+        let dirty_path = dirty.to_string_lossy().to_string();
+        let conn = open_connection(&base).unwrap();
+        conn.execute(
+            "UPDATE audios SET bit_depth = 65 WHERE path = ?1",
+            params![dirty_path.as_str()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let folders = read_index_from_sqlite(base.to_string_lossy().to_string()).unwrap();
+        let audios = &folders.first().expect("folder row").audios;
+        let stored_valid = audios
+            .iter()
+            .find(|audio| audio.path == valid_path.as_str())
+            .expect("valid audio row");
+        let stored_dirty = audios
+            .iter()
+            .find(|audio| audio.path == dirty_path.as_str())
+            .expect("dirty audio row");
+        assert_eq!(stored_valid.bit_depth, Some(24));
+        assert_eq!(stored_dirty.bit_depth, None);
+
+        let conn = open_connection(&base).unwrap();
+        conn.execute(
+            "UPDATE audios SET bit_depth = 255, hidden = 1 WHERE path = ?1",
+            params![dirty_path.as_str()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let hidden = read_hidden_audios(base.to_string_lossy().to_string()).unwrap();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].bit_depth, None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn parse_index_folders_reads_bit_depth_and_rejects_invalid_values() {
+        let folders = serde_json::json!([{
+            "path": "C:/Music",
+            "modified": 1,
+            "latest": 2,
+            "audios": [
+                {"path": "C:/Music/a.flac", "bit_depth": 24},
+                {"path": "C:/Music/b.flac", "bit_depth": null},
+                {"path": "C:/Music/c.flac", "bit_depth": 255},
+                {"path": "C:/Music/d.flac", "bit_depth": -1},
+                {"path": "C:/Music/e.flac", "bit_depth": "24"},
+                {"path": "C:/Music/f.flac", "bit_depth": 24.0},
+                {"path": "C:/Music/g.flac", "bit_depth": 0},
+                {"path": "C:/Music/h.flac", "bit_depth": 65},
+                {"path": "C:/Music/i.flac", "bit_depth": "24.0"},
+                {"path": "C:/Music/j.flac", "bit_depth": "not a number"}
+            ]
+        }]);
+
+        let parsed = parse_index_folders(folders.as_array().unwrap()).unwrap();
+        let values = parsed[0]
+            .audios
+            .iter()
+            .map(|audio| audio.bit_depth)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            values,
+            vec![Some(24), None, None, None, Some(24), Some(24), None, None, Some(24), None]
+        );
+    }
+
+    #[test]
+    fn init_schema_adds_bit_depth_column_to_existing_database() {
+        let base = test_dir("bit_depth_schema_migration");
+        let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE audios (
+               path TEXT PRIMARY KEY,
+               folder_path TEXT NOT NULL,
+               title TEXT NOT NULL,
+               artist TEXT NOT NULL,
+               album TEXT NOT NULL,
+               album_artist TEXT,
+               track INTEGER,
+               disc INTEGER,
+               duration INTEGER NOT NULL,
+               bitrate INTEGER,
+               sample_rate INTEGER,
+               modified INTEGER NOT NULL,
+               created INTEGER NOT NULL,
+               by TEXT,
+               play_count INTEGER NOT NULL DEFAULT 0,
+               media_id TEXT,
+               metadata_key TEXT,
+               file_size INTEGER NOT NULL DEFAULT 0,
+               valid INTEGER NOT NULL DEFAULT 1,
+               hidden INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO audios(path, folder_path, title, artist, album, duration, modified, created)
+               VALUES('C:/Music/track.flac', 'C:/Music', 'Track', 'Artist', 'Album', 180, 4, 5);",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let bit_depth: Option<i64> = conn
+            .query_row(
+                "SELECT bit_depth FROM audios WHERE path = 'C:/Music/track.flac'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM audios WHERE path = 'C:/Music/track.flac'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(bit_depth, None);
+        assert_eq!(title, "Track");
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -1897,8 +2176,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(catalog_tags, (None, None, None, None));
+        let bit_depth: Option<i64> = conn
+            .query_row("SELECT bit_depth FROM audios", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(bit_depth, None);
 
         drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_rebuild_copies_bit_depth_when_column_exists() {
+        let base = test_dir("legacy_bit_depth_rebuild");
+        let legacy_path = legacy_sqlite_path(&base);
+        let legacy = open_raw_connection(&legacy_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE folders (
+                   path TEXT PRIMARY KEY,
+                   modified INTEGER NOT NULL,
+                   latest INTEGER NOT NULL
+                 );
+                 CREATE TABLE audios (
+                   path TEXT PRIMARY KEY,
+                   folder_path TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   artist TEXT NOT NULL,
+                   album TEXT NOT NULL,
+                   album_artist TEXT,
+                   track INTEGER,
+                   disc INTEGER,
+                   duration INTEGER NOT NULL,
+                   bitrate INTEGER,
+                   sample_rate INTEGER,
+                   bit_depth INTEGER,
+                   modified INTEGER NOT NULL,
+                   created INTEGER NOT NULL,
+                   by TEXT,
+                   play_count INTEGER NOT NULL DEFAULT 0,
+                   media_id TEXT,
+                   metadata_key TEXT
+                 );
+                 INSERT INTO folders(path, modified, latest)
+                   VALUES('C:/Music', 1, 2);
+                 INSERT INTO audios(
+                   path, folder_path, title, artist, album, album_artist, track, disc,
+                   duration, bitrate, sample_rate, bit_depth, modified, created, by,
+                   play_count, media_id, metadata_key
+                 ) VALUES(
+                   'C:/Music/track.flac', 'C:/Music', 'Track', 'Artist', 'Album', NULL, 1, 1,
+                   180, 320, 44100, 24, 4, 5, 'Lofty', 0, NULL, NULL
+                 );",
+            )
+            .unwrap();
+        drop(legacy);
+
+        rebuild_database_from_legacy(&base).unwrap();
+
+        let conn = open_raw_connection(&sqlite_path(&base)).unwrap();
+        let bit_depth: Option<i64> = conn
+            .query_row("SELECT bit_depth FROM audios", [], |row| row.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(bit_depth, Some(24));
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -1921,6 +2262,47 @@ mod tests {
         std::io::Write::write_all(&mut file, b" ").unwrap();
         drop(file);
         assert!(read_current_index_snapshot(&base).unwrap().is_none());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_lists_folders_with_virtual_and_plain_tracks() {
+        let base = test_dir("snapshot_mixed_virtual");
+        std::fs::create_dir_all(&base).unwrap();
+        let plain_path = base.join("disc.tak");
+        let mut virtual_audio = test_audio(&plain_path);
+        virtual_audio["path"] = serde_json::json!(format!(
+            "{}::track=01::start=0::end=1000",
+            plain_path.to_string_lossy()
+        ));
+        virtual_audio["by"] = serde_json::json!("cue");
+        let index = test_index(&base, vec![virtual_audio, test_audio(&plain_path)]);
+        sync_test_index(&base, &index);
+
+        let snapshot = read_current_index_snapshot(&base).unwrap().unwrap();
+        assert_eq!(
+            snapshot.mixed_virtual_folders,
+            vec![base.to_string_lossy().to_string()]
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_has_no_mixed_folders_when_all_tracks_are_virtual() {
+        let base = test_dir("snapshot_all_virtual");
+        std::fs::create_dir_all(&base).unwrap();
+        let plain_path = base.join("disc.tak");
+        let mut virtual_audio = test_audio(&plain_path);
+        virtual_audio["path"] = serde_json::json!(format!(
+            "{}::track=01::start=0::end=1000",
+            plain_path.to_string_lossy()
+        ));
+        virtual_audio["by"] = serde_json::json!("cue");
+        let index = test_index(&base, vec![virtual_audio]);
+        sync_test_index(&base, &index);
+
+        let snapshot = read_current_index_snapshot(&base).unwrap().unwrap();
+        assert!(snapshot.mixed_virtual_folders.is_empty());
         std::fs::remove_dir_all(base).unwrap();
     }
 

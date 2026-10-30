@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:pure_music/component/hi_res_badge.dart';
 import 'package:pure_music/component/list_locate_buttons.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/stacked_list_view.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
-import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/page/stats_page/stats_shared.dart';
 import 'package:pure_music/play_service/play_service.dart';
+import 'package:pure_music/services/native/playback_stats_service.dart';
+
+/// 标题行可容纳「文本 + 徽章」的宽度下限；低于该值徽章组等比缩小。
+const double _badgeCompactThreshold = 120.0;
 
 /// 单曲榜单 tab：最常播放 Top100，右下角定位/回顶按钮。
 class RankedTab extends StatefulWidget {
@@ -20,7 +24,7 @@ class RankedTab extends StatefulWidget {
     required this.loadFailed,
   });
 
-  final List<rust_library_db.PlayCountEntry> rankedTracks;
+  final List<PlayCountRecord> rankedTracks;
   final int totalPlayed;
   final bool loading;
   final bool loadFailed;
@@ -198,7 +202,7 @@ class _RankedTabState extends State<RankedTab> {
 
   Widget _buildRow(
     ColorScheme scheme,
-    rust_library_db.PlayCountEntry entry, {
+    PlayCountRecord entry, {
     required int index,
     required int maxPlays,
   }) {
@@ -247,13 +251,15 @@ class _RankedTabState extends State<RankedTab> {
 
   Widget _rowContent(
     ColorScheme scheme,
-    rust_library_db.PlayCountEntry entry,
+    PlayCountRecord entry,
     Audio? audio, {
     required int index,
     required double fraction,
     required bool showAlbum,
     required double albumWidth,
   }) {
+    final showDsd = audio != null && isDsdAudio(audio);
+    final showHiRes = audio != null && isHiResAudio(audio);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: Spacing.sm),
       child: Row(
@@ -261,7 +267,15 @@ class _RankedTabState extends State<RankedTab> {
           _rankLabel(scheme, index),
           StatsCover(audio: audio),
           const SizedBox(width: Spacing.md),
-          Expanded(child: _titleArtistTexts(scheme, entry.title, entry.artist)),
+          Expanded(
+            child: _titleArtistTexts(
+              scheme,
+              entry.title,
+              entry.artist,
+              showDsd: showDsd,
+              showHiRes: showHiRes,
+            ),
+          ),
           if (showAlbum) ...[
             const SizedBox(width: Spacing.lg),
             SizedBox(
@@ -302,20 +316,63 @@ class _RankedTabState extends State<RankedTab> {
     );
   }
 
-  Widget _titleArtistTexts(ColorScheme scheme, String title, String artist) {
+  Widget _titleArtistTexts(
+    ColorScheme scheme,
+    String title,
+    String artist, {
+    bool showDsd = false,
+    bool showHiRes = false,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Text(
-          title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            fontSize: AppType.subtitle,
-            color: scheme.onSurface,
-            fontWeight: AppType.weightMedium,
-          ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < _badgeCompactThreshold;
+            final Widget badgeGroup = Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (showDsd) ...[
+                  const SizedBox(width: 6),
+                  const DsdBadge(),
+                ],
+                if (showHiRes) ...[
+                  const SizedBox(width: 6),
+                  const HiResBadge(),
+                ],
+              ],
+            );
+            return Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: AppType.subtitle,
+                      color: scheme.onSurface,
+                      fontWeight: AppType.weightMedium,
+                    ),
+                  ),
+                ),
+                if (showDsd || showHiRes)
+                  compact
+                      ? ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            maxWidth: compactBadgeGroupMaxWidth,
+                          ),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: badgeGroup,
+                          ),
+                        )
+                      : badgeGroup,
+              ],
+            );
+          },
         ),
         const SizedBox(height: 2),
         Text(

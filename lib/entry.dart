@@ -19,6 +19,7 @@ import 'package:pure_music/page/now_playing_page/now_playing_open_transition.dar
 import 'package:pure_music/page/now_playing_page/page.dart';
 import 'package:pure_music/page/playlist_detail_page.dart';
 import 'package:pure_music/page/playlists_page.dart';
+import 'package:pure_music/page/remote_page.dart';
 import 'package:pure_music/page/settings_page/check_update.dart';
 import 'package:pure_music/page/settings_page/create_issue.dart';
 import 'package:pure_music/page/stats_page/page.dart';
@@ -464,10 +465,10 @@ class _EntryState extends State<Entry>
         UpdateChannel.parse(AppPreference.instance.updateChannel) != null;
     final overlayContext = routerKey.currentState?.overlay?.context;
     if (overlayContext == null || !overlayContext.mounted) return;
-    final channel = await ensureUpdateChannel(overlayContext);
-    if (!mounted || !overlayContext.mounted || channel == null) return;
+    final channel = await ensureUpdateChannel();
+    if (!mounted || !overlayContext.mounted) return;
     if (_shouldSkipAutoUpdateCheck(hadSavedChannel)) return;
-    final update = await _checkNewestUpdate(channel);
+    final update = await _checkNewestUpdate();
     if (!mounted || !overlayContext.mounted || update == null) return;
     await _notifyNewestUpdate(overlayContext, update, channel);
   }
@@ -481,10 +482,10 @@ class _EntryState extends State<Entry>
         now.isBefore(last.toUtc().add(const Duration(hours: 1)));
   }
 
-  Future<UpdateInfo?> _checkNewestUpdate(UpdateChannel channel) async {
+  Future<UpdateInfo?> _checkNewestUpdate() async {
     UpdateInfo? newest;
     try {
-      newest = await UpdateChecker.checkForUpdate(channel: channel);
+      newest = await UpdateChecker.checkForUpdate();
     } catch (err, trace) {
       log.app.warn(
         'legacy',
@@ -812,6 +813,10 @@ class _EntryState extends State<Entry>
                 pageBuilder: (context, state) => _folderDetailPage(state),
               ),
             ],
+          ),
+          _maintainedBranch(
+            path: app_paths.REMOTE_PAGE,
+            child: const RemotePage(),
           ),
           _maintainedBranch(
             path: app_paths.PLAYLISTS_PAGE,

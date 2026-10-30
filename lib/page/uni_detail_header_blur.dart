@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:pure_music/core/log/app_log.dart';
 
 const int kDetailHeaderBlurOutputSize = 200;
 const double kDetailHeaderBlurSigma = 48;
@@ -47,7 +48,17 @@ class _DetailCoverAtmosphereState extends State<DetailCoverAtmosphere> {
 
   Future<void> _load() async {
     final requestId = ++_requestId;
-    final provider = await widget.pic;
+    ImageProvider? provider;
+    try {
+      provider = await widget.pic;
+    } catch (error) {
+      log.app.debug(
+        'detail_cover_atmosphere_failed',
+        '头图背景加载失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      provider = null;
+    }
     if (!mounted || requestId != _requestId) return;
     if (identical(provider, _provider) && _blurred != null) return;
 

@@ -13,6 +13,7 @@ import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
 import 'package:pure_music/library/playlist.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/library/virtual_track_index.dart';
 import 'package:pure_music/page/playlist_cover_picker.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/native/folder_picker_windows.dart';
@@ -141,7 +142,13 @@ class _PlaylistsPageState extends State<PlaylistsPage> {
     setState(() => _isImportingFolder = true);
     try {
       await _importFolderAsPlaylistBody();
-    } catch (err) {
+    } catch (err, trace) {
+      log.library.error(
+        'legacy',
+        '导入文件夹歌单失败',
+        error: err,
+        stackTrace: trace,
+      );
       if (!mounted) return;
       showTextOnSnackBar('导入文件夹歌单失败', variant: ToastVariant.error);
     } finally {
@@ -176,47 +183,46 @@ class _PlaylistsPageState extends State<PlaylistsPage> {
 
   Future<List<String>> _collectFolderAudioFiles(Directory dir) async {
     final audioFiles = <String>[];
-    final audioExtensions = <String>{
-      'mp3',
-      'flac',
-      'wav',
-      'ogg',
-      'ape',
-      'm4a',
-      'wma',
-      'opus',
-      'aiff',
-      'aac',
-    };
-    await for (final entity in dir.list(recursive: true)) {
-      if (entity is File) {
-        final ext = p
-            .extension(entity.path)
-            .toLowerCase()
-            .replaceFirst('.', '');
-        if (audioExtensions.contains(ext)) {
-          audioFiles.add(entity.path);
+    try {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          final ext = p
+              .extension(entity.path)
+              .toLowerCase()
+              .replaceFirst('.', '');
+          if (importableAudioFileExtensions.contains(ext)) {
+            audioFiles.add(entity.path);
+          }
         }
       }
+    } on FileSystemException catch (err, trace) {
+      log.library.error(
+        'legacy',
+        '扫描导入文件夹失败：${dir.path}',
+        error: err,
+        stackTrace: trace,
+      );
     }
     return audioFiles;
   }
 
   List<String> _resolveImportedFolderTracks(List<String> audioFiles) {
-    final resolved = <String>[];
-    final collection = AudioLibrary.instance.audioCollection;
-    for (final raw in audioFiles) {
-      if (collection.any((a) => a.path == raw)) {
-        resolved.add(raw);
-        continue;
-      }
-      final matchedPath = findImportedPlaylistLibraryPath(
-        rawPath: raw,
-        libraryPaths: collection.map((a) => a.path),
+    try {
+      final library = AudioLibrary.instance;
+      return resolveImportedLibraryPaths(
+        rawPaths: audioFiles,
+        virtualTracks: VirtualTrackIndex.fromAudios(library.audioCollection),
+        libraryPaths: library.audioCollection.map((audio) => audio.path),
       );
-      if (matchedPath != null) resolved.add(matchedPath);
+    } catch (err, trace) {
+      log.library.error(
+        'legacy',
+        '解析导入文件夹曲目失败',
+        error: err,
+        stackTrace: trace,
+      );
+      return const <String>[];
     }
-    return resolved;
   }
 
   Future<void> _saveImportedFolderPlaylist(

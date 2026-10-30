@@ -1,7 +1,9 @@
+import 'package:ffi/ffi.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/preference.dart';
+import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/component/build_index_state_view.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/danger_confirm_dialog.dart';
@@ -11,6 +13,29 @@ import 'package:pure_music/native/folder_picker_windows.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:path/path.dart' as p;
+import 'package:win32/win32.dart';
+
+bool _isNetworkFolderPath(String value) {
+  final path = value.trim();
+  if (path.isEmpty) return false;
+
+  final lower = path.toLowerCase();
+  if (lower.startsWith(r'\\?')) {
+    return lower.startsWith(r'\\?\unc');
+  }
+  if (lower.startsWith(r'\\') || lower.startsWith('//')) return true;
+
+  final drive = RegExp(r'^[a-z]:[\\/]').firstMatch(lower);
+  if (drive == null) return false;
+  final root = '${drive.group(0)!.substring(0, 1)}:\\'.toNativeUtf16();
+  try {
+    return GetDriveType(root) == DRIVE_REMOTE;
+  } finally {
+    malloc.free(root);
+  }
+}
+
+const _networkFolderMessage = '网络共享文件夹请到「远程音乐」添加';
 
 Future<void> showFolderManagerDialog(BuildContext context) async {
   await showDialog<void>(
@@ -342,8 +367,15 @@ class _FolderManagerDialogState extends State<FolderManagerDialog> {
     try {
       final paths = pickMultipleDirectories(title: '选择文件夹');
       if (paths.isEmpty || !mounted) return;
+      if (paths.any(_isNetworkFolderPath)) {
+        showTextOnSnackBar(_networkFolderMessage, variant: ToastVariant.error);
+      }
+      final localPaths = paths
+          .where((path) => !_isNetworkFolderPath(path))
+          .toList();
+      if (localPaths.isEmpty) return;
       setState(() {
-        _appendUniqueFolders(paths);
+        _appendUniqueFolders(localPaths);
       });
     } finally {
       if (mounted) {
@@ -354,6 +386,10 @@ class _FolderManagerDialogState extends State<FolderManagerDialog> {
 
   void _applyFolderChanges() {
     final kept = folders.map((f) => f.path).toList();
+    if (kept.any(_isNetworkFolderPath)) {
+      showTextOnSnackBar(_networkFolderMessage, variant: ToastVariant.error);
+      return;
+    }
     final original = List<String>.from(AppPreference.instance.userFolders);
     final nextUserFolders = List<String>.from(
       AppPreference.instance.userFolders,
@@ -564,7 +600,14 @@ class _ManagedFolderTreeNode {
       directAudioCount +
       children.fold(0, (total, child) => total + child.audioCount);
 
-  int get displayAudioCount => pendingScan ? 0 : audioCount;
+  bool get hasPendingScan =>
+      pendingScan || children.any((child) => child.hasPendingScan);
+
+  String get displayAudioCountText {
+    if (pendingScan) return '扫描中…';
+    if (hasPendingScan) return '$audioCount 首乐曲（含扫描中文件夹）';
+    return '$audioCount 首乐曲';
+  }
 
   int get pendingFolderCount =>
       (pendingScan ? 1 : 0) +
@@ -636,7 +679,7 @@ class _ManagedFolderTile extends StatelessWidget {
         clipBehavior: Clip.hardEdge,
         child: ListTile(
           title: title,
-          subtitle: Text('${tree.displayAudioCount} 首乐曲'),
+          subtitle: Text(tree.displayAudioCountText),
           trailing: removeButton,
         ),
       );
@@ -652,7 +695,7 @@ class _ManagedFolderTile extends StatelessWidget {
         childrenPadding: const EdgeInsets.only(left: 20),
         title: title,
         subtitle: Text(
-          '${tree.children.length} 个子文件夹 · ${tree.displayAudioCount} 首乐曲',
+          '${tree.children.length} 个子文件夹 · ${tree.displayAudioCountText}',
         ),
         trailing: removeButton,
         children: [
@@ -703,7 +746,7 @@ class _FolderTreeTile extends StatelessWidget {
         child: ListTile(
           dense: true,
           title: title,
-          subtitle: Text('${node.displayAudioCount} 首乐曲'),
+          subtitle: Text(node.displayAudioCountText),
           trailing: removeButton,
         ),
       );
@@ -720,7 +763,7 @@ class _FolderTreeTile extends StatelessWidget {
         childrenPadding: const EdgeInsets.only(left: 20),
         title: title,
         subtitle: Text(
-          '${node.children.length} 个子文件夹 · ${node.displayAudioCount} 首乐曲',
+          '${node.children.length} 个子文件夹 · ${node.displayAudioCountText}',
         ),
         trailing: removeButton,
         children: [

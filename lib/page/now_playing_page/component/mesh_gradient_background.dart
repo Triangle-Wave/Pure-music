@@ -13,6 +13,40 @@ const _kLightMeshScrim = Color(0x2AF0F0F0);
 const _kMeshRenderExtent = 540.0;
 const _kMeshColorCount = 4;
 const _kShaderColorCount = 4;
+const _kMeshClockPeriodMilliseconds = 1 << 26;
+
+double _meshClockSeconds() {
+  final milliseconds = DateTime.now().millisecondsSinceEpoch;
+  return (milliseconds % _kMeshClockPeriodMilliseconds) / 1000.0;
+}
+
+typedef _OklabColor = ({double l, double a, double b});
+
+double _srgbToLinear(double value) {
+  return value <= 0.04045
+      ? value / 12.92
+      : pow((value + 0.055) / 1.055, 2.4).toDouble();
+}
+
+double _cbrt(double value) {
+  return value < 0
+      ? -pow(-value, 1.0 / 3.0).toDouble()
+      : pow(value, 1.0 / 3.0).toDouble();
+}
+
+_OklabColor _toOklab(Color color) {
+  final r = _srgbToLinear(color.r);
+  final g = _srgbToLinear(color.g);
+  final b = _srgbToLinear(color.b);
+  final l = _cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  final m = _cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  final s = _cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return (
+    l: 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    a: 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    b: 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+  );
+}
 
 Size _meshRenderSize(Size viewport) {
   if (viewport.isEmpty) return Size.zero;
@@ -176,8 +210,10 @@ Color _liftMeshLuminance(Color color, double floor) {
   return hsl.withLightness(upper).toColor();
 }
 
-List<Color> _meshShaderColors(List<Color> colors) {
-  return colors.length == _kShaderColorCount ? colors : const [];
+// 传 OkLab，shader 内混色后转回 sRGB。
+List<_OklabColor> _meshShaderColors(List<Color> colors) {
+  if (colors.length != _kShaderColorCount) return const <_OklabColor>[];
+  return [for (final color in colors) _toOklab(color)];
 }
 
 /// 播放页下半区前景色安全档位：和背景主色（调色板第一颗，按主题明暗调整后）
@@ -277,6 +313,7 @@ class _MeshGradientBackgroundInternalState
   List<Color> _prevPaletteColors = [];
   List<Color> _targetPaletteColors = [];
   bool _isTransitioning = false;
+  bool _isFallbackPalette = false;
   bool _disposed = false;
 
   static const Duration _paletteTransitionDuration = Duration(
@@ -316,6 +353,7 @@ class _MeshGradientBackgroundInternalState
       _prevPaletteColors = [];
       _targetPaletteColors = [];
       _isTransitioning = false;
+      _isFallbackPalette = false;
     });
     _syncMeshController();
   }
@@ -397,7 +435,10 @@ class _MeshGradientBackgroundInternalState
 
   void _showFallbackPalette() {
     _lastPaletteSignature = null;
-    _setPaletteColors(List.filled(_kMeshColorCount, widget.fallbackColor));
+    _setPaletteColors(
+      List.filled(_kMeshColorCount, widget.fallbackColor),
+      isFallback: true,
+    );
   }
 
   bool _syncPaletteFromInputs({required bool animate}) {
@@ -410,7 +451,7 @@ class _MeshGradientBackgroundInternalState
     if (_lastPaletteSignature == signature) return true;
     _lastPaletteSignature = signature;
 
-    if (animate) {
+    if (animate && !_isFallbackPalette && _paletteColors.isNotEmpty) {
       _applyPaletteColors(target);
     } else {
       _setPaletteColors(target);
@@ -418,13 +459,14 @@ class _MeshGradientBackgroundInternalState
     return true;
   }
 
-  void _setPaletteColors(List<Color> colors) {
+  void _setPaletteColors(List<Color> colors, {bool isFallback = false}) {
     final target = _padPalette(colors);
     _transitionTicker?.dispose();
     _transitionTicker = null;
     _transitionValue = 0.0;
     _transitionValueNotifier.value = 0.0;
     _paletteColors = target;
+    _isFallbackPalette = isFallback;
     _prevPaletteColors = [];
     _targetPaletteColors = [];
     _isTransitioning = false;
@@ -434,6 +476,7 @@ class _MeshGradientBackgroundInternalState
     final target = _padPalette(colors);
     final displayedColors = _currentDisplayedPalette();
     final transitionDuration = duration ?? _paletteTransitionDuration;
+    _isFallbackPalette = false;
     _lastPaletteSignature = _paletteSignature(target);
     _transitionTicker?.dispose();
     _transitionTicker = null;
@@ -613,7 +656,8 @@ class _MeshGradientBackgroundInternalState
     final base = current.length == _kMeshColorCount
         ? current
         : _padPalette(current);
-    final slot = _rotationRandom.nextInt(_kMeshColorCount);
+    // 第 0 个槽位是调色板主色，只轮换辅助色。
+    final slot = 1 + _rotationRandom.nextInt(_kMeshColorCount - 1);
     final replacement = pool[_rotationRandom.nextInt(pool.length)];
     if (base[slot].toARGB32() == replacement.toARGB32()) {
       _syncRotationTimer();
@@ -681,9 +725,9 @@ class _MeshGradientBackgroundInternalState
   }
 
   Widget _buildMesh(
-    List<Color> colors, {
-    List<Color>? transitionFromColors,
-    List<Color>? transitionToColors,
+    List<_OklabColor> colors, {
+    List<_OklabColor>? transitionFromColors,
+    List<_OklabColor>? transitionToColors,
     required Color scrimColor,
   }) {
     if (colors.length != _kShaderColorCount) {
@@ -714,9 +758,9 @@ class _MeshGradientBackgroundInternalState
 }
 
 class _SoftMeshGradient extends StatefulWidget {
-  final List<Color> colors;
-  final List<Color>? transitionFromColors;
-  final List<Color>? transitionToColors;
+  final List<_OklabColor> colors;
+  final List<_OklabColor>? transitionFromColors;
+  final List<_OklabColor>? transitionToColors;
   final ValueListenable<double>? colorTransition;
   final _MeshAnimationController? controller;
   final Color scrimColor;
@@ -807,7 +851,8 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
   @override
   void initState() {
     super.initState();
-    _time = ValueNotifier(0);
+    // 用持续时钟起步，播放页重建后不从同一帧重新开始。
+    _time = ValueNotifier(_meshClockSeconds());
     _paintEpoch = ValueNotifier(0);
     _repaint = Listenable.merge([_time, _paintEpoch]);
     _ticker = createTicker(_onTick);
@@ -850,7 +895,7 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
 
   void _syncPainter({
     required FragmentShader shader,
-    required List<Color> colors,
+    required List<_OklabColor> colors,
     required Color scrimColor,
   }) {
     final changed =
@@ -903,9 +948,9 @@ class _SoftMeshGradientPainter extends CustomPainter {
 
   FragmentShader? shader;
   final ValueListenable<double> time;
-  List<Color> colors = const <Color>[];
-  List<Color>? transitionFromColors;
-  List<Color>? transitionToColors;
+  List<_OklabColor> colors = const <_OklabColor>[];
+  List<_OklabColor>? transitionFromColors;
+  List<_OklabColor>? transitionToColors;
   ValueListenable<double>? colorTransition;
   Color scrimColor;
   final Paint _paint;
@@ -931,18 +976,18 @@ class _SoftMeshGradientPainter extends CustomPainter {
         : colors.length;
     for (var colorIndex = 0; colorIndex < colorCount; colorIndex++) {
       final color = colors[colorIndex];
-      final r = from != null && to != null
-          ? from[colorIndex].r + (to[colorIndex].r - from[colorIndex].r) * t
-          : color.r;
-      final g = from != null && to != null
-          ? from[colorIndex].g + (to[colorIndex].g - from[colorIndex].g) * t
-          : color.g;
+      final l = from != null && to != null
+          ? from[colorIndex].l + (to[colorIndex].l - from[colorIndex].l) * t
+          : color.l;
+      final a = from != null && to != null
+          ? from[colorIndex].a + (to[colorIndex].a - from[colorIndex].a) * t
+          : color.a;
       final b = from != null && to != null
           ? from[colorIndex].b + (to[colorIndex].b - from[colorIndex].b) * t
           : color.b;
-      shader.setFloat(i, r);
+      shader.setFloat(i, l);
       i++;
-      shader.setFloat(i, g);
+      shader.setFloat(i, a);
       i++;
       shader.setFloat(i, b);
       i++;

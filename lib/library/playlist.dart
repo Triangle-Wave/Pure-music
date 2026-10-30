@@ -8,6 +8,7 @@ import 'package:flutter/painting.dart';
 import 'package:pure_music/core/database.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/library/virtual_track_index.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:path/path.dart' as p;
@@ -34,21 +35,17 @@ List<String> _uniquePlaylistPaths(Iterable<String> paths) {
 }
 
 String importedPlaylistFileNameKey(String value) {
-  return p.basename(value.trim()).toLowerCase();
+  return importedPlaylistBasenameKey(value);
 }
 
 String? findImportedPlaylistLibraryPath({
   required String rawPath,
   required Iterable<String> libraryPaths,
 }) {
-  final fileNameKey = importedPlaylistFileNameKey(rawPath);
-  if (fileNameKey.isEmpty) return null;
-  for (final libraryPath in libraryPaths) {
-    if (importedPlaylistFileNameKey(libraryPath) == fileNameKey) {
-      return libraryPath;
-    }
-  }
-  return null;
+  return findLibraryPathByImportedFileName(
+    rawPath: rawPath,
+    libraryPaths: libraryPaths,
+  );
 }
 
 Future<void> readPlaylists() async {
@@ -268,19 +265,13 @@ Future<Playlist?> importPlaylistFromFile() async {
     rawPaths = _parsePathList(content);
   }
 
-  final resolved = <String>[];
   final collection = AudioLibrary.instance.audioCollection;
-  for (final raw in rawPaths) {
-    if (File(raw).existsSync()) {
-      resolved.add(raw);
-      continue;
-    }
-    final matchedPath = findImportedPlaylistLibraryPath(
-      rawPath: raw,
-      libraryPaths: collection.map((a) => a.path),
-    );
-    if (matchedPath != null) resolved.add(matchedPath);
-  }
+  final resolved = resolveImportedLibraryPaths(
+    rawPaths: rawPaths,
+    virtualTracks: VirtualTrackIndex.fromAudios(collection),
+    libraryPaths: collection.map((a) => a.path),
+    preferExistingFile: true,
+  );
   if (resolved.isEmpty) return null;
   final basename = p.basenameWithoutExtension(file.path);
   return Playlist(basename, resolved);

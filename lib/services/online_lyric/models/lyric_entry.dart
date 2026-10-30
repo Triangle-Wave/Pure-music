@@ -33,6 +33,7 @@ class LyricEntry {
   String? translation;
   String? romanization;
   List<WordEntry>? words;
+  List<WordEntry>? romanWords;
 
   LyricEntry({
     required this.start,
@@ -41,6 +42,7 @@ class LyricEntry {
     this.translation,
     this.romanization,
     this.words,
+    this.romanWords,
   });
 }
 
@@ -110,6 +112,27 @@ class ParsedLyricResult {
           translation: line.translation,
           romanization: line.romanization,
           words: line.words
+              ?.map((w) => WordEntry(
+                    start: Duration(
+                      milliseconds: (w.start.inMilliseconds +
+                              offset.inMilliseconds)
+                          .clamp(
+                              0,
+                              w.start.inMilliseconds + offset.inMilliseconds),
+                    ),
+                    length: w.length,
+                    content: w.content,
+                    nextTime: Duration(
+                      milliseconds: (w.nextTime.inMilliseconds +
+                              offset.inMilliseconds)
+                          .clamp(
+                              0,
+                              w.nextTime.inMilliseconds +
+                                  offset.inMilliseconds),
+                    ),
+                  ))
+              .toList(),
+          romanWords: line.romanWords
               ?.map((w) => WordEntry(
                     start: Duration(
                       milliseconds: (w.start.inMilliseconds +

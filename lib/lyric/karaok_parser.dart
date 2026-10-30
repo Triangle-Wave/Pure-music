@@ -1,6 +1,7 @@
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/lyric/lrc.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
 
 // ──────────────────────────────────────────────
 // KaraOK 格式（YRC/QRC/KRC）解析器
@@ -101,8 +102,9 @@ SyncLyricLine _buildLine(
   Duration lineStart,
   Duration lineLength,
   List<_Word> words,
-  String? translation,
-) {
+  String? translation, {
+  String? romanization,
+}) {
   final syncWords = words
       .map(
         (w) => SyncLyricWord(
@@ -113,7 +115,110 @@ SyncLyricLine _buildLine(
       )
       .toList();
 
-  return SyncLyricLine(lineStart, lineLength, syncWords, translation);
+  final line = SyncLyricLine(lineStart, lineLength, syncWords, translation);
+  if (romanization != null && romanization.isNotEmpty && syncWords.isNotEmpty) {
+    line.romanLyric = romanization;
+    line.romanWords = mapRomanWords(
+      romanText: romanization,
+      words: syncWords,
+      lineStart: lineStart,
+      lineLength: lineLength,
+    );
+  }
+  return line;
+}
+
+/// 解析带时间戳的翻译或罗马音文本，按行序返回。
+List<_LineData> _parseTimedTextLines(String text) {
+  final lines = <_LineData>[];
+  for (final rawLine in text.split(RegExp(r'\r?\n'))) {
+    final timestamps = _translationTimestampRe
+        .allMatches(rawLine)
+        .toList(growable: false);
+    final textStart = timestamps.isEmpty ? 0 : timestamps.last.end;
+    for (final timestamp in timestamps) {
+      final startMs = timestamp.group(1) != null
+          ? int.parse(timestamp.group(1)!)
+          : (((int.parse(timestamp.group(2)!) * 60) +
+                        double.parse(timestamp.group(3)!)) *
+                    1000)
+                .round();
+      lines.add(
+        _LineData(
+          start: Duration(milliseconds: startMs),
+          length: Duration.zero,
+          words: [],
+          rawText: rawLine.substring(textStart).trim(),
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+/// 把补充文本行（罗马音）对齐到歌词行，返回每条歌词对应的补充行下标。
+///
+/// 两侧有效行数相等时按行序一一对应，补充行与歌词行的时间戳偏移不影响
+/// 对齐结果；行数不等时按时间戳做单向最近邻匹配，首行在
+/// [firstLineRelaxedToleranceMs] 内放宽，补偿源文件首行时间戳的整体偏移。
+/// 补充行更贴近下一句、或已落在下一句的 [toleranceMs] 内时首行不启用放宽，
+/// 该行留给下一句。
+/// 返回列表长度为 [lyricStartsMs] 的长度，`null` 表示该行没有补充内容。
+List<int?> alignSupplementalLines({
+  required List<int> lyricStartsMs,
+  required List<int> supplementalStartsMs,
+  int toleranceMs = 300,
+  int firstLineRelaxedToleranceMs = 3000,
+}) {
+  final result = List<int?>.filled(lyricStartsMs.length, null);
+  if (lyricStartsMs.isEmpty || supplementalStartsMs.isEmpty) {
+    return result;
+  }
+
+  if (lyricStartsMs.length == supplementalStartsMs.length) {
+    for (var i = 0; i < lyricStartsMs.length; i++) {
+      result[i] = i;
+    }
+    return result;
+  }
+
+  var cursor = 0;
+  for (var i = 0; i < lyricStartsMs.length; i++) {
+    // 首行放宽时会把补充行预留给下一句，已填充的行不再处理。
+    if (result[i] != null) continue;
+    final lineMs = lyricStartsMs[i];
+    while (cursor < supplementalStartsMs.length) {
+      final diff = lineMs - supplementalStartsMs[cursor];
+      if (diff.abs() <= toleranceMs) {
+        result[i] = cursor;
+        cursor++;
+        break;
+      }
+      // 首行罗马音与歌词的时间戳整体错开时允许较大偏移，提前或滞后都适用，
+      // 避免首句永久匹配失败。放宽前先比较首句与下一句到补充行的距离，
+      // 更贴近下一句、或已落在下一句容差内时留给下一句，避免首句抢占。
+      if (i == 0 &&
+          cursor == 0 &&
+          diff.abs() <= firstLineRelaxedToleranceMs) {
+        final supplementalMs = supplementalStartsMs[cursor];
+        final firstDistance = (lyricStartsMs[i] - supplementalMs).abs();
+        if (i + 1 < lyricStartsMs.length) {
+          final nextDistance = (lyricStartsMs[i + 1] - supplementalMs).abs();
+          if (nextDistance <= toleranceMs || nextDistance < firstDistance) {
+            result[i + 1] = cursor;
+            cursor++;
+            break;
+          }
+        }
+        result[i] = cursor;
+        cursor++;
+        break;
+      }
+      if (diff < 0) break;
+      cursor++;
+    }
+  }
+  return result;
 }
 
 // ──────────────────────────────────────────────
@@ -125,12 +230,14 @@ SyncLyricLine _buildLine(
 /// [ext] 扩展名（.yrc / .qrc / .krc）
 /// [content] 已解密/解码的歌词文本
 /// [transContent] 可选的翻译文本（QRC/YRC 配对的 .lrc）
+/// [romanizationText] 可选的罗马音文本，需带行时间戳
 Lyric? parseKaraokToPureLyric(
   String ext,
-  String content, [
+  String content, {
   String? transContent,
   bool? keepMetadata,
-]) {
+  String? romanizationText,
+}) {
   final shouldKeepMetadata =
       keepMetadata ?? AppSettings.instance.keepLyricMetadata;
   final cfg = _configFor(ext);
@@ -166,35 +273,49 @@ Lyric? parseKaraokToPureLyric(
   if (lines.isEmpty) return null;
 
   // 合并翻译
-  final transLines = <_LineData>[];
-  if (transContent != null && transContent.isNotEmpty) {
-    for (final rawLine in transContent.split(RegExp(r'\r?\n'))) {
-      final timestamps = _translationTimestampRe
-          .allMatches(rawLine)
-          .toList(growable: false);
-      final textStart = timestamps.isEmpty ? 0 : timestamps.last.end;
-      for (var i = 0; i < timestamps.length; i++) {
-        final timestamp = timestamps[i];
-        final startMs = timestamp.group(1) != null
-            ? int.parse(timestamp.group(1)!)
-            : (((int.parse(timestamp.group(2)!) * 60) +
-                          double.parse(timestamp.group(3)!)) *
-                      1000)
-                  .round();
-        transLines.add(
-          _LineData(
-            start: Duration(milliseconds: startMs),
-            length: Duration.zero,
-            words: [],
-            rawText: rawLine.substring(textStart).trim(),
-          ),
-        );
-      }
-    }
+  final transLines = transContent != null && transContent.isNotEmpty
+      ? _parseTimedTextLines(transContent)
+      : <_LineData>[];
+
+  // 合并罗马音
+  final romanLines = romanizationText != null && romanizationText.isNotEmpty
+      ? _parseTimedTextLines(romanizationText)
+      : <_LineData>[];
+  final romanEntries = <_LineData>[];
+  for (final r in romanLines) {
+    final text = r.rawText?.trim();
+    if (text == null || text.isEmpty || text == '//') continue;
+    romanEntries.add(r);
   }
 
-  // 构建最终的 SyncLyricLine 列表（两指针法匹配翻译）
+  // 罗马音按有效歌词行对齐：行数相等走行序，不等走时间戳兜底。
+  // `//` 占位行与空行不占用行序，避免挤掉后续行的罗马音。
+  final effectiveLineIndices = <int>[];
+  final lyricStartsMs = <int>[];
+  for (var i = 0; i < lines.length; i++) {
+    final lineText = lines[i].words.map((word) => word.text).join().trim();
+    if (lineText.isEmpty || lineText == '//') continue;
+    effectiveLineIndices.add(i);
+    lyricStartsMs.add(lines[i].start.inMilliseconds);
+  }
+  final romanAlignment = alignSupplementalLines(
+    lyricStartsMs: lyricStartsMs,
+    supplementalStartsMs: [
+      for (final r in romanEntries) r.start.inMilliseconds,
+    ],
+  );
+  final romanizationByLine = <int, String>{};
+  for (var i = 0; i < romanAlignment.length; i++) {
+    final romanIndex = romanAlignment[i];
+    if (romanIndex == null) continue;
+    romanizationByLine[effectiveLineIndices[i]] = romanEntries[romanIndex]
+        .rawText!
+        .trim();
+  }
+
+  // 构建最终的 SyncLyricLine 列表（翻译用两指针法按时间戳匹配）
   final resultLines = <SyncLyricLine>[];
+  final metadataResultLines = <SyncLyricLine>{};
   const toleranceMs = 300;
   int transIdx = 0;
 
@@ -219,8 +340,19 @@ Lyric? parseKaraokToPureLyric(
       }
     }
 
-    final line = _buildLine(l.start, l.length, l.words, translation);
+    final romanization = romanizationByLine[i];
+
+    final line = _buildLine(
+      l.start,
+      l.length,
+      l.words,
+      translation,
+      romanization: romanization,
+    );
     resultLines.add(line);
+    if (LrcLine.isLyricMetadataLine(l.words.map((word) => word.text).join())) {
+      metadataResultLines.add(line);
+    }
   }
 
   // 添加前奏空白行
@@ -236,6 +368,8 @@ Lyric? parseKaraokToPureLyric(
   for (int i = resultLines.length - 1; i >= 1; i--) {
     final curr = resultLines[i - 1];
     final next = resultLines[i];
+    // 元数据行后的空档属于前奏，不应显示成额外的间奏行。
+    if (metadataResultLines.contains(curr)) continue;
     final gap = next.start - (curr.start + curr.length);
     if (gap > const Duration(seconds: 5)) {
       resultLines.insert(i, SyncLyricLine(curr.start + curr.length, gap, []));

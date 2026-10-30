@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:pure_music/core/app_fonts.dart';
 import 'package:pure_music/core/design_tokens.dart';
@@ -23,11 +25,14 @@ import 'package:pure_music/component/stacked_list_view.dart'
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/play_service/taskbar_thumbnail_service.dart';
 import 'package:pure_music/play_service/desktop_lyric_service.dart';
+import 'package:pure_music/services/online_lyric/lyric_candidate_cache.dart';
+import 'package:pure_music/services/online_lyric/lyric_candidate_service.dart';
 import 'package:pure_music/page/now_playing_page/component/lyric_view_controls.dart';
 import 'package:pure_music/page/page_scaffold.dart';
 import 'package:pure_music/page/settings_page/artist_alias_editor.dart';
 import 'package:pure_music/page/settings_page/artist_no_split_editor.dart';
 import 'package:pure_music/page/settings_page/artist_separator_editor.dart';
+import 'package:pure_music/page/settings_page/audio_output_settings.dart';
 import 'package:pure_music/page/settings_page/settings_group_entry.dart';
 import 'package:pure_music/page/settings_page/tabs/advanced_tab.dart';
 import 'package:pure_music/page/settings_page/tabs/about_tab.dart';
@@ -35,7 +40,9 @@ import 'package:pure_music/page/settings_page/tabs/settings_section_header.dart'
 import 'package:pure_music/page/settings_page/hotkey_settings.dart'
     show HotkeySettingsPanel, GlobalHotkeySettingsPanel;
 import 'package:pure_music/page/settings_page/lastfm_settings.dart';
+import 'package:pure_music/page/settings_page/network_proxy_settings.dart';
 import 'package:pure_music/page/settings_page/backup_settings.dart';
+import 'package:pure_music/page/settings_page/cache_settings.dart';
 import 'package:pure_music/page/settings_page/other_settings.dart'
     show
         AudioEchoLogRecordControl,
@@ -1899,6 +1906,13 @@ class _PlaybackTabContent extends StatelessWidget {
           groupId: 'playback-behavior',
         ),
         SizedBox(height: 8.0),
+        _GroupEntry(
+          icon: Symbols.speaker,
+          title: '音频输出',
+          subtitle: '输出设备、共享/独占、采样率与格式',
+          groupId: 'playback-output',
+        ),
+        SizedBox(height: 8.0),
         SettingsSectionHeader('第三方服务'),
         SizedBox(height: 4.0),
         _GroupEntry(
@@ -3451,6 +3465,93 @@ class _DefaultLyricSourceControlState extends State<DefaultLyricSourceControl> {
   }
 }
 
+class _LyricCandidateCacheControl extends StatefulWidget {
+  const _LyricCandidateCacheControl();
+
+  @override
+  State<_LyricCandidateCacheControl> createState() =>
+      _LyricCandidateCacheControlState();
+}
+
+class _LyricCandidateCacheControlState
+    extends State<_LyricCandidateCacheControl> {
+  bool _loading = true;
+  bool _clearing = false;
+  String _summary = '统计中…';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadStats());
+  }
+
+  Future<void> _loadStats() async {
+    final stats = await LyricCandidateCache.instance.stats();
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _summary = stats.isEmpty
+          ? '暂无缓存'
+          : '${stats.fileCount} 首 · ${_formatBytes(stats.bytes)}';
+    });
+  }
+
+  Future<void> _clear() async {
+    if (_clearing) return;
+    setState(() => _clearing = true);
+    try {
+      final removed = await clearLyricCandidateCache();
+      PlayService.instance.lyricService.forgetCachedCandidates();
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _summary = '暂无缓存';
+      });
+      showTextOnSnackBar(
+        '已清理 $removed 首歌词候选缓存',
+        variant: ToastVariant.success,
+      );
+    } catch (error, trace) {
+      log.settings.warn(
+        'legacy',
+        '清理歌词候选缓存失败',
+        error: error,
+        stackTrace: trace,
+      );
+      if (mounted) {
+        showTextOnSnackBar('清理歌词缓存失败，请查看日志', variant: ToastVariant.error);
+      }
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      description: '在线歌词候选缓存',
+      subtitle: '按曲目保存候选与选择，保留一年；清理后下次播放重新获取',
+      action: FilledButton.tonalIcon(
+        onPressed: _loading || _clearing ? null : _clear,
+        icon: _clearing
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Symbols.delete_sweep),
+        label: Text(_summary),
+      ),
+    );
+  }
+}
+
 class SettingsEmptyState extends StatelessWidget {
   const SettingsEmptyState({
     super.key,
@@ -3617,6 +3718,11 @@ const _settingsGroups = <String, _SettingsGroupDesc>{
     '进度记忆、ReplayGain、片头空白、MIDI 与切歌过渡',
     _PlaybackBehaviorGroup(),
   ),
+  'playback-output': _SettingsGroupDesc(
+    '音频输出',
+    '输出设备、共享/独占、采样率与格式',
+    AudioOutputSettingsPanel(),
+  ),
   'playback-lastfm': _SettingsGroupDesc(
     'Last.fm',
     '授权账号并提交播放记录',
@@ -3646,6 +3752,11 @@ const _settingsGroups = <String, _SettingsGroupDesc>{
     '系统行为',
     '关闭窗口、防休眠与日志',
     _AdvancedSystemGroup(),
+  ),
+  'advanced-network': _SettingsGroupDesc(
+    '网络',
+    '代理与连接',
+    NetworkProxySettingsPanel(),
   ),
   'advanced-custom': _SettingsGroupDesc(
     '媒体解析',
@@ -4060,6 +4171,10 @@ class _LyricSourceGroup extends StatelessWidget {
         SettingsSectionHeader('来源'),
         SizedBox(height: 4.0),
         DefaultLyricSourceControl(),
+        SizedBox(height: 16.0),
+        SettingsSectionHeader('缓存'),
+        SizedBox(height: 4.0),
+        _LyricCandidateCacheControl(),
       ],
     );
   }
@@ -4099,6 +4214,22 @@ class _LyricContentGroupState extends State<_LyricContentGroup> {
               settings.saveSettings();
               PlayService.instance.lyricService
                   .reloadAfterMetadataSettingChange();
+            },
+          ),
+        ),
+        const SizedBox(height: 12.0),
+        SettingsTile(
+          description: '自动生成罗马音',
+          subtitle: settings.autoRomanizeLyric
+              ? '日文歌词缺少罗马音时用假名本地转写'
+              : '只显示歌词自带的罗马音',
+          action: Switch(
+            value: settings.autoRomanizeLyric,
+            onChanged: (value) {
+              setState(() => settings.autoRomanizeLyric = value);
+              settings.saveSettings();
+              PlayService.instance.lyricService
+                  .applyAutoRomanizationSetting();
             },
           ),
         ),
@@ -5092,6 +5223,10 @@ class _AdvancedSystemGroup extends StatelessWidget {
         _PreventSleepOnNowPlayingControl(),
         SizedBox(height: 16.0),
         AudioEchoLogRecordControl(),
+        SizedBox(height: 24.0),
+        SettingsSectionHeader('缓存'),
+        SizedBox(height: 4.0),
+        CacheDirectorySettingsPanel(),
       ],
     );
   }

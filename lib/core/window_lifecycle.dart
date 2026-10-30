@@ -430,6 +430,10 @@ class WindowLifecycleService with WindowListener, TrayListener {
         );
       }
       await _run('savePreference', AppPreference.instance.save());
+      await _run(
+        'flushPlaybackSave',
+        AppPreference.instance.flushPlaybackSave(),
+      );
     }
     if (PlayService.isInitialized) {
       await _run(

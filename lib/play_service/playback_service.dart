@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/play_service/play_service.dart';
@@ -13,10 +14,15 @@ import 'package:pure_music/play_service/equalizer_service.dart';
 import 'package:pure_music/play_service/playback_listen_tracker.dart';
 import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
+import 'package:pure_music/play_service/sacd_gapless_guard.dart';
+import 'package:pure_music/play_service/sacd_pcm_cache_probe.dart';
+import 'package:pure_music/play_service/sacd_source_cache.dart';
+import 'package:pure_music/play_service/sacd_source_resolver.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
 import 'package:pure_music/native/bass/bass_player.dart';
+import 'package:pure_music/native/rust/api/sacd.dart' as rust_sacd;
 import 'package:pure_music/native/rust/api/smtc_flutter.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
@@ -25,7 +31,9 @@ import 'package:pure_music/core/sleep_blocker.dart';
 import 'package:pure_music/core/log/playback_log.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/theme.dart';
+import 'package:path/path.dart' as p;
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/remote/remote_library.dart';
 import 'package:pure_music/services/concert_session.dart';
 import 'package:pure_music/services/lastfm/lastfm_models.dart';
 import 'package:pure_music/services/lastfm/lastfm_service.dart';
@@ -54,6 +62,27 @@ final class _PendingGaplessTransition {
   final Audio audio;
 }
 
+/// 单次后台 PCM 转换任务的全部参数。
+final class _SacdPcmJob {
+  const _SacdPcmJob({
+    required this.trackUid,
+    required this.isoPath,
+    required this.area,
+    required this.trackNumber,
+    required this.cacheRoot,
+    required this.sampleRate,
+    required this.bitDepth,
+  });
+
+  final String trackUid;
+  final String isoPath;
+  final String area;
+  final int trackNumber;
+  final String cacheRoot;
+  final int sampleRate;
+  final int bitDepth;
+}
+
 /// 只通知 now playing 变更
 class PlaybackService extends ChangeNotifier {
   final PlayService playService;
@@ -66,7 +95,15 @@ class PlaybackService extends ChangeNotifier {
   Timer? _smtcPositionTimer;
   Timer? _smtcKeepAliveTimer;
   final Set<Timer> _positionSyncBurstTimers = {};
+  int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
+  final SacdSourceCache _sacdSourceCache = SacdSourceCache();
+  final List<_SacdPcmJob> _sacdPcmJobs = <_SacdPcmJob>[];
+  final Set<String> _sacdPcmQueued = <String>{};
+  final Set<String> _sacdPcmFailed = <String>{};
+  Future<void>? _sacdPcmRunner;
+  String? _lastSacdPreparingUid;
+  int _lastSacdPreparingMs = 0;
   int? _listenRecordingToken;
   String? _supportPath;
   bool _closed = false;
@@ -373,6 +410,7 @@ class PlaybackService extends ChangeNotifier {
   final _player = BassPlayer();
   final _smtc = SmtcBridge.create();
   final _pref = AppPreference.instance.playbackPref;
+  bool _audioOutputSwitchInProgress = false;
   late final PlaybackSessionStore _sessionStore = PlaybackSessionStore(
     preference: _pref,
     save: AppPreference.instance.savePlaybackOnly,
@@ -478,7 +516,7 @@ class PlaybackService extends ChangeNotifier {
     final audio = nowPlaying;
     if (audio != null && BassPlayer.isMidiPath(audio.path) && applied) {
       final position = _player.position;
-      _player.setSource(audio.path);
+      _player.setSource(_playbackPathFor(audio));
       if (position > 0.2) _player.seek(position);
       _player.start();
     }
@@ -517,7 +555,11 @@ class PlaybackService extends ChangeNotifier {
 
   void reapplyOutputGain() => _eq.reapplyOutputGain();
 
+  String _playbackPathFor(Audio audio) =>
+      RemoteLibrary.instance.resolvePlaybackPath(audio.path);
+
   Future<double?> _readReplayGain(String path) async {
+    if (RemoteLibrary.isRemotePath(path)) return null;
     if (!_pref.replayGainEnabled) return null;
     try {
       final meta = await rust_tag_reader.readAudioExtraMetadata(path: path);
@@ -552,11 +594,14 @@ class PlaybackService extends ChangeNotifier {
 
   void _maybeSkipLeadingSilence(Audio audio, {required String reason}) {
     if (!_pref.skipLeadingSilence || reason == 'restore') return;
+    // 合成路径不能用于整轨静音分析，虚拟轨从段起点开始播放。
+    if (audio.isVirtualTrack) return;
     final token = ++_skipLeadingSilenceToken;
     unawaited(_skipLeadingSilenceIfNeeded(audio, token));
   }
 
   Future<void> _skipLeadingSilenceIfNeeded(Audio audio, int token) async {
+    if (RemoteLibrary.isRemotePath(audio.path)) return;
     try {
       final libraryRoot = _supportPath ??= (await getAppDataDir()).path;
       if (_closed || token != _skipLeadingSilenceToken || nowPlaying != audio) {
@@ -660,9 +705,18 @@ class PlaybackService extends ChangeNotifier {
     }
     if (applied) {
       _wasapiExclusive.value = exclusive;
+      _pref.outputMode = exclusive
+          ? PlaybackPreference.outputModeExclusive
+          : PlaybackPreference.outputModeShared;
+      final appliedConfig = _player.outputConfig;
+      _pref.setActiveOutputDevice(
+        appliedConfig.deviceId,
+        appliedConfig.deviceName,
+      );
       if (disabled.isNotEmpty) {
         unawaited(AppPreference.instance.save());
       }
+      unawaited(AppPreference.instance.savePlaybackOnly());
       final modeLabel = exclusive ? '独占' : '共享';
       final message = disabled.isEmpty
           ? '已切换到$modeLabel'
@@ -670,6 +724,164 @@ class PlaybackService extends ChangeNotifier {
       showTextOnSnackBar(message, variant: ToastVariant.success);
     }
     return applied;
+  }
+
+  /// 设置页使用：枚举与当前输出模式对应的设备列表。
+  Future<List<BassOutputDevice>> enumerateOutputDevices({
+    required bool exclusive,
+  }) {
+    return _player.enumerateOutputDevices(exclusive: exclusive);
+  }
+
+  BassOutputState get outputState => _player.outputState;
+
+  /// 应用完整的音频输出设置。切换失败时播放器回退原输出，偏好保持不变。
+  ///
+  /// [deviceId]/[deviceName] 为空时使用该模式已记录的设备；切换输出模式时不
+  /// 复用另一模式的设备号，直接取目标模式自己的记录。[keepStoredDevice] 为
+  /// true 时只更新采样率与格式，保留偏好中已失效的设备选择。
+  Future<BassOutputApplyResult> applyAudioOutputConfig({
+    int? deviceId,
+    String? deviceName,
+    required bool exclusive,
+    required int sampleRate,
+    required BassOutputFormat format,
+    bool keepStoredDevice = false,
+  }) async {
+    if (_audioOutputSwitchInProgress) {
+      return const BassOutputApplyResult(
+        success: false,
+        message: '正在切换输出，请稍候',
+      );
+    }
+    _audioOutputSwitchInProgress = true;
+    _synchronizeGaplessTransition();
+
+    final disabled = <String>[];
+    final previousEqEnabled = _eq.eqEnabled;
+    final previousAudioEffects = _eq.audioEffects;
+    final previousRate = _rate.value;
+    final previousPitch = _pitch.value;
+    final wasExclusive = _player.wasapiExclusive;
+
+    if (exclusive && !wasExclusive) {
+      disabled.addAll(_eq.disableForExclusiveMode());
+      if ((_rate.value - 1.0).abs() > 1e-6) {
+        _rate.value = 1.0;
+        _player.setRate(1.0);
+        disabled.add('变速');
+      }
+      if (_pitch.value.abs() > 1e-6) {
+        _pitch.value = 0.0;
+        _player.setPitch(0.0);
+        disabled.add('变调');
+      }
+    }
+
+    // 切换输出模式时直接使用目标模式自己的设备记录，两种模式的编号空间不混用。
+    final modeChanged = exclusive != _pref.isExclusiveOutput;
+    final targetDeviceId = modeChanged
+        ? _pref.outputDeviceIdFor(exclusive)
+        : (deviceId ?? _pref.outputDeviceIdFor(exclusive));
+    final targetDeviceName = modeChanged
+        ? _pref.outputDeviceNameFor(exclusive)
+        : (deviceName ?? _pref.outputDeviceNameFor(exclusive));
+
+    try {
+      final result = await _player.applyOutputConfig(
+        BassOutputConfig(
+          deviceId: targetDeviceId,
+          deviceName: targetDeviceName,
+          exclusive: exclusive,
+          sampleRate: sampleRate,
+          format: format,
+        ),
+      );
+      _wasapiExclusive.value = _player.wasapiExclusive;
+
+      if (!result.success) {
+        _restoreDisabledForExclusive(
+          disabled,
+          eqEnabled: previousEqEnabled,
+          audioEffects: previousAudioEffects,
+          rate: previousRate,
+          pitch: previousPitch,
+        );
+        showTextOnSnackBar(result.message, variant: ToastVariant.error);
+        return result;
+      }
+
+      _pref.outputMode = exclusive
+          ? PlaybackPreference.outputModeExclusive
+          : PlaybackPreference.outputModeShared;
+      if (!keepStoredDevice) {
+        _pref.setOutputDeviceForMode(
+          exclusive,
+          targetDeviceId,
+          targetDeviceName,
+        );
+      }
+      _pref.outputSampleRate = sampleRate;
+      _pref.outputFormat = format.preferenceValue;
+
+      final saved = await AppPreference.instance.savePlaybackOnly();
+      _rebuildGaplessPreparation();
+      if (!saved) {
+        showTextOnSnackBar(
+          '输出已切换，但设置保存失败',
+          variant: ToastVariant.error,
+        );
+      } else if (result.usedDefaultDevice) {
+        showTextOnSnackBar(result.message, variant: ToastVariant.info);
+      } else {
+        showTextOnSnackBar(
+          '已切换到${exclusive ? '独占' : '共享'}输出',
+          variant: ToastVariant.success,
+        );
+      }
+      return result;
+    } catch (err, trace) {
+      _wasapiExclusive.value = _player.wasapiExclusive;
+      _restoreDisabledForExclusive(
+        disabled,
+        eqEnabled: previousEqEnabled,
+        audioEffects: previousAudioEffects,
+        rate: previousRate,
+        pitch: previousPitch,
+      );
+      log.playback.error(
+        'audio-output',
+        '应用音频输出设置失败',
+        error: err,
+        stackTrace: trace,
+      );
+      showTextOnSnackBar('切换音频输出失败，请查看日志', variant: ToastVariant.error);
+      return BassOutputApplyResult(
+        success: false,
+        message: '切换音频输出失败：$err',
+      );
+    } finally {
+      _audioOutputSwitchInProgress = false;
+    }
+  }
+
+  void _restoreDisabledForExclusive(
+    List<String> disabled, {
+    required bool eqEnabled,
+    required AudioDspSettings audioEffects,
+    required double rate,
+    required double pitch,
+  }) {
+    if (disabled.contains('EQ')) _eq.setEqEnabled(eqEnabled);
+    if (disabled.contains('DSP')) _eq.setAudioEffects(audioEffects);
+    if (disabled.contains('变速')) {
+      _rate.value = rate;
+      _player.setRate(rate);
+    }
+    if (disabled.contains('变调')) {
+      _pitch.value = pitch;
+      _player.setPitch(pitch);
+    }
   }
 
   late final _nowPlaying = _NowPlayingNotifier();
@@ -740,15 +952,30 @@ class PlaybackService extends ChangeNotifier {
 
   double get volumeDsp => _pref.volumeDsp;
 
-  /// 修改解码时的音量（不影响 Windows 系统音量）
-  void setVolumeDsp(double volume) {
-    log.playback.info('legacy', '[action] setVolumeDsp=$volume');
-    AudioEchoLogRecorder.instance.mark(
-      'setVolumeDsp',
-      extra: {'value': volume},
-    );
+  int _lastVolumeDspDragLogMs = 0;
+
+  /// 修改解码时的音量（不影响 Windows 系统音量）。
+  ///
+  /// [persist] 为 false 时只更新内存与 BASS 输出音量，供滑杆拖动过程调用；
+  /// 拖动结束后以默认参数调用一次，落盘并通知监听者。
+  void setVolumeDsp(double volume, {bool persist = true}) {
+    if (persist) {
+      log.playback.info('legacy', '[action] setVolumeDsp=$volume');
+      AudioEchoLogRecorder.instance.mark(
+        'setVolumeDsp',
+        extra: {'value': volume},
+      );
+    } else {
+      // 拖动期间的日志按 250ms 节流，避免逐帧写日志与污染诊断缓冲。
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastVolumeDspDragLogMs >= 250) {
+        _lastVolumeDspDragLogMs = nowMs;
+        log.playback.debug('legacy', '[action] setVolumeDsp(drag)=$volume');
+      }
+    }
     _pref.volumeDsp = volume;
     _eq.reapplyOutputGain();
+    if (!persist) return;
     _savePlaybackOnly();
     notifyListeners();
   }
@@ -811,6 +1038,7 @@ class PlaybackService extends ChangeNotifier {
       if (currentPosition.isFinite &&
           sampledLength.isFinite &&
           sampledLength > 1) {
+        _learnRemoteDuration(sampledLength);
         _diagAt = nextDiagnosticAt(
           previous: _diagAt,
           sample: currentPosition,
@@ -824,6 +1052,18 @@ class PlaybackService extends ChangeNotifier {
     _smartTransitions.onPositionTick(currentPosition, length);
     final progress = (currentPosition * 1000).round();
     unawaited(_smtc.updateTimeProperties(progress));
+  }
+
+  void _learnRemoteDuration(double sampledLength) {
+    final audio = nowPlaying;
+    if (audio == null || audio.duration > 0) return;
+    if (!RemoteLibrary.isRemotePath(audio.path)) return;
+    final seconds = sampledLength.round();
+    if (seconds <= 0) return;
+    audio.duration = seconds;
+    unawaited(
+      RemoteLibrary.instance.updateTrackDuration(audio.path, seconds),
+    );
   }
 
   void _syncSmtcPositionTimer() {
@@ -960,6 +1200,8 @@ class PlaybackService extends ChangeNotifier {
       return null;
     }
     final incoming = items[incomingIndex];
+    // 虚拟轨的段边界不能被整轨预加载和智能过渡覆盖。
+    if (outgoing.isVirtualTrack || incoming.isVirtualTrack) return null;
     return SmartTransitionTarget(
       playlistRevision: _playlistRevision,
       outgoingIndex: outgoingIndex,
@@ -1000,6 +1242,9 @@ class PlaybackService extends ChangeNotifier {
 
   bool _prepareSmartFallback(SmartTransitionTarget target, String reason) {
     if (!_isCurrentSmartTarget(target)) return false;
+    if (target.outgoing.isVirtualTrack || target.incoming.isVirtualTrack) {
+      return false;
+    }
     final pending = _PendingGaplessTransition(
       id: _nextGaplessTransitionId++,
       playlistRevision: target.playlistRevision,
@@ -1009,7 +1254,7 @@ class PlaybackService extends ChangeNotifier {
     );
     _pendingGaplessTransition = pending;
     final prepared = _player.prepareGaplessSource(
-      target.incoming.path,
+      _playbackPathFor(target.incoming),
       transitionId: pending.id,
       transitionMode: TransitionMode.crossfade,
     );
@@ -1091,6 +1336,10 @@ class PlaybackService extends ChangeNotifier {
       return;
     }
     if (_invalidateGaplessPreparation()) return;
+    // CUE 虚拟轨按段截断混音器长度，预加载整轨会越过段边界；
+    // SACD 播放完整缓存 DSF，按真实路径预建。
+    final currentAudio = nowPlaying;
+    if (currentAudio != null && currentAudio.isCueTrack) return;
     if (_pref.transitionMode == TransitionMode.smart) {
       if (!_closed) _smartTransitions.rebuild();
       return;
@@ -1108,6 +1357,7 @@ class PlaybackService extends ChangeNotifier {
     }
 
     final audio = items[targetIndex];
+    if (audio.isCueTrack) return;
     final pending = _PendingGaplessTransition(
       id: _nextGaplessTransitionId++,
       playlistRevision: _playlistRevision,
@@ -1116,16 +1366,92 @@ class PlaybackService extends ChangeNotifier {
       audio: audio,
     );
     _pendingGaplessTransition = pending;
-    if (!_player.prepareGaplessSource(audio.path, transitionId: pending.id)) {
+    if (audio.isSacdTrack) {
+      unawaited(_prepareSacdGaplessSource(pending));
+      return;
+    }
+    if (!_player.prepareGaplessSource(
+      _playbackPathFor(audio),
+      transitionId: pending.id,
+    )) {
       _pendingGaplessTransition = null;
       return;
     }
+    _applyGaplessReplayGain(pending);
+  }
+
+  /// SACD 轨先解析可播放缓存路径，再预建无缝衔接；PCM 未就绪时使用 DSF。
+  ///
+  /// 提取期间用户可能切歌或切换列表，恢复后必须通过二次校验才操作播放器。
+  Future<void> _prepareSacdGaplessSource(
+    _PendingGaplessTransition pending,
+  ) async {
+    final trackUid = pending.audio.cueSegment?.trackUid ?? pending.audio.path;
+    try {
+      // 快速连切时 pending 很快被替换，先让出这段窗口再提取，避免为已失效的目标读盘。
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!_isGaplessPreparationCurrent(pending)) return;
+      final sourcePath = await _ensureSacdSource(pending.audio, prefetch: true);
+      if (!_isGaplessPreparationCurrent(pending)) return;
+      if (!_player.prepareGaplessSource(sourcePath, transitionId: pending.id)) {
+        if (identical(_pendingGaplessTransition, pending)) {
+          _pendingGaplessTransition = null;
+        }
+        log.playback.warn(
+          'sacd.gapless',
+          'SACD 预建无缝衔接失败，回退为不预建',
+          fields: {'uid': trackUid},
+        );
+        return;
+      }
+      _applyGaplessReplayGain(pending);
+    } catch (err, trace) {
+      if (identical(_pendingGaplessTransition, pending)) {
+        _pendingGaplessTransition = null;
+      }
+      log.playback.warn(
+        'sacd.gapless',
+        'SACD 轨道准备失败，回退为不预建',
+        fields: {'uid': trackUid},
+        error: err,
+        stackTrace: trace,
+      );
+    }
+  }
+
+  bool _isGaplessPreparationCurrent(_PendingGaplessTransition pending) {
+    final items = _playlist.value;
+    final currentTarget =
+        pending.targetIndex < items.length ? items[pending.targetIndex] : null;
+    return isGaplessTargetStillCurrent(
+      closed: _closed,
+      playlistRevision: pending.playlistRevision,
+      currentPlaylistRevision: _playlistRevision,
+      fromIndex: pending.fromIndex,
+      currentIndex: _playlistIndex,
+      pendingStillActive: identical(_pendingGaplessTransition, pending),
+      currentTarget: currentTarget,
+      target: pending.audio,
+    );
+  }
+
+  void _applyGaplessReplayGain(_PendingGaplessTransition pending) {
     if (!_pref.replayGainEnabled) return;
     unawaited(
-      _readReplayGain(audio.path).then((gainDb) {
-        if (_closed || !_pref.replayGainEnabled) return;
-        _player.updateGaplessReplayGain(pending.id, gainDb);
-      }),
+      _readReplayGain(pending.audio.path)
+          .then((gainDb) {
+            if (_closed || !_pref.replayGainEnabled) return;
+            _player.updateGaplessReplayGain(pending.id, gainDb);
+          })
+          .catchError((Object err, StackTrace trace) {
+            log.playback.warn(
+              'gapless.replaygain',
+              '更新预建 ReplayGain 失败',
+              fields: {'transitionId': pending.id},
+              error: err,
+              stackTrace: trace,
+            );
+          }),
     );
   }
 
@@ -1144,13 +1470,15 @@ class PlaybackService extends ChangeNotifier {
         SleepTimerService.instance.onSongCompleted();
         return;
       }
-      _loadAndPlayInDirection(
-        reason: 'gapless',
-        origin: _captureOrigin(),
-        startIndex: (_playlistIndex ?? -1) + 1,
-        playlist: items,
-        step: 1,
-        wrap: true,
+      unawaited(
+        _loadAndPlayInDirection(
+          reason: 'gapless',
+          origin: _captureOrigin(),
+          startIndex: (_playlistIndex ?? -1) + 1,
+          playlist: items,
+          step: 1,
+          wrap: true,
+        ),
       );
       return;
     }
@@ -1265,19 +1593,34 @@ class PlaybackService extends ChangeNotifier {
     _syncSmtcPositionTimer();
   }
 
-  bool _loadAndPlay(
+  Future<bool> _loadAndPlay(
     int audioIndex,
     List<Audio> playlist, {
     required String reason,
     required SongOrigin? origin,
     bool reportFailure = true,
-  }) {
+  }) async {
     if (audioIndex < 0 || audioIndex >= playlist.length) return false;
     final audio = playlist[audioIndex];
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
     try {
-      _player.setSource(audio.path);
+      var sourcePath = RemoteLibrary.isRemotePath(audio.path)
+          ? _playbackPathFor(audio)
+          : audio.filePath;
+      var startMs = audio.segmentStartMs;
+      var endMs = audio.segmentEndMs;
+      if (audio.isSacdTrack) {
+        sourcePath = await _ensureSacdSource(audio);
+        startMs = 0;
+        endMs = 0;
+      }
+      // CUE 虚拟轨用真实源文件建流，段边界由播放器按毫秒截断。
+      _player.setSource(
+        sourcePath,
+        startMs: startMs,
+        endMs: endMs,
+      );
       _eq.reapplyOutputGain();
       _player.start();
       _commitSongChange(
@@ -1296,7 +1639,9 @@ class PlaybackService extends ChangeNotifier {
         stackTrace: trace,
       );
       if (reportFailure) {
-        _reportPlaybackLoadFailure('播放失败，请查看日志');
+        _reportPlaybackLoadFailure(
+          audio.isSacdTrack ? 'SACD 轨道提取或播放失败，请查看日志' : '播放失败，请查看日志',
+        );
       }
       return false;
     } finally {
@@ -1304,14 +1649,224 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  bool _loadAndPlayInDirection({
+  /// 把 SACD 轨道解析为可播放的缓存文件路径。
+  ///
+  /// PCM 模式下 PCM 缓存已就绪时直接返回 WAV；尚未就绪时先返回 DSF 立即起播，
+  /// 再把该轨排入后台转换队列。DSF 模式只提取 DSF。同一轨道的并发解析共享
+  /// 同一个 Future，快速连切时不会重复转换同一轨。
+  Future<String> _ensureSacdSource(Audio audio, {bool prefetch = false}) {
+    final segment = audio.cueSegment;
+    final area = segment?.sacdArea;
+    if (segment == null || area == null) {
+      return Future<String>.error(
+        const FormatException('无效的 SACD 虚拟轨路径'),
+      );
+    }
+    final trackUid = segment.trackUid;
+    final isoPath = segment.sourcePath;
+    final trackNumber = segment.trackNumber;
+    final sacdArea = area;
+    return _sacdSourceCache.extract(trackUid, () async {
+      final cacheRoot = (await getSacdCacheDirectory()).path;
+      final settings = _sacdPlaybackSettings();
+      final source = await SacdSourceResolver.resolve(
+        trackUid: trackUid,
+        preferPcm: settings.preferPcm,
+        sampleRate: settings.sampleRate,
+        bitDepth: settings.bitDepth,
+        loadDsf: () => _ensureSacdDsf(
+          trackUid: trackUid,
+          isoPath: isoPath,
+          area: sacdArea,
+          trackNumber: trackNumber,
+          cacheRoot: cacheRoot,
+          showHint: !prefetch,
+        ),
+        isPcmCached: (dsfPath) => SacdPcmCacheProbe.isReady(
+          dsfPath: dsfPath,
+          sampleRate: settings.sampleRate,
+          bitDepth: settings.bitDepth,
+        ),
+        loadPcm: () => rust_sacd.ensureSacdTrackPcm(
+          isoPath: isoPath,
+          area: sacdArea,
+          trackNumber: trackNumber,
+          cacheRoot: cacheRoot,
+          sampleRate: settings.sampleRate,
+          bitDepth: settings.bitDepth,
+        ),
+      );
+      if (source.pcmPending) {
+        _scheduleSacdPcmConversion(
+          _SacdPcmJob(
+            trackUid: trackUid,
+            isoPath: isoPath,
+            area: sacdArea,
+            trackNumber: trackNumber,
+            cacheRoot: cacheRoot,
+            sampleRate: settings.sampleRate,
+            bitDepth: settings.bitDepth,
+          ),
+          urgent: !prefetch,
+        );
+      }
+      return source.path;
+    });
+  }
+
+  /// 提取轨道 DSF 缓存。
+  ///
+  /// 前台播放等待超过提示阈值时通知界面，让首次播放的等待有可见反馈；
+  /// 命中缓存通常在阈值内返回，不会弹提示。后台预取不提示。
+  Future<String> _ensureSacdDsf({
+    required String trackUid,
+    required String isoPath,
+    required String area,
+    required int trackNumber,
+    required String cacheRoot,
+    required bool showHint,
+  }) async {
+    final hintTimer = showHint
+        ? Timer(const Duration(milliseconds: 400), () {
+            _showSacdPreparingHint(trackUid);
+          })
+        : null;
+    try {
+      return await rust_sacd.ensureSacdTrackExtracted(
+        isoPath: isoPath,
+        area: area,
+        trackNumber: trackNumber,
+        cacheRoot: cacheRoot,
+      );
+    } finally {
+      hintTimer?.cancel();
+    }
+  }
+
+  void _showSacdPreparingHint(String trackUid) {
+    if (_closed) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastSacdPreparingUid == trackUid &&
+        now - _lastSacdPreparingMs < 10000) {
+      return;
+    }
+    _lastSacdPreparingUid = trackUid;
+    _lastSacdPreparingMs = now;
+    showTextOnSnackBar('首次播放，正在准备缓存…');
+  }
+
+  /// 把轨道排入后台 PCM 转换队列。
+  ///
+  /// 同一轨只排一次；当前播放轨插到队首，预取轨排在队尾。队列串行执行，
+  /// 避免多轨同时转换造成磁盘与 CPU 峰值。转换失败过的轨道本次进程内不再
+  /// 重试，继续使用 DSF 播放。
+  void _scheduleSacdPcmConversion(_SacdPcmJob job, {required bool urgent}) {
+    if (_closed) return;
+    if (_sacdPcmFailed.contains(_sacdPcmJobKey(job))) return;
+    if (!_sacdPcmQueued.add(job.trackUid)) return;
+    if (urgent) {
+      _sacdPcmJobs.insert(0, job);
+    } else {
+      _sacdPcmJobs.add(job);
+    }
+    _drainSacdPcmConversions();
+  }
+
+  /// 失败抑制按轨道与转换参数区分，设置变化后允许重新尝试。
+  String _sacdPcmJobKey(_SacdPcmJob job) =>
+      '${job.trackUid}|${job.sampleRate}|${job.bitDepth}';
+
+  void _drainSacdPcmConversions() {
+    if (_closed || _sacdPcmRunner != null || _sacdPcmJobs.isEmpty) return;
+    final job = _sacdPcmJobs.removeAt(0);
+    final runner = _runSacdPcmConversion(job);
+    _sacdPcmRunner = runner;
+    unawaited(
+      runner
+          .whenComplete(() {
+            if (identical(_sacdPcmRunner, runner)) {
+              _sacdPcmRunner = null;
+            }
+            _drainSacdPcmConversions();
+          })
+          .catchError((Object err, StackTrace trace) {
+            log.playback.warn(
+              'sacd.pcm',
+              'SACD 后台转换队列异常',
+              error: err,
+              stackTrace: trace,
+            );
+          }),
+    );
+  }
+
+  Future<void> _runSacdPcmConversion(_SacdPcmJob job) async {
+    try {
+      await rust_sacd.ensureSacdTrackPcm(
+        isoPath: job.isoPath,
+        area: job.area,
+        trackNumber: job.trackNumber,
+        cacheRoot: job.cacheRoot,
+        sampleRate: job.sampleRate,
+        bitDepth: job.bitDepth,
+      );
+      log.playback.debug(
+        'sacd.pcm',
+        'SACD 后台 PCM 转换完成',
+        fields: {'uid': job.trackUid},
+      );
+    } catch (err, trace) {
+      _sacdPcmFailed.add(_sacdPcmJobKey(job));
+      log.playback.warn(
+        'sacd.pcm',
+        'SACD 后台 PCM 转换失败，继续使用 DSF 播放',
+        fields: {
+          'uid': job.trackUid,
+          'sampleRate': job.sampleRate,
+          'bitDepth': job.bitDepth,
+        },
+        error: err,
+        stackTrace: trace,
+      );
+    } finally {
+      _sacdPcmQueued.remove(job.trackUid);
+    }
+  }
+
+  /// 读取 SACD 播放设置；读取异常时退回 DSF、44.1kHz、24bit。
+  ({bool preferPcm, int sampleRate, int bitDepth}) _sacdPlaybackSettings() {
+    try {
+      final preference = AppPreference.instance.playbackPref;
+      return (
+        preferPcm:
+            preference.dsdPlaybackMode ==
+            PlaybackPreference.dsdPlaybackModePcm,
+        sampleRate: preference.sacdPcmSampleRate,
+        bitDepth: preference.sacdPcmBitDepth,
+      );
+    } catch (err, trace) {
+      log.playback.warn(
+        'sacd.pcm',
+        '读取 SACD 播放设置失败，使用默认值',
+        error: err,
+        stackTrace: trace,
+      );
+      return (
+        preferPcm: false,
+        sampleRate: PlaybackPreference.defaultSacdPcmSampleRate,
+        bitDepth: PlaybackPreference.defaultSacdPcmBitDepth,
+      );
+    }
+  }
+
+  Future<bool> _loadAndPlayInDirection({
     required String reason,
     required SongOrigin? origin,
     required int startIndex,
     required List<Audio> playlist,
     required int step,
     required bool wrap,
-  }) {
+  }) async {
     if (playlist.isEmpty || step == 0) return false;
 
     var index = startIndex;
@@ -1321,7 +1876,7 @@ class PlaybackService extends ChangeNotifier {
         if (!wrap) break;
         index = (index % playlist.length + playlist.length) % playlist.length;
       }
-      if (_loadAndPlay(
+      if (await _loadAndPlay(
         index,
         playlist,
         reason: reason,
@@ -1433,11 +1988,15 @@ class PlaybackService extends ChangeNotifier {
     _listenRecordingToken = sessionToken;
 
     try {
-      final supportPath = _supportPath ??= (await getAppDataDir()).path;
-      await rust_library_db.incrementPlayCount(
-        indexPath: supportPath,
-        path: audioPath,
-      );
+      if (RemoteLibrary.isRemotePath(audioPath)) {
+        await RemoteLibrary.instance.recordPlay(audioPath);
+      } else {
+        final supportPath = _supportPath ??= (await getAppDataDir()).path;
+        await rust_library_db.incrementPlayCount(
+          indexPath: supportPath,
+          path: audioPath,
+        );
+      }
       audio.playCount++;
       if (sessionToken == _listenTracker.sessionToken) {
         _listenTracker.markListenRecorded();
@@ -1490,12 +2049,37 @@ class PlaybackService extends ChangeNotifier {
     ThemeProvider.instance.applyThemeFromAudio(audio);
     if (audioIndex + 1 < playlist.length) {
       final next = playlist[audioIndex + 1];
-      CoverImageCache.instance.preload(next.path, modified: next.modified);
+      CoverImageCache.instance.preload(next.filePath, modified: next.modified);
       CoverImageCache.instance.preloadNowPlayingCover(next);
       playService.lyricService.prefetchLyric(next);
+      if (next.isSacdTrack) {
+        unawaited(_prefetchSacdSource(next));
+      }
       if (audioIndex + 2 < playlist.length) {
         playService.lyricService.prefetchLyric(playlist[audioIndex + 2]);
       }
+    }
+  }
+
+  /// 后台准备下一首 SACD 轨道；DSF 直接提取，PCM 转换排入后台队列，
+  /// 失败只记 WARN，不影响当前播放与界面。
+  Future<void> _prefetchSacdSource(Audio audio) async {
+    final trackUid = audio.cueSegment?.trackUid ?? audio.path;
+    try {
+      await _ensureSacdSource(audio, prefetch: true);
+      log.playback.debug(
+        'sacd.prefetch',
+        'SACD 预提取完成',
+        fields: {'uid': trackUid},
+      );
+    } catch (err, trace) {
+      log.playback.warn(
+        'sacd.prefetch',
+        'SACD 预提取失败',
+        fields: {'uid': trackUid},
+        error: err,
+        stackTrace: trace,
+      );
     }
   }
 
@@ -1523,11 +2107,13 @@ class PlaybackService extends ChangeNotifier {
       extra: {'index': audioIndex},
     );
     final origin = _captureOrigin();
-    _loadAndPlay(
-      audioIndex,
-      playlist.value,
-      reason: 'user.play',
-      origin: origin,
+    unawaited(
+      _loadAndPlay(
+        audioIndex,
+        playlist.value,
+        reason: 'user.play',
+        origin: origin,
+      ),
     );
   }
 
@@ -1702,15 +2288,19 @@ class PlaybackService extends ChangeNotifier {
       shuffled.insert(0, willPlay);
       _setPlaylistBackup(playlist);
       final activePlaylist = _setPlaylist(shuffled);
-      _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin);
+      unawaited(
+        _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin),
+      );
     } else {
       _setPlaylistBackup(playlist);
       final activePlaylist = _setPlaylist(playlist);
-      _loadAndPlay(
-        audioIndex,
-        activePlaylist,
-        reason: 'user.play',
-        origin: origin,
+      unawaited(
+        _loadAndPlay(
+          audioIndex,
+          activePlaylist,
+          reason: 'user.play',
+          origin: origin,
+        ),
       );
     }
   }
@@ -1735,7 +2325,9 @@ class PlaybackService extends ChangeNotifier {
     shuffle.value = true;
 
     final origin = _captureOrigin();
-    _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin);
+    unawaited(
+      _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin),
+    );
   }
 
   /// 下一首播放
@@ -1826,11 +2418,13 @@ class PlaybackService extends ChangeNotifier {
           _clearPersistedLastSession();
         } else if (_playlistIndex! < _playlist.value.length) {
           final origin = _captureOrigin();
-          _loadAndPlay(
-            _playlistIndex!,
-            _playlist.value,
-            reason: 'user.play',
-            origin: origin,
+          unawaited(
+            _loadAndPlay(
+              _playlistIndex!,
+              _playlist.value,
+              reason: 'user.play',
+              origin: origin,
+            ),
           );
         }
       } else {
@@ -1972,10 +2566,13 @@ class PlaybackService extends ChangeNotifier {
     session = _sessionStore.snapshot;
     lastPath = session.lastAudioPath;
     if (lastPath.isEmpty) return;
-    final pathToAudio = {
+    final pathToAudio = <String, Audio>{
       for (final audio in AudioLibrary.instance.audioCollection)
         audio.path: audio,
     };
+    for (final audio in RemoteLibrary.instance.audios) {
+      pathToAudio.putIfAbsent(audio.path, () => audio);
+    }
     final restoredPlaylist = _playlistFromSessionPaths(
       session.lastPlaylistPaths,
       pathToAudio,
@@ -1988,10 +2585,14 @@ class PlaybackService extends ChangeNotifier {
 
   Future<bool> _waitForLibraryAudios() async {
     for (int i = 0; i < 10; i++) {
-      if (AudioLibrary.instance.audioCollection.isNotEmpty) return true;
+      if (AudioLibrary.instance.audioCollection.isNotEmpty ||
+          RemoteLibrary.instance.audios.isNotEmpty) {
+        return true;
+      }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    return AudioLibrary.instance.audioCollection.isNotEmpty;
+    return AudioLibrary.instance.audioCollection.isNotEmpty ||
+        RemoteLibrary.instance.audios.isNotEmpty;
   }
 
   List<Audio> _playlistFromSessionPaths(
@@ -2065,9 +2666,24 @@ class PlaybackService extends ChangeNotifier {
     String lastPath,
   ) async {
     try {
-      _player.setSource(nowPlaying!.path);
+      final restored = nowPlaying!;
+      var sourcePath = RemoteLibrary.isRemotePath(restored.path)
+          ? _playbackPathFor(restored)
+          : restored.filePath;
+      var startMs = restored.segmentStartMs;
+      var endMs = restored.segmentEndMs;
+      if (restored.isSacdTrack) {
+        sourcePath = await _ensureSacdSource(restored);
+        startMs = 0;
+        endMs = 0;
+      }
+      _player.setSource(
+        sourcePath,
+        startMs: startMs,
+        endMs: endMs,
+      );
       _eq.reapplyOutputGain();
-      _loadCurrentReplayGain(nowPlaying!);
+      _loadCurrentReplayGain(restored);
       playService.lyricService.updateLyric();
       ThemeProvider.instance.applyThemeFromAudio(nowPlaying!);
 
@@ -2110,13 +2726,15 @@ class PlaybackService extends ChangeNotifier {
     if (_playlistIndex == null) return;
     _synchronizeGaplessTransition();
 
-    _loadAndPlayInDirection(
-      reason: reason,
-      origin: origin,
-      startIndex: _playlistIndex! + 1,
-      playlist: _playlist.value,
-      step: 1,
-      wrap: true,
+    unawaited(
+      _loadAndPlayInDirection(
+        reason: reason,
+        origin: origin,
+        startIndex: _playlistIndex! + 1,
+        playlist: _playlist.value,
+        step: 1,
+        wrap: true,
+      ),
     );
   }
 
@@ -2127,11 +2745,13 @@ class PlaybackService extends ChangeNotifier {
     if (_playlistIndex == null) return;
     _synchronizeGaplessTransition();
 
-    _loadAndPlay(
-      _playlistIndex!,
-      _playlist.value,
-      reason: reason,
-      origin: origin,
+    unawaited(
+      _loadAndPlay(
+        _playlistIndex!,
+        _playlist.value,
+        reason: reason,
+        origin: origin,
+      ),
     );
   }
 
@@ -2149,13 +2769,15 @@ class PlaybackService extends ChangeNotifier {
         // 末曲播完不推进，保持 completed 状态实现播完即停
         if (_playlistIndex != null &&
             _playlistIndex! + 1 < _playlist.value.length) {
-          _loadAndPlayInDirection(
-            reason: 'completed',
-            origin: origin,
-            startIndex: _playlistIndex! + 1,
-            playlist: _playlist.value,
-            step: 1,
-            wrap: false,
+          unawaited(
+            _loadAndPlayInDirection(
+              reason: 'completed',
+              origin: origin,
+              startIndex: _playlistIndex! + 1,
+              playlist: _playlist.value,
+              step: 1,
+              wrap: false,
+            ),
           );
         }
         break;
@@ -2178,13 +2800,15 @@ class PlaybackService extends ChangeNotifier {
     final origin = _captureOrigin();
     _synchronizeGaplessTransition();
 
-    _loadAndPlayInDirection(
-      reason: 'user.previous',
-      origin: origin,
-      startIndex: _playlistIndex! - 1,
-      playlist: _playlist.value,
-      step: -1,
-      wrap: true,
+    unawaited(
+      _loadAndPlayInDirection(
+        reason: 'user.previous',
+        origin: origin,
+        startIndex: _playlistIndex! - 1,
+        playlist: _playlist.value,
+        step: -1,
+        wrap: true,
+      ),
     );
   }
 
@@ -2249,20 +2873,47 @@ class PlaybackService extends ChangeNotifier {
     );
     final transitioned = _synchronizeGaplessTransition();
     if (!transitioned) {
-      _player.seek(position);
+      try {
+        _player.seek(position);
+      } catch (err, trace) {
+        log.playback.error(
+          'legacy',
+          'seek 定位失败 pos=$position',
+          error: err,
+          stackTrace: trace,
+        );
+        return;
+      }
     }
     final effectivePosition = transitioned ? _player.position : position;
-    final remaining = _player.length - effectivePosition;
-    if (transitioned || remaining > 1.0) {
-      _rebuildGaplessPreparation();
-    }
-    _updateSmtcPosition();
-    playService.lyricService.findCurrLyricLineAt(effectivePosition);
-    _schedulePositionSyncBurst();
+    // 先让进度与歌词的可见状态对齐，重活放到下一轮事件循环。
+    _notifyPositionSync();
+    final revision = ++_seekDeferRevision;
+    Timer(const Duration(milliseconds: 16), () {
+      if (_closed || revision != _seekDeferRevision) return;
+      try {
+        final remaining = _player.length - effectivePosition;
+        if (transitioned || remaining > 1.0) {
+          _rebuildGaplessPreparation();
+        }
+        _updateSmtcPosition();
+        playService.lyricService.findCurrLyricLineAt(effectivePosition);
+        _schedulePositionSyncBurst();
+      } catch (err, trace) {
+        log.playback.warn(
+          'legacy',
+          'seek 后续同步失败 pos=$effectivePosition',
+          error: err,
+          stackTrace: trace,
+        );
+      }
+    });
   }
 
   Future<void> close() async {
     _closed = true;
+    _sacdPcmJobs.clear();
+    _sacdPcmQueued.clear();
     SleepBlocker.instance.unblock();
     SleepTimerService.instance.cancel();
     _songChangeTasks.begin();

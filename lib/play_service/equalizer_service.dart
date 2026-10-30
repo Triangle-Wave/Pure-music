@@ -50,15 +50,54 @@ class EqualizerService {
   bool get eqEnabled => _pref.eqEnabled;
   AudioDspSettings get audioEffects => _pref.audioDspSettings;
 
+  List<double>? _autoGainCacheGains;
+  double? _autoGainCachePreampDb;
+  double? _autoGainCacheHeadroomDb;
+  double? _autoGainCacheSampleRate;
+  bool? _autoGainCacheUseDx8Fallback;
+  double _autoGainCacheValueDb = 0.0;
+
+  static bool _sameGains(List<double> a, List<double> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// 自动增益只由 EQ 增益、前级、余量、采样率与 DX8 回退状态决定，
+  /// 命中缓存时跳过峰值估算，供 volumeDsp 连续变化时复用。
   double _computeEqAutoGainDb() {
-    return computeEqAutoGainDb(
+    final gains = _player.eqGains;
+    final preampDb = _pref.eqPreampDb;
+    final autoHeadroomDb = eqAutoHeadroomDb;
+    final sampleRate = _player.streamSampleRate;
+    final useDx8Fallback = !_player.isBassFxLoaded;
+    final cachedGains = _autoGainCacheGains;
+    if (cachedGains != null &&
+        _sameGains(cachedGains, gains) &&
+        _autoGainCachePreampDb == preampDb &&
+        _autoGainCacheHeadroomDb == autoHeadroomDb &&
+        _autoGainCacheSampleRate == sampleRate &&
+        _autoGainCacheUseDx8Fallback == useDx8Fallback) {
+      return _autoGainCacheValueDb;
+    }
+    final value = computeEqAutoGainDb(
       eqEnabled: _pref.eqEnabled,
-      gains: _player.eqGains,
-      preampDb: _pref.eqPreampDb,
-      autoHeadroomDb: eqAutoHeadroomDb,
-      sampleRate: _player.streamSampleRate,
-      useDx8Fallback: !_player.isBassFxLoaded,
+      gains: gains,
+      preampDb: preampDb,
+      autoHeadroomDb: autoHeadroomDb,
+      sampleRate: sampleRate,
+      useDx8Fallback: useDx8Fallback,
     );
+    _autoGainCacheGains = List<double>.from(gains);
+    _autoGainCachePreampDb = preampDb;
+    _autoGainCacheHeadroomDb = autoHeadroomDb;
+    _autoGainCacheSampleRate = sampleRate;
+    _autoGainCacheUseDx8Fallback = useDx8Fallback;
+    _autoGainCacheValueDb = value;
+    return value;
   }
 
   void _applyOutputGain({bool smooth = false}) {

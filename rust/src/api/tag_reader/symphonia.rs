@@ -33,6 +33,7 @@ pub(super) struct SymphoniaMetadata {
     pub(super) duration: u64,
     pub(super) bitrate: Option<u32>,
     pub(super) sample_rate: Option<u32>,
+    pub(super) bit_depth: Option<u8>,
     pub(super) channels: Option<u8>,
     pub(super) picture: Option<Vec<u8>>,
     pub(super) items: Vec<(String, String)>,
@@ -161,6 +162,13 @@ fn collect_symphonia_tags(container: &MetadataContainer, tags: &mut SymphoniaTag
     }
 }
 
+/// 把 Symphonia 的每样本位数转换为位深：0、超出 1..=64 与无法转换的值一律 `None`。
+fn symphonia_bit_depth(bits_per_sample: Option<u32>) -> Option<u8> {
+    bits_per_sample
+        .filter(|bits| (1..=64).contains(bits))
+        .and_then(|bits| u8::try_from(bits).ok())
+}
+
 pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> {
     let source = fs::File::open(path).ok()?;
     let media_source = MediaSourceStream::new(Box::new(source), Default::default());
@@ -177,7 +185,7 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
         )
         .ok()?;
     let mut format = probed;
-    let (track_id, duration, sample_rate, channels) = {
+    let (track_id, duration, sample_rate, channels, bit_depth) = {
         let track = format.default_track(TrackType::Audio)?;
         let audio_params = match track.codec_params.as_ref()? {
             CodecParameters::Audio(params) => params,
@@ -210,6 +218,7 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
                 .channels
                 .as_ref()
                 .and_then(|value| u8::try_from(value.count()).ok()),
+            symphonia_bit_depth(audio_params.bits_per_sample),
         )
     };
     let bitrate = estimated_bitrate(path, duration);
@@ -266,6 +275,7 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
         duration,
         bitrate,
         sample_rate,
+        bit_depth,
         channels,
         picture: tags.picture,
         items: tags.items,
@@ -274,7 +284,58 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
 
 #[cfg(test)]
 mod tests {
-    use super::read_symphonia_metadata;
+    use super::{read_symphonia_metadata, symphonia_bit_depth};
+
+    /// 24bit/44.1kHz 单声道 WAV，data 为 1 秒静音。
+    fn wav_24bit_bytes() -> Vec<u8> {
+        const SAMPLE_RATE: u32 = 44_100;
+        const BLOCK_ALIGN: u16 = 3;
+        let data_len = SAMPLE_RATE * u32::from(BLOCK_ALIGN);
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        bytes.extend_from_slice(&(SAMPLE_RATE * u32::from(BLOCK_ALIGN)).to_le_bytes());
+        bytes.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
+        bytes.extend_from_slice(&24_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(44 + data_len as usize, 0);
+        bytes
+    }
+
+    #[test]
+    fn wav_24_bit_reports_bit_depth() {
+        let path = std::env::temp_dir().join(format!(
+            "pure_music_symphonia_24bit_{}_{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, wav_24bit_bytes()).unwrap();
+
+        let metadata = read_symphonia_metadata(&path).expect("24-bit WAV metadata");
+        assert_eq!(metadata.sample_rate, Some(44_100));
+        assert_eq!(metadata.bit_depth, Some(24));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bit_depth_conversion_rejects_invalid_values() {
+        assert_eq!(symphonia_bit_depth(Some(24)), Some(24));
+        assert_eq!(symphonia_bit_depth(Some(1)), Some(1));
+        assert_eq!(symphonia_bit_depth(Some(0)), None);
+        assert_eq!(symphonia_bit_depth(Some(255)), None);
+        assert_eq!(symphonia_bit_depth(None), None);
+    }
 
     #[test]
     fn invalid_audio_input_returns_none() {

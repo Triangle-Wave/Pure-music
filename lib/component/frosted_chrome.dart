@@ -19,18 +19,28 @@ class FrostedChrome extends StatelessWidget {
     scale: blurScale,
   );
 
+  /// Half the sample resolution of [blurFilter], with sigma scaled to match so
+  /// the visible radius stays the same. Used while the sidebar width animates
+  /// and the backdrop is re-filtered every frame.
+  static final ImageFilter lowQualityBlurFilter = _downsampledBlur(
+    sigma: blurSigma / 2,
+    scale: blurScale / 2,
+  );
+
   const FrostedChrome({
     super.key,
     required this.enabled,
     required this.child,
     this.borderRadius,
     this.height,
+    this.lowQuality = false,
   });
 
   final bool enabled;
   final Widget child;
   final BorderRadius? borderRadius;
   final double? height;
+  final bool lowQuality;
 
   static ImageFilter _downsampledBlur({
     required double sigma,
@@ -77,7 +87,7 @@ class FrostedChrome extends StatelessWidget {
         Positioned.fill(
           child: RepaintBoundary(
             child: BackdropFilter(
-              filter: blurFilter,
+              filter: lowQuality ? lowQualityBlurFilter : blurFilter,
               child: ColoredBox(color: color),
             ),
           ),

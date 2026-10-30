@@ -1,9 +1,46 @@
 name: Build Windows
 
+# 两阶段发布：先用 dry-run 验证完整编译与打包，通过后再打 tag 正式发版。
+#
+#   1. 预演（构建当前分支的版本，版本号取自 pubspec.yaml，不创建 Release）：
+#        gh workflow run build-windows.yml --ref <branch> -f dry_run=true
+#   2. 在 Actions 中确认 build 与 release 两个 job 均通过，并下载
+#      pure-music-windows-x64-release-dryrun（安装器、便携版 zip 与校验和）逐一验证；
+#   3. 正式发版（tag 必须与 pubspec.yaml 的版本一致）：
+#        git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# 本地等价命令：
+#   .\build_windows.ps1 -Version X.Y.Z -Mode 4 -NonInteractive   # 便携版打包
+#   .\build_windows.ps1 -Version X.Y.Z -Mode 5 -NonInteractive   # 安装器打包
+
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（vX.Y.Z）；留空只构建'
+        required: false
+        type: string
+      dry_run:
+        description: '预演：构建并打包校验，但不创建 Release（版本号取 pubspec.yaml）'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: '标记为预发布'
+        required: false
+        type: boolean
+        default: false
+      ffmpeg_variant:
+        description: 'BASS_FFMPEG 运行时来源（shared CI 构建裁剪版 FFmpeg；bundled 官方发布包，体积超预算）'
+        required: false
+        type: choice
+        options:
+          - shared
+          - bundled
+        default: shared
 
 permissions:
   contents: read
@@ -16,6 +53,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
+
+      # 版本号取自 pubspec.yaml，两个 flutter build 都以 APP_VERSION 传入 Dart。
+      - name: Resolve app version
+        id: app-version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pubspec = Get-Content -LiteralPath "pubspec.yaml" -Raw
+          $match = [regex]::Match($pubspec, '(?m)^\s*version\s*:\s*([0-9]+\.[0-9]+\.[0-9]+)')
+          if (-not $match.Success) { throw "version not found in pubspec.yaml" }
+          $version = $match.Groups[1].Value
+          "App version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -27,6 +80,62 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache BASS_FFMPEG runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            tool/ffmpeg/.cache
+            tool/ffmpeg/.build/ffmpeg-8.1.2.tar.xz
+            tool/ffmpeg/runtime
+          key: bass-ffmpeg-${{ inputs.ffmpeg_variant || 'shared' }}-8.1.2-${{ hashFiles('tool/ffmpeg/fetch_ffmpeg.ps1', 'tool/ffmpeg/build_minimal_ffmpeg.sh', 'tool/ffmpeg/verify_bundle.ps1') }}
+
+      - name: Prepare BASS_FFMPEG runtime
+        shell: pwsh
+        env:
+          FFMPEG_VARIANT: ${{ inputs.ffmpeg_variant || 'shared' }}
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $variant = if ($env:FFMPEG_VARIANT -eq "bundled") { "bundled" } else { "auto" }
+          # shared 流程先用完整包取得插件与许可，随后由裁剪构建覆盖 FFmpeg DLL；
+          # 体积上限在 Build trimmed FFmpeg shared libraries 之后的校验中强制执行。
+          $fetchArgs = @{ Variant = $variant }
+          if ($env:FFMPEG_VARIANT -ne "bundled") { $fetchArgs["SkipSizeCheck"] = $true }
+          ./tool/ffmpeg/fetch_ffmpeg.ps1 @fetchArgs
+
+      - name: Setup MSYS2 for shared FFmpeg
+        if: ${{ inputs.ffmpeg_variant != 'bundled' }}
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-nasm
+            make
+            diffutils
+            tar
+            xz
+            curl
+          cache: true
+
+      - name: Build trimmed FFmpeg shared libraries
+        if: ${{ inputs.ffmpeg_variant != 'bundled' }}
+        shell: msys2 {0}
+        run: bash tool/ffmpeg/build_minimal_ffmpeg.sh
+
+      - name: Verify BASS_FFMPEG runtime
+        shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./tool/ffmpeg/verify_bundle.ps1 -BundleDir tool/ffmpeg/runtime
+          $bytes = (Get-ChildItem "tool/ffmpeg/runtime" -File -Filter "av*.dll" |
+            Measure-Object -Property Length -Sum).Sum
+          "FFmpeg runtime: {0:N2} MiB" -f ($bytes / 1MB)
+
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
 
@@ -34,8 +143,9 @@ jobs:
         run: flutter doctor -v
 
       # 仓库没有提交 desktop_lyric/，但 CMake 的 install 阶段会复制它。
-      # 从官方最新 portable 包里恢复完整目录，保证桌面歌词可用。
-      - name: Restore desktop_lyric from latest release
+      # 这里只把上游 release 的 portable 包当作构建缓存的二进制来源，与应用更新源无关；
+      # 应用内更新检查与下载使用 Triangle-Wave/Pure-music 的 update/version.json。
+      - name: Restore desktop_lyric from upstream release
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -64,10 +174,70 @@ jobs:
       - name: Pub get
         run: flutter pub get
 
-      - name: Build release
-        run: flutter build windows --release
+      # 本地没有 Flutter/Rust 时无法生成绑定；构建前在 CI 生成，保证 Rust 结构体与 Dart 绑定一致。
+      - name: Install flutter_rust_bridge_codegen
+        run: |
+          cargo install cargo-expand --locked
+          cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
 
-      - name: Verify build output
+      - name: Generate FRB bindings
+        run: flutter_rust_bridge_codegen generate
+
+      # codegen 2.12.0 不生成子模块的 export 行；这三个入口固定需要。
+      - name: Restore FRB module exports
+        shell: pwsh
+        run: |
+          $targets = @{
+            'lib/native/rust/api/library_db.dart' = @(
+              "export 'library_db/play_counts.dart';"
+            )
+            'lib/native/rust/api/tag_reader.dart' = @(
+              "export 'tag_reader/extra_metadata.dart';",
+              "export 'tag_reader/index_state.dart';"
+            )
+          }
+          foreach ($target in $targets.GetEnumerator()) {
+            $lines = [System.Collections.Generic.List[string]](Get-Content -LiteralPath $target.Key)
+            $missing = @($target.Value | Where-Object { $lines -notcontains $_ })
+            if ($missing.Count -eq 0) { continue }
+
+            $lastImport = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match '^import ') { $lastImport = $i }
+            }
+            if ($lastImport -lt 0) {
+              throw "no import block in $($target.Key)"
+            }
+
+            $insert = @('') + $missing
+            $lines.InsertRange($lastImport + 1, [string[]]$insert)
+            Set-Content -LiteralPath $target.Key -Value $lines -Encoding utf8NoBOM
+          }
+
+      # 只保留绑定产物；恢复 codegen 顺带改写的 lock、lint 与插件注册文件。
+      - name: Restore unrelated generated files
+        shell: pwsh
+        run: |
+          git checkout -- analysis_options.yaml pubspec.lock windows/flutter
+          git status --short
+
+      - name: Upload generated bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: frb-generated
+          path: |
+            lib/native/rust/
+            rust/src/frb_generated.rs
+          if-no-files-found: error
+
+      # Cargokit 的 MSB8066 会吞掉 cargo 错误；先单独构建 cdylib 暴露真实原因。
+      - name: Check Rust build
+        run: cargo build --manifest-path rust/Cargo.toml --release
+
+      - name: Build release (portable)
+        run: flutter build windows --release --dart-define=APP_VERSION=${{ steps.app-version.outputs.version }}
+
+      - name: Verify portable build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -79,17 +249,532 @@ jobs:
             "$out/dll/BASS/basswasapi.dll",
             "$out/dll/BASS/bass_fx.dll",
             "$out/dll/BASS/bassmix.dll",
+            "$out/dll/BASS/bass_ffmpeg.dll",
+            "$out/dll/BASS/avcodec-62.dll",
+            "$out/dll/BASS/avformat-62.dll",
+            "$out/dll/BASS/avutil-60.dll",
+            "$out/dll/BASS/swresample-6.dll",
+            "$out/ffmpeg/LICENSE",
+            "$out/ffmpeg/README-ffmpeg.txt",
+            "$out/ffmpeg/THIRD-PARTY-NOTICES.txt",
             "$out/desktop_lyric/desktop_lyric.exe"
           )
           $missing = @($required | Where-Object { -not (Test-Path $_) })
           if ($missing.Count -gt 0) {
             throw "Missing build output: $($missing -join ', ')"
           }
+          if (Test-Path -LiteralPath "$out/ffmpeg/ffmpeg.exe") {
+            throw "Static ffmpeg.exe must not be shipped; TAK decodes through bass_ffmpeg.dll"
+          }
           "Build output verified."
 
-      - name: Upload artifact
+      # 安装版以 PORTABLE_BUILD=false 编译，数据根落在 <exe>\user_data。
+      # 发布作业缺少 Flutter 与 FFmpeg 工具链，只复用这里的产物制作安装器。
+      - name: Stage portable build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = "build/windows/x64/runner/Release"
+          $target = "build/portable/Release"
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          robocopy $source $target /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+          if ($LASTEXITCODE -gt 7) { throw "robocopy failed with exit code $LASTEXITCODE" }
+          # robocopy 以 1-7 表示复制成功，必须重置全局退出码，否则 step 会带着 1 结束并被判失败。
+          $global:LASTEXITCODE = 0
+          if (-not (Test-Path -LiteralPath "$target/pure_music.exe" -PathType Leaf)) {
+            throw "Portable staging is incomplete: $target"
+          }
+
+          # 安装版构建只重新生成 data/app.so，与 dart-define 无关的运行时文件沿用上次输出；
+          # 先复制到独立目录，补齐安装版输出时不依赖 build/portable 是否仍然存在。
+          $runtime = "build/installer-runtime"
+          if (Test-Path -LiteralPath $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          foreach ($name in @("dll", "desktop_lyric", "ffmpeg")) {
+            $src = Join-Path $target $name
+            if (-not (Test-Path -LiteralPath $src -PathType Container)) {
+              throw "Portable staging lacks ${name}: $src"
+            }
+            robocopy $src (Join-Path $runtime $name) /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+            if ($LASTEXITCODE -gt 7) { throw "robocopy failed for $name with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0
+          }
+
+          # Cargokit 的 cdylib 在原始构建输出中位于根目录，发布布局要求放在 dll/。
+          if (-not (Test-Path -LiteralPath "$runtime/dll/rust_lib_pure_music.dll" -PathType Leaf)) {
+            $rustDll = Join-Path $target "rust_lib_pure_music.dll"
+            if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+              throw "rust_lib_pure_music.dll not found in portable staging: $target"
+            }
+            Copy-Item -LiteralPath $rustDll -Destination "$runtime/dll/rust_lib_pure_music.dll" -Force
+          }
+
+      - name: Build release (installer)
+        run: flutter build windows --release --no-pub --dart-define=PORTABLE_BUILD=false --dart-define=APP_VERSION=${{ steps.app-version.outputs.version }}
+
+      # 第二次构建只更新 data/app.so；CMake install 对未变化的 DLL 不再复制，
+      # 这里补齐与 dart-define 无关的运行时目录，data/app.so 保留安装版自己的产物。
+      - name: Restore installer runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $runtime = "build/installer-runtime"
+          $out = "build/windows/x64/runner/Release"
+          if (-not (Test-Path -LiteralPath "$runtime/dll/rust_lib_pure_music.dll" -PathType Leaf)) {
+            throw "Installer runtime staging is incomplete: $runtime"
+          }
+          foreach ($name in @("dll", "desktop_lyric", "ffmpeg")) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $out $name) | Out-Null
+            robocopy (Join-Path $runtime $name) (Join-Path $out $name) /E /COPY:DAT /DCOPY:DAT /XJ /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+            if ($LASTEXITCODE -gt 7) { throw "robocopy failed for $name with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0
+          }
+          foreach ($required in @("$out/data/app.so", "$out/dll/rust_lib_pure_music.dll")) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Installer runtime file missing: $required"
+            }
+          }
+          "Installer runtime files restored."
+
+      - name: Verify installer build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/windows/x64/runner/Release"
+          $required = @(
+            "pure_music.exe",
+            "data/app.so",
+            "dll/rust_lib_pure_music.dll",
+            "dll/BASS/bass_ffmpeg.dll",
+            "desktop_lyric/desktop_lyric.exe"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath "$out/$_" -PathType Leaf) })
+          if ($missing.Count -gt 0) { throw "Installer build output missing: $($missing -join ', ')" }
+          "Installer build output verified."
+
+      # 两版必须来自各自的编译：app.so 相同说明 PORTABLE_BUILD=false 没有进入 Dart 构建。
+      - name: Verify installer build differs from portable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portable = (Get-FileHash -LiteralPath "build/portable/Release/data/app.so" -Algorithm SHA256).Hash
+          $installer = (Get-FileHash -LiteralPath "build/windows/x64/runner/Release/data/app.so" -Algorithm SHA256).Hash
+          "portable app.so:  $portable"
+          "installer app.so: $installer"
+          if ($portable -eq $installer) {
+            throw "Installer build reused the portable app.so; PORTABLE_BUILD=false did not reach the Dart build."
+          }
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pure-music-windows-x64
+          name: pure-music-windows-x64-portable${{ inputs.dry_run && '-dryrun' || '' }}
+          path: build/portable/Release/
+          if-no-files-found: error
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-music-windows-x64-installer${{ inputs.dry_run && '-dryrun' || '' }}
           path: build/windows/x64/runner/Release/
           if-no-files-found: error
+
+  release:
+    needs: build
+    # 预演同样进入本 job 做打包与资产校验，只是跳过 Create GitHub Release。
+    # build 失败时本 job 由 needs 隐含跳过；此处不引入 always()，避免失败后仍执行打包。
+    if: ${{ inputs.dry_run || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '') }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ inputs.tag || github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
+
+      - name: Download portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pure-music-windows-x64-portable${{ inputs.dry_run && '-dryrun' || '' }}
+          path: build/windows/x64/runner/Release
+
+      # 打包脚本从仓库根读取 desktop_lyric；CI 不提交该目录，用构建产物恢复。
+      - name: Restore desktop_lyric for packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "build/windows/x64/runner/Release/desktop_lyric"
+          if (-not (Test-Path -LiteralPath "$src/desktop_lyric.exe" -PathType Leaf)) {
+            throw "desktop_lyric.exe missing from build artifact"
+          }
+          if (-not (Test-Path -LiteralPath "desktop_lyric")) {
+            Copy-Item -LiteralPath $src -Destination "desktop_lyric" -Recurse
+          }
+          if (-not (Test-Path -LiteralPath "desktop_lyric/desktop_lyric.exe" -PathType Leaf)) {
+            throw "desktop_lyric restore failed"
+          }
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe"
+          )
+          if (@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count -gt 0) {
+            Write-Host "Inno Setup already installed."
+            exit 0
+          }
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "choco install innosetup failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dryRun = $env:INPUT_DRY_RUN -eq "true"
+
+          $pubspec = Get-Content -LiteralPath "pubspec.yaml" -Raw
+          $match = [regex]::Match($pubspec, '(?m)^\s*version\s*:\s*([0-9]+\.[0-9]+\.[0-9]+)')
+          if (-not $match.Success) { throw "version not found in pubspec.yaml" }
+          $pubVersion = $match.Groups[1].Value
+
+          if ($dryRun) {
+            # 预演不要求 tag 输入：版本号取 pubspec.yaml，tag 只用于产物命名。
+            $version = $pubVersion
+            $tag = "v$version"
+            "Resolve release version (dry run): $tag"
+          }
+          else {
+            $tag = if ($env:EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
+              $env:INPUT_TAG.Trim()
+            } else {
+              $env:REF_NAME.Trim()
+            }
+            if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+              throw "Release tag must be vX.Y.Z, got '$tag'"
+            }
+            $version = $Matches[1]
+            if ($pubVersion -ne $version) {
+              throw "Tag $tag does not match pubspec version $pubVersion; bump pubspec.yaml before tagging"
+            }
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Package portable
+        shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 4 -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable packaging failed with exit code $LASTEXITCODE"
+          }
+
+      # 安装器改用与便携版不同的编译产物（PORTABLE_BUILD=false），先清空再取安装版。
+      - name: Reset build output for installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "build/windows/x64/runner/Release"
+          if (Test-Path -LiteralPath $out) {
+            Remove-Item -LiteralPath $out -Recurse -Force
+          }
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pure-music-windows-x64-installer${{ inputs.dry_run && '-dryrun' || '' }}
+          path: build/windows/x64/runner/Release
+
+      - name: Package installer
+        shell: pwsh
+        env:
+          PURE_MUSIC_ALLOW_OVERSIZE_FFMPEG: ${{ inputs.ffmpeg_variant == 'bundled' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Mode 5 跳过编译，直接使用上面下载的安装版产物制作安装器。
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -Mode 5 -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer packaging failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify release assets
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = @(
+            "output/pure_music_${env:VERSION}_release_installer.exe",
+            "output/pure_music_${env:VERSION}_release_installer.exe.sha256",
+            "output/pure_music_${env:VERSION}_release_portable.zip",
+            "output/pure_music_${env:VERSION}_release_portable.zip.sha256"
+          )
+          $missing = @($expected | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($missing.Count -gt 0) {
+            throw "Missing release assets: $($missing -join ', ')"
+          }
+          foreach ($shaPath in @($expected | Where-Object { $_ -like "*.sha256" })) {
+            $text = (Get-Content -LiteralPath $shaPath -Raw).Trim()
+            if ($text -notmatch '^[0-9a-fA-F]{64}\s+\*?\S+$') {
+              throw "Invalid checksum content in $shaPath"
+            }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $portableZip = "output/pure_music_${env:VERSION}_release_portable.zip"
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $portableZip).Path)
+          try {
+            $entries = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+            foreach ($entry in @(
+              "dll/BASS/bass_ffmpeg.dll",
+              "dll/BASS/avcodec-62.dll",
+              "dll/BASS/avformat-62.dll",
+              "dll/BASS/avutil-60.dll",
+              "dll/BASS/swresample-6.dll",
+              "ffmpeg/LICENSE",
+              "ffmpeg/README-ffmpeg.txt",
+              "ffmpeg/THIRD-PARTY-NOTICES.txt"
+            )) {
+              if ($entries -notcontains $entry) {
+                throw "Portable archive missing $entry"
+              }
+            }
+            if ($entries -contains "ffmpeg/ffmpeg.exe") {
+              throw "Portable archive must not contain ffmpeg/ffmpeg.exe"
+            }
+          }
+          finally {
+            $zip.Dispose()
+          }
+          Get-ChildItem output -File | Select-Object Name, Length
+
+      # 静默安装冒烟测试：覆盖安装、卸载与 user_data 保留三个阶段。
+      # ShouldSkipPage 在目录页之前被调用，静默安装同样经过该回调，可回归 `{app}` 未初始化的崩溃。
+      - name: Smoke test installer (silent)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = (Resolve-Path -LiteralPath "output/pure_music_${env:VERSION}_release_installer.exe").Path
+          $root = Join-Path $env:RUNNER_TEMP "pure-music-smoke"
+          $target = Join-Path $root "app"
+          $installLog = Join-Path $root "install.log"
+          $uninstallLog = Join-Path $root "uninstall.log"
+
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          # 卸载器退出后仍可能有 second phase 进程持有 uninstall.log 的写句柄，
+          # 读取时声明 ReadWrite/Delete 共享并重试，失败只提示，不影响冒烟结论。
+          function Show-SmokeLog([string]$path) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              Write-Host "log not found: $path"
+              return
+            }
+            Write-Host "----- $path -----"
+            $text = $null
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                $stream = [System.IO.File]::Open(
+                  $path,
+                  [System.IO.FileMode]::Open,
+                  [System.IO.FileAccess]::Read,
+                  ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                try {
+                  $reader = [System.IO.StreamReader]::new($stream)
+                  try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                }
+                finally { $stream.Dispose() }
+                break
+              }
+              catch [System.IO.IOException] {
+                Start-Sleep -Milliseconds 250
+              }
+              catch {
+                break
+              }
+            }
+            if ($null -eq $text) {
+              Write-Host "log is still locked by another process; content skipped"
+            }
+            else {
+              Write-Host $text.TrimEnd()
+            }
+            Write-Host "----- end of log -----"
+          }
+
+          # 以独占写方式探测日志是否仍被占用；不存在或非占用类错误均视为可读。
+          function Test-LogWritable([string]$path) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $true }
+            try {
+              $stream = [System.IO.File]::Open(
+                $path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None)
+              $stream.Dispose()
+              return $true
+            }
+            catch [System.IO.IOException] {
+              return $false
+            }
+            catch {
+              return $true
+            }
+          }
+
+          # 卸载器会把自身复制到临时目录（_iu*.tmp）继续第二阶段删除，
+          # 只等待安装目录与临时目录下的 unins*/_iu* 进程，避免误伤其它进程。
+          function Get-UninstallerProcess([string[]]$pathPrefixes) {
+            foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+              if ($process.ProcessName -notmatch '^(unins|_iu)') { continue }
+              $processPath = $null
+              try { $processPath = $process.Path } catch { $processPath = $null }
+              if (-not $processPath) { continue }
+              foreach ($prefix in $pathPrefixes) {
+                if ($processPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $process
+                  break
+                }
+              }
+            }
+          }
+
+          function Wait-UninstallerFinished([string]$installDir, [string]$logPath, [int]$timeoutSeconds) {
+            $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+            while ((Get-Date) -lt $deadline) {
+              $running = @(Get-UninstallerProcess @($installDir, $env:TEMP))
+              if ($running.Count -eq 0 -and (Test-LogWritable $logPath)) { return $true }
+              Start-Sleep -Milliseconds 500
+            }
+            return $false
+          }
+
+          function Invoke-Silent([string]$file, [string]$arguments, [int]$timeoutSeconds) {
+            $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+            if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+              $process.Kill()
+              throw "Timed out after $timeoutSeconds s: $file"
+            }
+            return $process.ExitCode
+          }
+
+          try {
+            $installArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- `"/DIR=$target`" `"/LOG=$installLog`""
+            $installExit = Invoke-Silent $installer $installArgs 600
+            if ($installExit -ne 0) {
+              throw "Silent install failed with exit code $installExit"
+            }
+
+            foreach ($required in @("pure_music.exe", "data\app.so", "dll\BASS\bass.dll")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $target $required) -PathType Leaf)) {
+                throw "Installed layout is missing $required"
+              }
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $target "user_data") -PathType Container)) {
+              throw "Installed layout is missing user_data"
+            }
+            "Silent install verified: $target"
+
+            $uninstaller = Get-ChildItem -LiteralPath $target -Filter "unins*.exe" -File |
+              Select-Object -First 1
+            if (-not $uninstaller) {
+              throw "Uninstaller not found in $target"
+            }
+
+            $uninstallArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART `"/LOG=$uninstallLog`""
+            $uninstallExit = Invoke-Silent $uninstaller.FullName $uninstallArgs 600
+            if ($uninstallExit -ne 0) {
+              throw "Silent uninstall failed with exit code $uninstallExit"
+            }
+
+            # 卸载器可能把自身复制到临时目录后立即退出，轮询等待文件真正消失。
+            $appExe = Join-Path $target "pure_music.exe"
+            $deadline = (Get-Date).AddSeconds(120)
+            while ((Test-Path -LiteralPath $appExe) -and ((Get-Date) -lt $deadline)) {
+              Start-Sleep -Milliseconds 500
+            }
+            if (Test-Path -LiteralPath $appExe) {
+              throw "Uninstaller left pure_music.exe behind: $appExe"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $target "user_data") -PathType Container)) {
+              throw "Uninstaller removed user_data; user data must survive an uninstall"
+            }
+
+            # 卸载器的第一阶段进程先退出，真正的删除由临时副本完成；等它结束再读日志。
+            if (-not (Wait-UninstallerFinished $target $uninstallLog 120)) {
+              Write-Warning "Uninstaller process or uninstall.log stayed busy for 120 s; log capture may be incomplete."
+            }
+            "Silent uninstall verified; user_data preserved."
+          }
+          catch {
+            Show-SmokeLog $installLog
+            Show-SmokeLog $uninstallLog
+            throw
+          }
+          finally {
+            # 卸载器进程可能仍持有 $root 下文件；清理失败只告警，不覆盖冒烟结论。
+            if (Test-Path -LiteralPath $root) {
+              for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                try {
+                  Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+                  break
+                }
+                catch {
+                  if ($attempt -eq 9) {
+                    Write-Warning "Could not remove $root : $($_.Exception.Message)"
+                    break
+                  }
+                  Start-Sleep -Milliseconds 500
+                }
+              }
+            }
+          }
+
+      # 预演把安装器、便携版 zip 与校验和交给人工验证；正式发版由 Release 承载这些资产。
+      - name: Upload release assets (dry run)
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-music-windows-x64-release-dryrun
+          path: output/
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease || false }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe.sha256
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip.sha256
