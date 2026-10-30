@@ -52,7 +52,7 @@ bool isSafePortableEntryPath(String root, String relative) {
   return p.isWithin(p.normalize(root), dest);
 }
 
-/// 安装助手日志是否在本次启动后产生：文件长度增长，或最后写入时间不早于启动时刻。
+/// 安装日志是否在本次启动后产生：文件长度增长，或最后写入时间不早于启动时刻。
 bool installerLogShowsStart({
   required DateTime startedAt,
   required DateTime? modified,
@@ -62,6 +62,17 @@ bool installerLogShowsStart({
   if (baselineLength != null && currentLength > baselineLength) return true;
   return modified != null && !modified.isBefore(startedAt);
 }
+
+/// 启动安装程序并返回进程 pid；启动失败时抛出原始异常。
+typedef InstallerProcessLauncher =
+    Future<int> Function(
+      String executable,
+      List<String> arguments, {
+      required String workingDirectory,
+    });
+
+/// 退出当前程序；由安装程序接管后续文件替换与重启。
+typedef InstallerExitApp = Future<void> Function();
 
 Future<void> verifyExtractedPortablePackage(String appDir) async {
   final manifestFile = File(
@@ -454,8 +465,6 @@ class UpdateInstaller {
   UpdateInstaller._();
 
   static const _portableSupportDirectory = '.update';
-  static const _installerHelperDirectory = 'tool';
-  static const _installerHelperFileName = 'apply_installer_update.ps1';
   static const _installerUpdateLogFileName = 'installer_update.log';
 
   static Future<UpdateInstallOutcome> run({
@@ -726,20 +735,12 @@ class UpdateInstaller {
     return _startInstallerUpdate(installerPath: savePath, onPhase: onPhase);
   }
 
-  /// 安装版更新：助手等当前进程退出后再启动安装程序，保留交互式安装向导。
+  /// 安装版更新：直接启动 Inno Setup 安装程序，由安装器关闭当前程序。
   /// 安装完成后由安装程序的 Run 段启动新版，这里不额外重启。
   static Future<UpdateInstallOutcome> _startInstallerUpdate({
     required String installerPath,
     required UpdatePhaseCallback onPhase,
   }) async {
-    final appDir = p.dirname(Platform.resolvedExecutable);
-    final helperSourcePath = p.join(
-      appDir,
-      _installerHelperDirectory,
-      _installerHelperFileName,
-    );
-    final helperSource = File(helperSourcePath);
-
     Directory updateDirectory;
     try {
       updateDirectory = await _updateSupportDirectory();
@@ -754,120 +755,52 @@ class UpdateInstaller {
         '准备安装程序失败：无法创建更新目录。可手动运行：$installerPath',
       );
     }
-    final logPath = p.join(updateDirectory.path, _installerUpdateLogFileName);
+    return startInstallerUpdate(
+      installerPath: installerPath,
+      executablePath: Platform.resolvedExecutable,
+      logPath: p.join(updateDirectory.path, _installerUpdateLogFileName),
+      onPhase: onPhase,
+    );
+  }
+
+  /// 直接启动安装程序：安装器按 CloseApplications 关闭当前程序并替换文件，
+  /// 启动成功后退出现有进程；启动失败保留安装包，由用户手动运行。
+  static Future<UpdateInstallOutcome> startInstallerUpdate({
+    required String installerPath,
+    required String executablePath,
+    required String logPath,
+    required UpdatePhaseCallback onPhase,
+    InstallerProcessLauncher? launchProcess,
+    InstallerExitApp? exitApp,
+  }) async {
+    final appDir = p.dirname(executablePath);
+    final installerDir = p.dirname(installerPath);
+    final launch = launchProcess ?? _launchInstallerProcess;
+    final exitApplication = exitApp ?? _exitCurrentApplication;
 
     await _recordInstallerStep(
       logPath,
       '进入安装：installerPath=$installerPath, appDir=$appDir, '
-      'exe=${Platform.resolvedExecutable}',
+      'exe=$executablePath',
     );
     await _recordInstallerStep(
       logPath,
-      '更新目录=${updateDirectory.path}, installerLog=$logPath',
+      '直接启动安装程序：$installerPath /CLOSEAPPLICATIONS, '
+      'workingDirectory=$installerDir',
     );
-
-    var helperExists = false;
-    try {
-      helperExists = await helperSource.exists();
-    } catch (error, stackTrace) {
-      await _recordInstallerStep(
-        logPath,
-        '检查助手源文件失败：$helperSourcePath',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      throw UpdateInstallException(
-        '启动安装程序失败：无法读取更新助手。可手动运行：$installerPath',
-      );
-    }
-    await _recordInstallerStep(
-      logPath,
-      '助手源文件=$helperSourcePath, exists=$helperExists',
-    );
-    if (!helperExists) {
-      await _recordInstallerStep(
-        logPath,
-        '更新组件缺失：$helperSourcePath',
-        isError: true,
-      );
-      throw UpdateInstallException(
-        '更新组件缺失，请手动运行已下载的安装包：$installerPath',
-      );
-    }
 
     onPhase('正在启动安装程序');
-    final helperPath = p.join(
-      updateDirectory.path,
-      'pure_music_apply_installer_${DateTime.now().microsecondsSinceEpoch}.ps1',
-    );
-    await _recordInstallerStep(
-      logPath,
-      '复制助手：$helperSourcePath -> $helperPath',
-    );
+    final int processId;
     try {
-      await helperSource.copy(helperPath);
-    } catch (error, stackTrace) {
-      await _recordInstallerStep(
-        logPath,
-        '复制助手失败：$helperPath',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      await _deleteQuietly(helperPath);
-      throw UpdateInstallException(
-        '准备安装程序失败：无法复制更新助手。可手动运行：$installerPath',
-      );
-    }
-    await _recordInstallerStep(logPath, '复制助手完成：$helperPath');
-
-    final arguments = <String>[
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      helperPath,
-      '-InstallerPath',
-      installerPath,
-      '-TargetProcessId',
-      '$pid',
-      '-AppExe',
-      Platform.resolvedExecutable,
-      '-LogPath',
-      logPath,
-    ];
-    await _recordInstallerStep(
-      logPath,
-      '启动命令：powershell.exe ${arguments.join(' ')}',
-    );
-
-    int? baselineLength = 0;
-    try {
-      final logFile = File(logPath);
-      if (await logFile.exists()) baselineLength = await logFile.length();
-    } catch (error, stackTrace) {
-      baselineLength = null;
-      log.update.warn(
-        'legacy',
-        '[UpdateInstaller] 读取安装助手日志基线失败：$error',
-        error: error,
-        stackTrace: stackTrace,
-      );
-    }
-    final startedAt = DateTime.now();
-
-    Process process;
-    try {
-      process = await Process.start(
-        'powershell.exe',
-        arguments,
-        workingDirectory: updateDirectory.path,
-        mode: ProcessStartMode.detached,
+      processId = await launch(
+        installerPath,
+        const ['/CLOSEAPPLICATIONS'],
+        workingDirectory: installerDir,
       );
     } catch (error, stackTrace) {
       await _recordInstallerStep(
         logPath,
-        '启动安装助手失败：powershell.exe 启动异常',
+        '启动安装程序失败：$installerPath',
         error: error,
         stackTrace: stackTrace,
       );
@@ -875,45 +808,27 @@ class UpdateInstaller {
         '启动安装程序失败：$error。可手动运行：$installerPath',
       );
     }
-    log.update.info(
-      'legacy',
-      '[UpdateInstaller] Process.start 返回 pid=${process.pid}',
+    await _recordInstallerStep(
+      logPath,
+      '安装程序 Process.start 返回 pid=$processId',
     );
-    if (process.pid <= 0) {
+    if (processId <= 0) {
       await _recordInstallerStep(
         logPath,
-        '启动安装助手失败：进程未创建，保留脚本 $helperPath',
+        '启动安装程序失败：进程未创建，保留安装包：$installerPath',
         isError: true,
       );
       throw UpdateInstallException(
-        '启动安装程序失败：更新助手进程未创建。可手动运行：$installerPath',
-      );
-    }
-
-    final confirmed = await _waitForInstallerLog(
-      logPath: logPath,
-      startedAt: startedAt,
-      baselineLength: baselineLength,
-    );
-    if (!confirmed) {
-      await _recordInstallerStep(
-        logPath,
-        '等待助手日志超时（1500ms），pid=${process.pid}，助手未启动，'
-        '保留脚本：$helperPath',
-        isError: true,
-      );
-      throw UpdateInstallException(
-        '安装助手未能启动，请手动运行：$installerPath',
+        '启动安装程序失败：安装程序进程未创建。可手动运行：$installerPath',
       );
     }
 
     await _recordInstallerStep(
       logPath,
-      '助手已启动（pid=${process.pid}），准备退出当前程序',
+      '安装程序已启动（pid=$processId），准备退出当前程序',
     );
-    await _recordInstallerStep(logPath, '调用 exitApp');
     try {
-      await WindowLifecycleService.instance.exitApp();
+      await exitApplication();
     } catch (error, stackTrace) {
       await _recordInstallerStep(
         logPath,
@@ -922,13 +837,31 @@ class UpdateInstaller {
         stackTrace: stackTrace,
       );
       throw UpdateInstallException(
-        '安装助手已启动，但无法退出当前程序，请手动关闭。可手动运行：$installerPath',
+        '安装程序已启动，但无法退出当前程序，请手动关闭。可手动运行：$installerPath',
       );
     }
     return UpdateInstallOutcome.installerStarted;
   }
 
-  /// 同时写入应用日志与安装助手日志；安装助手日志失败不阻断安装流程。
+  /// 以分离进程直接运行安装程序，返回其 pid。
+  static Future<int> _launchInstallerProcess(
+    String executable,
+    List<String> arguments, {
+    required String workingDirectory,
+  }) async {
+    final process = await Process.start(
+      executable,
+      arguments,
+      workingDirectory: workingDirectory,
+      mode: ProcessStartMode.detached,
+    );
+    return process.pid;
+  }
+
+  static Future<void> _exitCurrentApplication() =>
+      WindowLifecycleService.instance.exitApp();
+
+  /// 同时写入应用日志与安装日志；安装日志失败不阻断安装流程。
   static Future<void> _recordInstallerStep(
     String logPath,
     String message, {
@@ -969,52 +902,11 @@ class UpdateInstaller {
     } catch (writeError, writeStackTrace) {
       log.update.warn(
         'legacy',
-        '[UpdateInstaller] 写入安装助手日志失败：$writeError',
+        '[UpdateInstaller] 写入安装日志失败：$writeError',
         error: writeError,
         stackTrace: writeStackTrace,
       );
     }
-  }
-
-  /// 轮询安装助手日志，确认助手确实写入了启动记录；超时返回 false。
-  static Future<bool> _waitForInstallerLog({
-    required String logPath,
-    required DateTime startedAt,
-    required int? baselineLength,
-    Duration timeout = const Duration(milliseconds: 1500),
-    Duration interval = const Duration(milliseconds: 100),
-  }) async {
-    final deadline = DateTime.now().add(timeout);
-    final file = File(logPath);
-    var reportedError = false;
-    while (DateTime.now().isBefore(deadline)) {
-      try {
-        if (await file.exists()) {
-          final currentLength = await file.length();
-          final modified = await file.lastModified();
-          if (installerLogShowsStart(
-            startedAt: startedAt,
-            modified: modified,
-            baselineLength: baselineLength,
-            currentLength: currentLength,
-          )) {
-            return true;
-          }
-        }
-      } catch (error, stackTrace) {
-        if (!reportedError) {
-          reportedError = true;
-          log.update.warn(
-            'legacy',
-            '[UpdateInstaller] 检查安装助手日志失败：$error',
-            error: error,
-            stackTrace: stackTrace,
-          );
-        }
-      }
-      await Future<void>.delayed(interval);
-    }
-    return false;
   }
 
   static Future<UpdateInstallOutcome> _startPortableUpdate({

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:pure_music/core/update_checker.dart';
 import 'package:pure_music/core/update_installer.dart';
 
@@ -312,6 +313,138 @@ void main() {
         ),
         isFalse,
       );
+    });
+  });
+
+  group('startInstallerUpdate', () {
+    const installerPath =
+        r'E:\My Applications\Pure Music\user_data\updates'
+        r'\pure_music_2.3.13_release_installer.exe';
+    const executablePath = r'E:\My Applications\Pure Music\pure_music.exe';
+
+    late Directory logDirectory;
+    late String logPath;
+
+    setUp(() async {
+      logDirectory = await Directory.systemTemp.createTemp(
+        'pure_music_install_',
+      );
+      logPath = p.join(logDirectory.path, 'installer_update.log');
+    });
+
+    tearDown(() async {
+      if (await logDirectory.exists()) {
+        await logDirectory.delete(recursive: true);
+      }
+    });
+
+    test('starts the installer directly and exits the app', () async {
+      String? launchedExecutable;
+      List<String>? launchedArguments;
+      String? launchedWorkingDirectory;
+      var launchCalls = 0;
+      final phases = <String>[];
+      var exitCalls = 0;
+
+      final outcome = await UpdateInstaller.startInstallerUpdate(
+        installerPath: installerPath,
+        executablePath: executablePath,
+        logPath: logPath,
+        onPhase: phases.add,
+        launchProcess:
+            (executable, arguments, {required workingDirectory}) async {
+              launchCalls += 1;
+              launchedExecutable = executable;
+              launchedArguments = arguments;
+              launchedWorkingDirectory = workingDirectory;
+              return 4242;
+            },
+        exitApp: () async {
+          exitCalls += 1;
+        },
+      );
+
+      expect(outcome, UpdateInstallOutcome.installerStarted);
+      expect(launchCalls, 1);
+      expect(launchedExecutable, installerPath);
+      expect(launchedArguments, const ['/CLOSEAPPLICATIONS']);
+      expect(launchedWorkingDirectory, p.dirname(installerPath));
+      expect(phases, contains('正在启动安装程序'));
+      expect(exitCalls, 1);
+
+      final logContent = await File(logPath).readAsString();
+      expect(logContent, contains('进入安装'));
+      expect(logContent, contains(installerPath));
+      expect(logContent, contains('/CLOSEAPPLICATIONS'));
+      expect(logContent, contains('pid=4242'));
+      expect(logContent, contains('安装程序已启动'));
+      expect(logContent, isNot(contains('powershell')));
+    });
+
+    test('reports a launch failure and keeps the app running', () async {
+      var exitCalls = 0;
+
+      await expectLater(
+        UpdateInstaller.startInstallerUpdate(
+          installerPath: installerPath,
+          executablePath: executablePath,
+          logPath: logPath,
+          onPhase: (_) {},
+          launchProcess:
+              (executable, arguments, {required workingDirectory}) async {
+                throw const ProcessException(
+                  'pure_music_2.3.13_release_installer.exe',
+                  ['/CLOSEAPPLICATIONS'],
+                  '拒绝访问',
+                  5,
+                );
+              },
+          exitApp: () async {
+            exitCalls += 1;
+          },
+        ),
+        throwsA(
+          isA<UpdateInstallException>()
+              .having(
+                (error) => error.message,
+                'message',
+                contains('启动安装程序失败'),
+              )
+              .having(
+                (error) => error.message,
+                'message',
+                contains(installerPath),
+              ),
+        ),
+      );
+      expect(exitCalls, 0);
+    });
+
+    test('treats a non-positive pid as a launch failure', () async {
+      var exitCalls = 0;
+
+      await expectLater(
+        UpdateInstaller.startInstallerUpdate(
+          installerPath: installerPath,
+          executablePath: executablePath,
+          logPath: logPath,
+          onPhase: (_) {},
+          launchProcess:
+              (executable, arguments, {required workingDirectory}) async =>
+                  0,
+          exitApp: () async {
+            exitCalls += 1;
+          },
+        ),
+        throwsA(
+          isA<UpdateInstallException>().having(
+            (error) => error.message,
+            'message',
+            contains('进程未创建'),
+          ),
+        ),
+      );
+      expect(exitCalls, 0);
     });
   });
 }
