@@ -1077,6 +1077,7 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
 
   List<Widget> _viewTechnicalFields(rust_tag_reader.AudioExtraMetadata? data) {
     final bpm = _extraItemValue(data, 'bpm');
+    final bitDepth = audio.bitDepth ?? data?.bitDepth;
     return [
       _DetailField(
         label: '时长',
@@ -1094,8 +1095,10 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         label: '采样率',
         value: audio.sampleRate == null ? '-' : '${audio.sampleRate} Hz',
       ),
-      if (data?.bitDepth != null)
-        _DetailField(label: '位深', value: '${data!.bitDepth} bit'),
+      if (audio.isSacdTrack)
+        const _DetailField(label: '位深', value: '1 bit')
+      else if (bitDepth != null)
+        _DetailField(label: '位深', value: '$bitDepth bit'),
       if (data?.channels != null)
         _DetailField(label: '声道', value: data!.channels.toString()),
       ..._replayGainFields(data),

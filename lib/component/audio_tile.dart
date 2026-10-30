@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:pure_music/component/danger_confirm_dialog.dart';
+import 'package:pure_music/component/hi_res_badge.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/scroll_aware_future_builder.dart';
 import 'package:pure_music/core/cache.dart';
@@ -17,6 +18,9 @@ import 'package:pure_music/play_service/play_service.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
+
+/// 徽章组按原尺寸展示的整行宽度下限；低于该值时整体等比缩小，避免横向溢出。
+const double _formatBadgeCompactThreshold = 280.0;
 
 /// Fixed-width slot for [AudioTile.leading] so index labels of different
 /// glyph widths (`03` vs `13`) keep covers and titles on one vertical line.
@@ -638,27 +642,70 @@ class _AudioTileState extends State<AudioTile> {
     required Color metadataColor,
     required bool isSelected,
   }) {
-    return Row(
-      children: [
-        if (widget.leading != null)
-          AudioTileLeadingSlot(
-            width: widget.leadingWidth,
-            child: widget.leading!,
-          ),
-        _SmallCoverWidget(audio: audio),
-        const SizedBox(width: 16.0),
-        Expanded(child: _metadataColumn(audio, titleColor, metadataColor)),
-        const SizedBox(width: 8.0),
-        _durationLabel(audio, metadataColor),
-        if (widget.multiSelectController != null &&
-            widget.multiSelectController!.enableMultiSelectView)
-          _selectionCheckbox(audio, isSelected),
-        if (widget.action != null)
-          Padding(
-            padding: const EdgeInsets.only(left: 8.0),
-            child: widget.action!,
-          ),
-      ],
+    final isDsd = isDsdAudio(audio);
+    final isHiRes = isHiResAudio(audio);
+    final extraFixedWidth =
+        (widget.leading != null ? widget.leadingWidth : 0.0) +
+        (widget.multiSelectController != null &&
+                widget.multiSelectController!.enableMultiSelectView
+            ? 44.0
+            : 0.0) +
+        (widget.action != null ? 48.0 : 0.0);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 正常宽度保持固定尺寸；只有窄到徽章可能挤掉标题时才启用等比缩小。
+        final compact =
+            constraints.maxWidth <
+            _formatBadgeCompactThreshold + extraFixedWidth;
+        final Widget badgeGroup = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isDsd) ...[
+              const DsdBadge(),
+              const SizedBox(width: 6.0),
+            ],
+            if (isHiRes) ...[
+              const HiResBadge(),
+              const SizedBox(width: 8.0),
+            ],
+          ],
+        );
+        return Row(
+          children: [
+            if (widget.leading != null)
+              AudioTileLeadingSlot(
+                width: widget.leadingWidth,
+                child: widget.leading!,
+              ),
+            _SmallCoverWidget(audio: audio),
+            const SizedBox(width: 16.0),
+            Expanded(child: _metadataColumn(audio, titleColor, metadataColor)),
+            const SizedBox(width: 8.0),
+            if (isDsd || isHiRes)
+              compact
+                  ? ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: compactBadgeGroupMaxWidth,
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: badgeGroup,
+                      ),
+                    )
+                  : badgeGroup,
+            _durationLabel(audio, metadataColor),
+            if (widget.multiSelectController != null &&
+                widget.multiSelectController!.enableMultiSelectView)
+              _selectionCheckbox(audio, isSelected),
+            if (widget.action != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 8.0),
+                child: widget.action!,
+              ),
+          ],
+        );
+      },
     );
   }
 

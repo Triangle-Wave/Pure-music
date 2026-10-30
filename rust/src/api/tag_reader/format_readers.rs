@@ -7,7 +7,7 @@ use ratag::tag::Basic as RatagBasic;
 use super::{
     estimated_bitrate, file_name, id3_text, join_deduped, read_dff_metadata,
     read_dsf_audio_properties, read_midi_metadata, read_symphonia_metadata, unknown_if_empty,
-    Audio,
+    Audio, DSD_NATIVE_BIT_DEPTH,
 };
 
 pub(super) fn read_by_dsf(path: &Path, modified: u64, created: u64) -> Option<Audio> {
@@ -34,6 +34,7 @@ pub(super) fn read_by_dsf(path: &Path, modified: u64, created: u64) -> Option<Au
         duration: properties.duration,
         bitrate: properties.bitrate,
         sample_rate: properties.sample_rate,
+        bit_depth: properties.bit_depth,
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -60,6 +61,7 @@ pub(super) fn read_by_midi(path: &Path, modified: u64, created: u64) -> Option<A
         duration: metadata.duration,
         bitrate: estimated_bitrate(path, metadata.duration),
         sample_rate: None,
+        bit_depth: None,
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -86,6 +88,7 @@ pub(super) fn read_by_dff(path: &Path, modified: u64, created: u64) -> Option<Au
         duration: metadata.duration,
         bitrate: metadata.bitrate,
         sample_rate: metadata.sample_rate,
+        bit_depth: Some(DSD_NATIVE_BIT_DEPTH),
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -114,6 +117,7 @@ pub(super) fn read_by_symphonia(path: &Path, modified: u64, created: u64) -> Opt
         duration: metadata.duration,
         bitrate: metadata.bitrate,
         sample_rate: metadata.sample_rate,
+        bit_depth: metadata.bit_depth,
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -153,6 +157,7 @@ pub(super) fn read_by_id3(path: &Path, modified: u64, created: u64) -> Option<Au
         duration: windows.as_ref().map(|value| value.duration).unwrap_or(0),
         bitrate: windows.as_ref().and_then(|value| value.bitrate),
         sample_rate: windows.as_ref().and_then(|value| value.sample_rate),
+        bit_depth: None,
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -193,6 +198,7 @@ pub(super) fn read_by_asf(path: &Path, modified: u64, created: u64) -> Option<Au
             .unwrap_or(0),
         bitrate: windows.as_ref().and_then(|value| value.bitrate),
         sample_rate: windows.as_ref().and_then(|value| value.sample_rate),
+        bit_depth: None,
         path: path.to_string_lossy().to_string(),
         modified,
         created,
@@ -208,6 +214,57 @@ mod tests {
     use id3::TagLike;
 
     use super::{read_by_dff, read_by_dsf, read_by_id3, read_by_midi, read_by_symphonia};
+
+    /// 最小可解析 DSF：DSD 头 28 字节、fmt 52 字节、空 data 头 12 字节。
+    fn minimal_dsf_bytes(bits_per_sample: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(92);
+        bytes.extend_from_slice(b"DSD ");
+        bytes.extend_from_slice(&28_u64.to_le_bytes());
+        bytes.extend_from_slice(&92_u64.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&52_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_822_400_u32.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&12_u64.to_le_bytes());
+        bytes
+    }
+
+    fn temp_file(label: &str, extension: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pure_music_{label}_{}_{}.{extension}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn dsf_bit_depth_is_native_one_bit_even_when_header_marks_msb_order() {
+        let path = temp_file("dsf_bit_depth", "dsf");
+        std::fs::write(&path, minimal_dsf_bytes(8)).unwrap();
+
+        let audio = read_by_dsf(&path, 0, 0).expect("valid minimal DSF metadata");
+
+        assert_eq!(audio.bit_depth, Some(1));
+        assert_eq!(audio.sample_rate, Some(2_822_400));
+        assert_eq!(audio.bitrate, Some(5_644));
+
+        let extra = super::super::read_audio_extra_metadata(path.to_string_lossy().to_string());
+        assert_eq!(extra.bit_depth, Some(1));
+
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn invalid_dsf_input_returns_none() {

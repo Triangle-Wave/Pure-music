@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:pure_music/core/database.dart';
 import 'package:pure_music/remote/remote_source.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -34,6 +36,7 @@ CREATE TABLE IF NOT EXISTS remote_tracks (
   duration INTEGER NOT NULL,
   bitrate INTEGER,
   sample_rate INTEGER,
+  bit_depth INTEGER,
   modified INTEGER NOT NULL,
   created INTEGER NOT NULL,
   by TEXT,
@@ -53,6 +56,31 @@ CREATE TABLE IF NOT EXISTS remote_play_history (
 CREATE INDEX IF NOT EXISTS idx_remote_play_history_path
   ON remote_play_history(path);
 ''');
+    _migrateTracks(db);
+  }
+
+  /// 早期库的 remote_tracks 没有 bit_depth 列，补列后读回旧曲目为 null。
+  void _migrateTracks(Database db) {
+    final columns = db.select('PRAGMA table_info(remote_tracks)');
+    final hasBitDepth = columns.any(
+      (row) => (row['name'] as String?) == 'bit_depth',
+    );
+    if (!hasBitDepth) {
+      try {
+        db.execute('ALTER TABLE remote_tracks ADD COLUMN bit_depth INTEGER');
+      } catch (error) {
+        // 并发调用 _ensureSchema 时另一个调用可能已补列，复核后放行。
+        final refreshed = db.select('PRAGMA table_info(remote_tracks)');
+        final addedByOther = refreshed.any(
+          (row) => (row['name'] as String?) == 'bit_depth',
+        );
+        if (!addedByOther) rethrow;
+        developer.log(
+          'remote_tracks.bit_depth 已由并发迁移补齐: $error',
+          name: 'RemoteStore',
+        );
+      }
+    }
   }
 
   Future<List<RemoteSource>> readSources() async {
@@ -186,8 +214,8 @@ ON CONFLICT(id) DO UPDATE SET
       final statement = db.prepare('''
 INSERT OR REPLACE INTO remote_tracks
   (path, source_id, track_id, title, artist, album, album_artist, track, disc,
-   duration, bitrate, sample_rate, modified, created, by, cover_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   duration, bitrate, sample_rate, bit_depth, modified, created, by, cover_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''');
       try {
         for (final track in tracks) {
@@ -204,6 +232,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             track.duration,
             track.bitrate,
             track.sampleRate,
+            track.bitDepth,
             track.modified,
             track.created,
             track.by,
@@ -248,6 +277,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       duration: row['duration'] as int,
       bitrate: row['bitrate'] as int?,
       sampleRate: row['sample_rate'] as int?,
+      bitDepth: row['bit_depth'] as int?,
       modified: row['modified'] as int,
       created: row['created'] as int,
       by: row['by'] as String?,

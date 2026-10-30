@@ -53,6 +53,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/fonts/Pretendard/PretendardVariable.ttf
+    - assets/images/hr_logo2.png
+    - assets/images/dsd_logo.png
     - app_icon.ico
   shaders:
     - assets/shaders/mesh_gradient_runtime.frag

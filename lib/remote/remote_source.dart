@@ -82,6 +82,7 @@ class RemoteTrack {
     required this.duration,
     this.bitrate,
     this.sampleRate,
+    this.bitDepth,
     required this.modified,
     required this.created,
     this.by,
@@ -99,6 +100,7 @@ class RemoteTrack {
   final int duration;
   final int? bitrate;
   final int? sampleRate;
+  final int? bitDepth;
   final int modified;
   final int created;
   final String? by;

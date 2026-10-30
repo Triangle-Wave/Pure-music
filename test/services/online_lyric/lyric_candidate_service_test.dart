@@ -138,6 +138,24 @@ void main() {
     expect(supplemental.romanizationText, '[00:00.000]romaji one');
   });
 
+  test('候选提取翻译与罗马音时丢弃 // 占位行', () {
+    final lyric = Lrc(
+      [
+        LrcLine(Duration.zero, 'line one', requiredIsBlank: false)
+          ..romanLyric = '//',
+        LrcLine(const Duration(seconds: 3), 'line two', requiredIsBlank: false)
+          ..translation = '//'
+          ..romanLyric = 'romaji two',
+      ],
+      LyricFormat.local,
+    );
+
+    final supplemental = lyricCandidateSupplementalText(lyric);
+
+    expect(supplemental.translationText, isNull);
+    expect(supplemental.romanizationText, '[00:03.000]romaji two');
+  });
+
   test('候选重建后按时间戳补回翻译与罗马音', () async {
     final lyric = await loadLyricFromCandidate(
       _candidate(

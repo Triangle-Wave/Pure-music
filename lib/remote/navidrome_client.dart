@@ -117,6 +117,7 @@ class NavidromeClient implements RemoteClient {
       duration: _int(song['duration']),
       bitrate: _int(song['bitRate']),
       sampleRate: _int(song['samplingRate']),
+      bitDepth: _optionalInt(song['bitDepth']),
       modified: modified ?? created ?? 0,
       created: created ?? 0,
       by: song['artist']?.toString(),
@@ -134,6 +135,14 @@ class NavidromeClient implements RemoteClient {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  int? _optionalInt(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.isFinite ? value.toInt() : null;
+    final text = value.toString().trim();
+    return int.tryParse(text);
   }
 
   @override

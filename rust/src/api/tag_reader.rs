@@ -140,27 +140,44 @@ fn read_id3_from_bytes(bytes: &[u8]) -> Option<id3::Tag> {
     id3::Tag::read_from2(Cursor::new(bytes)).ok()
 }
 
+/// DSD 原生采样位深：DSD 以 1 bit 采样，DSF、DFF 与 SACD ISO 均适用。
+const DSD_NATIVE_BIT_DEPTH: u8 = 1;
+
+/// DSD 原生码率（kbps）：`sample_rate * channels * 1 / 1000`。
+///
+/// DSF/DFF 的容器位深字段不代表采样位深，Lofty 按其计算会得到放大数倍的码率。
+/// 采样率、声道数为 0、乘积溢出或换算后不足 1 kbps 时返回 `None`，
+/// 避免产生 `Some(0)` 脏值。
+fn dsd_native_bitrate(sample_rate: Option<u32>, channels: Option<u8>) -> Option<u32> {
+    let sample_rate = sample_rate.filter(|value| *value > 0)?;
+    let channels = u32::from(channels.filter(|value| *value > 0)?);
+    sample_rate
+        .checked_mul(channels)
+        .and_then(|value| value.checked_mul(u32::from(DSD_NATIVE_BIT_DEPTH)))
+        .map(|value| value / 1000)
+        .filter(|value| *value > 0)
+}
+
 fn read_dsf_audio_properties(file: &DsfFile) -> DsfAudioProperties {
     let fmt = file.fmt_chunk();
     let sample_rate = fmt.sampling_frequency();
     let channels = fmt.channel_num();
-    let bit_depth = fmt.bits_per_sample();
+    // DSF 头里的 bits_per_sample 是字节序标记（1=LSB first，8=MSB first），
+    // 不是位深；DSD 原生采样固定为 1 bit。
+    let bit_depth = DSD_NATIVE_BIT_DEPTH;
     let duration = if sample_rate == 0 {
         0
     } else {
         fmt.sample_count() / u64::from(sample_rate)
     };
-    let bitrate = sample_rate
-        .checked_mul(channels)
-        .and_then(|value| value.checked_mul(bit_depth))
-        .map(|value| value / 1000);
+    let bitrate = dsd_native_bitrate(Some(sample_rate), u8::try_from(channels).ok());
 
     DsfAudioProperties {
         duration,
         bitrate,
         sample_rate: (sample_rate > 0).then_some(sample_rate),
         channels: u8::try_from(channels).ok(),
-        bit_depth: u8::try_from(bit_depth).ok(),
+        bit_depth: Some(bit_depth),
     }
 }
 
@@ -349,7 +366,7 @@ fn read_alternative_extra_metadata(
                 extension,
                 file_size,
                 metadata.channels,
-                None,
+                metadata.bit_depth,
                 metadata.items,
             ));
         }
@@ -495,7 +512,12 @@ pub fn read_audio_extra_metadata(path: String) -> AudioExtraMetadata {
 
     let props = tagged_file.properties();
     let channels = props.channels();
-    let bit_depth = props.bit_depth();
+    // 详情页与索引使用同一位深口径：DSD 流固定 1 bit。
+    let bit_depth = if is_dsf_path(Path::new(&path)) || is_dff_path(Path::new(&path)) {
+        Some(DSD_NATIVE_BIT_DEPTH)
+    } else {
+        props.bit_depth()
+    };
 
     if let Some(tag) = tagged_file
         .primary_tag()
@@ -646,7 +668,7 @@ pub fn read_audio_extra_metadata(path: String) -> AudioExtraMetadata {
     }
 }
 
-const CURRENT_INDEX_VERSION: u64 = 112;
+const CURRENT_INDEX_VERSION: u64 = 113;
 const MAX_TAG_READER_WORKERS: usize = 4;
 const RESERVED_LOGICAL_CORES: usize = 2;
 const INDEX_PROGRESS_MIN_BATCH: usize = 16;
@@ -721,6 +743,7 @@ struct Audio {
     /// kbps
     bitrate: Option<u32>,
     sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
     /// absolute path
     path: String,
     /// secs since UNIX_EPOCH
@@ -751,6 +774,7 @@ impl Audio {
             duration: 0,
             bitrate: None,
             sample_rate: None,
+            bit_depth: None,
             path: path.to_string_lossy().to_string(),
             modified: 0,
             created: 0,
@@ -776,6 +800,7 @@ impl Audio {
             "duration": self.duration,
             "bitrate": self.bitrate,
             "sample_rate": self.sample_rate,
+            "bit_depth": self.bit_depth,
             "path": self.path,
             "modified": self.modified,
             "created": self.created,
@@ -864,6 +889,19 @@ impl Audio {
         };
 
         let properties = tagged_file.properties();
+        // DSF 的 bit_depth 字段实为字节序标记，DFF 无 PCM 位深语义；DSD 流统一按 1 bit 处理。
+        let is_dsd = is_dsf_path(path) || is_dff_path(path);
+        let bit_depth = if is_dsd {
+            Some(DSD_NATIVE_BIT_DEPTH)
+        } else {
+            properties.bit_depth()
+        };
+        // Lofty 的容器位深对 DSD 不代表采样位深，按其计算会放大码率；统一按原生 1 bit 计算。
+        let bitrate = if is_dsd {
+            dsd_native_bitrate(properties.sample_rate(), properties.channels())
+        } else {
+            properties.audio_bitrate()
+        };
 
         if let Some(tag) = tagged_file
             .primary_tag()
@@ -911,8 +949,9 @@ impl Audio {
                 track: tag.track(),
                 disc: tag.disk(),
                 duration: properties.duration().as_secs(),
-                bitrate: properties.audio_bitrate(),
+                bitrate,
                 sample_rate: properties.sample_rate(),
+                bit_depth,
                 path: path.to_string_lossy().to_string(),
                 modified,
                 created,
@@ -938,8 +977,9 @@ impl Audio {
             track: None,
             disc: None,
             duration: properties.duration().as_secs(),
-            bitrate: properties.audio_bitrate(),
+            bitrate,
             sample_rate: properties.sample_rate(),
+            bit_depth,
             path: path.to_string_lossy().to_string(),
             modified,
             created,
@@ -1013,6 +1053,7 @@ impl Audio {
             duration: duration.as_secs(),
             bitrate: Some(music_properties.Bitrate()? / 1000),
             sample_rate: None,
+            bit_depth: None,
             path: path.to_string_lossy().to_string(),
             modified,
             created,
@@ -1856,6 +1897,7 @@ struct CueSourceInfo {
     path: PathBuf,
     bitrate: Option<u32>,
     sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
     modified: u64,
     created: u64,
     size: u64,
@@ -1931,25 +1973,27 @@ fn read_cue_folder(
             };
             referenced.insert(path_key(&source_path));
 
-            let (mut duration_ms, bitrate, sample_rate) = match Audio::read_from_path(&source_path) {
-                Some(audio) => (
-                    if audio.duration == 0 {
-                        None
-                    } else {
-                        Some(audio.duration.saturating_mul(1000))
-                    },
-                    audio.bitrate,
-                    audio.sample_rate,
-                ),
-                None => {
-                    log::warn!(
-                        target: "tag",
-                        "cue source metadata fallback: {}",
-                        source_path.display()
-                    );
-                    (None, None, None)
-                }
-            };
+            let (mut duration_ms, bitrate, sample_rate, bit_depth) =
+                match Audio::read_from_path(&source_path) {
+                    Some(audio) => (
+                        if audio.duration == 0 {
+                            None
+                        } else {
+                            Some(audio.duration.saturating_mul(1000))
+                        },
+                        audio.bitrate,
+                        audio.sample_rate,
+                        audio.bit_depth,
+                    ),
+                    None => {
+                        log::warn!(
+                            target: "tag",
+                            "cue source metadata fallback: {}",
+                            source_path.display()
+                        );
+                        (None, None, None, None)
+                    }
+                };
             let file_has_tracks = sheet
                 .tracks
                 .iter()
@@ -1992,6 +2036,7 @@ fn read_cue_folder(
                 path: source_path,
                 bitrate,
                 sample_rate,
+                bit_depth,
                 modified: system_time_secs(metadata.modified()),
                 created: system_time_secs(metadata.created()),
                 size: metadata.len(),
@@ -2032,6 +2077,7 @@ fn read_cue_folder(
                 duration: segment.duration_ms().saturating_add(500) / 1000,
                 bitrate: source.bitrate,
                 sample_rate: source.sample_rate,
+                bit_depth: source.bit_depth,
                 path: segment_path_with_range(
                     &source_path,
                     segment.track_number,
@@ -2168,6 +2214,7 @@ fn read_sacd_folder(iso_paths: &[PathBuf]) -> Vec<Audio> {
                 duration,
                 bitrate: None,
                 sample_rate: None,
+                bit_depth: Some(DSD_NATIVE_BIT_DEPTH),
                 path: sacd_segment_path(
                     &iso_path_str,
                     area_label,
@@ -2862,13 +2909,13 @@ mod tag_reader_tests {
 
     use super::cue::is_cue_path;
     use super::{
-        detect_and_encode, drop_invalid_duplicates_by_media_id, folder_contains_virtual_container,
-        folder_has_cue_source_residue, has_virtual_tracks, indexed_audio_update_from_parts,
-        indexed_folder_scan, is_iso_path, is_lyric_item_key, join_deduped, parse_midi_metadata,
-        path_key, probe_indexed_path, read_audio_extra_metadata, read_by_asf, read_cue_folder,
-        read_sacd_folder, should_emit_index_progress, should_scan_indexed_audio_files,
-        should_show_recording_date, tag_reader_worker_count_for, Audio, AudioFolder,
-        IndexedAudioUpdate, IndexedFolderScan, SUPPORTED_FORMATS,
+        detect_and_encode, drop_invalid_duplicates_by_media_id, dsd_native_bitrate,
+        folder_contains_virtual_container, folder_has_cue_source_residue, has_virtual_tracks,
+        indexed_audio_update_from_parts, indexed_folder_scan, is_iso_path, is_lyric_item_key,
+        join_deduped, parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata,
+        read_by_asf, read_cue_folder, read_sacd_folder, should_emit_index_progress,
+        should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
+        Audio, AudioFolder, IndexedAudioUpdate, IndexedFolderScan, SUPPORTED_FORMATS,
     };
 
     fn asf_object(guid: [u8; 16], data: Vec<u8>) -> Vec<u8> {
@@ -3070,6 +3117,7 @@ mod tag_reader_tests {
             duration: 180,
             bitrate: Some(320),
             sample_rate: Some(44_100),
+            bit_depth: Some(24),
             path: "C:/Music/track.flac".to_string(),
             modified: 1,
             created: 2,
@@ -3084,6 +3132,7 @@ mod tag_reader_tests {
         assert_eq!(snapshot["year"], "2024");
         assert_eq!(snapshot["composer"], "Composer");
         assert_eq!(snapshot["bpm"], "128");
+        assert_eq!(snapshot["bit_depth"], 24);
     }
 
     #[test]
@@ -3342,6 +3391,29 @@ mod tag_reader_tests {
         bytes
     }
 
+    /// 24bit/44.1kHz 立体声 WAV，data 为 1 秒静音。
+    fn wav_24bit_bytes() -> Vec<u8> {
+        const SAMPLE_RATE: u32 = 44_100;
+        const BLOCK_ALIGN: u16 = 6;
+        let data_len = SAMPLE_RATE * u32::from(BLOCK_ALIGN);
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        bytes.extend_from_slice(&(SAMPLE_RATE * u32::from(BLOCK_ALIGN)).to_le_bytes());
+        bytes.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
+        bytes.extend_from_slice(&24_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(44 + data_len as usize, 0);
+        bytes
+    }
+
     const SACD_TEST_SECTOR_SIZE: usize = 2048;
     const SACD_TEST_IMAGE_SECTORS: usize = 640;
     const SACD_TEST_MASTER_TOC_LSN: usize = 510;
@@ -3475,6 +3547,7 @@ mod tag_reader_tests {
             b"PERFORMER \"Album Artist\"\nTITLE \"Test Album\"\nFILE \"disc.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:01:00\n",
         );
 
+        let source = Audio::read_from_path(&wav_path).expect("cue source metadata");
         let (audios, referenced) = read_cue_folder(std::slice::from_ref(&cue_path), &[]);
 
         assert_eq!(audios.len(), 2);
@@ -3492,6 +3565,7 @@ mod tag_reader_tests {
         assert_eq!(first.track, Some(1));
         assert_eq!(first.duration, 1);
         assert_eq!(first.size, 44);
+        assert_eq!(first.bit_depth, source.bit_depth);
         assert_eq!(first.by.as_deref(), Some("cue"));
         assert!(first.valid);
         assert!(first.media_id.is_none());
@@ -3508,6 +3582,41 @@ mod tag_reader_tests {
         assert!(second.path.contains("::track=02"));
         assert!(second.path.contains("::start=1000"));
         assert!(second.path.contains("::end="));
+    }
+
+    #[test]
+    fn cue_virtual_tracks_inherit_24_bit_source_depth() {
+        let temp = temp_cue_dir();
+        if let Err(error) = std::fs::create_dir_all(&temp.0) {
+            panic!("create temp dir failed: {error}");
+        }
+        let wav_path = temp.0.join("disc.wav");
+        let cue_path = temp.0.join("album.cue");
+        write_test_file(&wav_path, &wav_24bit_bytes());
+        write_test_file(
+            &cue_path,
+            b"FILE \"disc.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Second\"\n    INDEX 01 00:00:01\n",
+        );
+
+        let source = Audio::read_from_path(&wav_path).expect("24-bit cue source metadata");
+        assert_eq!(source.bit_depth, Some(24));
+
+        let (audios, referenced) = read_cue_folder(std::slice::from_ref(&cue_path), &[]);
+        assert_eq!(audios.len(), 2);
+        assert_eq!(referenced.len(), 1);
+        for audio in &audios {
+            assert_eq!(audio.bit_depth, Some(24));
+        }
+    }
+
+    #[test]
+    fn dsd_native_bitrate_rejects_zero_inputs() {
+        assert_eq!(dsd_native_bitrate(Some(2_822_400), Some(2)), Some(5_644));
+        assert_eq!(dsd_native_bitrate(Some(0), Some(2)), None);
+        assert_eq!(dsd_native_bitrate(Some(2_822_400), Some(0)), None);
+        assert_eq!(dsd_native_bitrate(None, Some(2)), None);
+        assert_eq!(dsd_native_bitrate(Some(500), Some(1)), None);
+        assert_eq!(dsd_native_bitrate(Some(u32::MAX), Some(u8::MAX)), None);
     }
 
     #[test]
@@ -3599,6 +3708,7 @@ mod tag_reader_tests {
         assert_eq!(first.by.as_deref(), Some("sacd"));
         assert!(first.bitrate.is_none());
         assert!(first.sample_rate.is_none());
+        assert_eq!(first.bit_depth, Some(1));
         assert!(first.valid);
         assert!(first.media_id.is_none());
         assert!(first.path.contains("::track=01"));

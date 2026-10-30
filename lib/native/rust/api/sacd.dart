@@ -31,7 +31,7 @@ Future<String> ensureSacdTrackExtracted({
 /// 确保指定 SACD 轨道已转换为 PCM WAV 缓存，并返回其路径。
 ///
 /// 先复用 [`ensure_sacd_track_extracted`] 得到 DSF 缓存，再按请求的采样率与
-/// 位深转换为 WAV。`sample_rate` 只接受 44100/48000/88200/96000，
+/// 位深转换为 WAV。`sample_rate` 只接受 44100/48000/88200/96000/192000，
 /// `bit_depth` 只接受 16/24；`rdsd2pcm` 无法把 DSD64 整数抽取到 48kHz 族，
 /// 请求 48000 时按 44100 输出并在日志中记录警告。缓存命中且 WAV 结构完整时
 /// 直接复用，不完整的缓存删除后重新转换。

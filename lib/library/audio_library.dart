@@ -333,7 +333,7 @@ Future<FolderCoverFile?> findFolderCoverFile(
 
 int? _optionalInt(Object? value) {
   if (value is int) return value;
-  if (value is num) return value.toInt();
+  if (value is num) return value.isFinite ? value.toInt() : null;
   return int.tryParse(value?.toString().trim() ?? '');
 }
 
@@ -404,6 +404,7 @@ Audio _audioFromIndex(library_db.IndexAudio audio, _AudioLoadPool pool) =>
       pool,
       disc: audio.disc,
       playCount: audio.playCount,
+      bitDepth: audio.bitDepth,
     );
 
 Audio _audioFromMap(Map<String, dynamic> map, _AudioLoadPool pool) =>
@@ -423,6 +424,7 @@ Audio _audioFromMap(Map<String, dynamic> map, _AudioLoadPool pool) =>
       pool,
       disc: _optionalInt(map['disc']),
       playCount: map['play_count'] ?? 0,
+      bitDepth: _optionalInt(map['bit_depth']),
     );
 
 String _rssMegabytes(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(1);
@@ -3180,6 +3182,9 @@ class Audio {
 
   int? sampleRate;
 
+  /// PCM 位深；无标签或流式来源为 null。
+  int? bitDepth;
+
   /// absolute path
   String path;
 
@@ -3239,6 +3244,7 @@ class Audio {
     this.by, {
     this.disc,
     this.playCount = 0,
+    this.bitDepth,
   }) : splitedArtists = _splitArtistNames(artist),
        splitedAlbumArtists = _splitArtistNames(albumArtist ?? '');
 
@@ -3258,6 +3264,7 @@ class Audio {
     _AudioLoadPool pool, {
     int? disc,
     int playCount = 0,
+    int? bitDepth,
   }) {
     final pooledArtist = pool.text(artist);
     final pooledAlbumArtist = pool.optionalText(albumArtist);
@@ -3278,6 +3285,7 @@ class Audio {
       pool.artistList(pooledAlbumArtist ?? ''),
       disc: disc,
       playCount: playCount,
+      bitDepth: bitDepth,
     ).._primeSearchCache(pool);
   }
 
@@ -3298,6 +3306,7 @@ class Audio {
     this.splitedAlbumArtists, {
     this.disc,
     this.playCount = 0,
+    this.bitDepth,
   });
 
   String get _pathLookupKey =>
@@ -3403,6 +3412,7 @@ class Audio {
     duration = other.duration;
     bitrate = other.bitrate;
     sampleRate = other.sampleRate;
+    bitDepth = other.bitDepth;
     path = other.path;
     modified = other.modified;
     created = other.created;
@@ -3422,6 +3432,7 @@ class Audio {
       duration == other.duration &&
       bitrate == other.bitrate &&
       sampleRate == other.sampleRate &&
+      bitDepth == other.bitDepth &&
       path == other.path &&
       modified == other.modified &&
       created == other.created &&
@@ -3452,6 +3463,7 @@ class Audio {
     map['by'],
     disc: _optionalInt(map['disc']),
     playCount: map['play_count'] ?? 0,
+    bitDepth: _optionalInt(map['bit_depth']),
   );
 
   Map<String, dynamic> toMap() => {
@@ -3464,6 +3476,7 @@ class Audio {
     'duration': duration,
     'bitrate': bitrate,
     'sample_rate': sampleRate,
+    'bit_depth': bitDepth,
     'path': path,
     'modified': modified,
     'created': created,

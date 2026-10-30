@@ -132,6 +132,7 @@ class RemoteLibrary {
       track.by ?? source.name,
       disc: disc == null || disc <= 0 ? null : disc,
       playCount: playCount,
+      bitDepth: track.bitDepth,
     );
   }
 

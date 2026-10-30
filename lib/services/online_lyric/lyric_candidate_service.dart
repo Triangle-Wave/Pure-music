@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/matcher.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/lyric/karaok_parser.dart';
 import 'package:pure_music/lyric/krc.dart';
 import 'package:pure_music/lyric/lrc.dart';
 import 'package:pure_music/lyric/lyric.dart';
@@ -137,6 +138,7 @@ String? _formatSupplementalLines(List<_CandidateSupplementalLine> lines) {
   if (lines.isEmpty) return null;
   final buffer = StringBuffer();
   for (final line in lines) {
+    if (_isCandidatePlaceholder(line.text)) continue;
     buffer.writeln('${_candidateLrcTime(line.start)}${line.text}');
   }
   final text = buffer.toString().trim();
@@ -187,11 +189,9 @@ Lyric applyLyricCandidateSupplemental(
     hasValue: _hasTranslation,
     apply: (line, text) => line.translation = text,
   );
-  _mergeCandidateSupplemental(
+  _mergeCandidateRomanization(
     lyric,
     _parseCandidateSupplemental(romanizationText),
-    hasValue: _hasRomanization,
-    apply: _applyRomanization,
   );
   return lyric;
 }
@@ -233,12 +233,7 @@ Lyric applyCrossCandidateSupplemental(
       needTranslation = _hasMissingTranslation(lyric);
     }
     if (needRomanization && supplemental.romanization.isNotEmpty) {
-      _mergeCandidateSupplemental(
-        lyric,
-        supplemental.romanization,
-        hasValue: _hasRomanization,
-        apply: _applyRomanization,
-      );
+      _mergeCandidateRomanization(lyric, supplemental.romanization);
       needRomanization = _hasMissingRomanization(lyric);
     }
   }
@@ -262,11 +257,14 @@ int _compareCandidatePriority(
 }
 
 bool _hasTranslation(LyricLine line) {
-  return (line.translation?.trim() ?? '').isNotEmpty;
+  final text = line.translation?.trim() ?? '';
+  return text.isNotEmpty && !_isCandidatePlaceholder(text);
 }
 
 bool _hasRomanization(LyricLine line) {
-  return !line.autoRomanized && (line.romanLyric?.trim() ?? '').isNotEmpty;
+  if (line.autoRomanized) return false;
+  final text = line.romanLyric?.trim() ?? '';
+  return text.isNotEmpty && !_isCandidatePlaceholder(text);
 }
 
 void _applyRomanization(LyricLine line, String text) {
@@ -367,12 +365,12 @@ _CandidateSupplemental _supplementalLinesFromLyric(Lyric lyric) {
   final romanization = <_CandidateSupplementalLine>[];
   for (final line in lyric.lines) {
     final translated = line.translation?.trim() ?? '';
-    if (translated.isNotEmpty) {
+    if (translated.isNotEmpty && !_isCandidatePlaceholder(translated)) {
       translation.add(_CandidateSupplementalLine(line.start, translated));
     }
     if (line.autoRomanized) continue;
     final roman = line.romanLyric?.trim() ?? '';
-    if (roman.isNotEmpty) {
+    if (roman.isNotEmpty && !_isCandidatePlaceholder(roman)) {
       romanization.add(_CandidateSupplementalLine(line.start, roman));
     }
   }
@@ -425,7 +423,7 @@ List<_CandidateSupplementalLine> _parseCandidateSupplemental(String? text) {
         ? 0
         : int.tryParse(fraction.padRight(3, '0').substring(0, 3)) ?? 0;
     final body = (match.group(4) ?? '').trim();
-    if (body.isEmpty) continue;
+    if (body.isEmpty || _isCandidatePlaceholder(body)) continue;
     parsed.add(
       _CandidateSupplementalLine(
         Duration(milliseconds: minutes * 60000 + seconds * 1000 + milliseconds),
@@ -443,36 +441,86 @@ void _mergeCandidateSupplemental(
   required bool Function(LyricLine line) hasValue,
   required void Function(LyricLine line, String text) apply,
 }) {
-  if (supplemental.isEmpty) return;
+  final effective = _withoutCandidatePlaceholders(supplemental);
+  if (effective.isEmpty) return;
   var cursor = 0;
   for (final line in lyric.lines) {
     if (_candidateLineContent(line).isEmpty) continue;
     if (hasValue(line)) continue;
     final lineMs = line.start.inMilliseconds;
-    while (cursor + 1 < supplemental.length) {
-      final currentMs = supplemental[cursor].start.inMilliseconds;
-      final nextMs = supplemental[cursor + 1].start.inMilliseconds;
+    while (cursor + 1 < effective.length) {
+      final currentMs = effective[cursor].start.inMilliseconds;
+      final nextMs = effective[cursor + 1].start.inMilliseconds;
       if ((nextMs - lineMs).abs() >= (currentMs - lineMs).abs()) break;
       cursor++;
     }
     while (cursor > 0) {
-      final currentMs = supplemental[cursor].start.inMilliseconds;
-      final previousMs = supplemental[cursor - 1].start.inMilliseconds;
+      final currentMs = effective[cursor].start.inMilliseconds;
+      final previousMs = effective[cursor - 1].start.inMilliseconds;
       if ((previousMs - lineMs).abs() >= (currentMs - lineMs).abs()) break;
       cursor--;
     }
-    final diff = (supplemental[cursor].start.inMilliseconds - lineMs).abs();
+    final diff = (effective[cursor].start.inMilliseconds - lineMs).abs();
     if (diff > lyricCandidateSupplementalToleranceMs) continue;
-    apply(line, supplemental[cursor].text);
+    apply(line, effective[cursor].text);
   }
 }
 
-String _candidateLineContent(LyricLine line) {
-  if (line is SyncLyricLine) {
-    return line.words.map((word) => word.content).join().trim();
+/// 把候选罗马音补回缺失的行。
+///
+/// 有效歌词行与罗马音行数相等时按行序对齐，时间戳偏移不影响首行；
+/// 行数不等时按时间戳匹配，并对首行使用较大的宽容差。`//` 占位行在
+/// 歌词与罗马音两侧都按空行处理，不写入 [LyricLine.romanLyric]。
+void _mergeCandidateRomanization(
+  Lyric lyric,
+  List<_CandidateSupplementalLine> supplemental,
+) {
+  final effective = _withoutCandidatePlaceholders(supplemental);
+  if (effective.isEmpty) return;
+  final targetLines = <LyricLine>[];
+  final lyricStartsMs = <int>[];
+  for (final line in lyric.lines) {
+    if (_candidateLineContent(line).isEmpty) continue;
+    targetLines.add(line);
+    lyricStartsMs.add(line.start.inMilliseconds);
   }
-  if (line is UnsyncLyricLine) return line.content.trim();
-  return '';
+  final alignment = alignSupplementalLines(
+    lyricStartsMs: lyricStartsMs,
+    supplementalStartsMs: [
+      for (final line in effective) line.start.inMilliseconds,
+    ],
+    toleranceMs: lyricCandidateSupplementalToleranceMs,
+  );
+  for (var i = 0; i < alignment.length; i++) {
+    final supplementalIndex = alignment[i];
+    if (supplementalIndex == null) continue;
+    final line = targetLines[i];
+    if (_hasRomanization(line)) continue;
+    _applyRomanization(line, effective[supplementalIndex].text);
+  }
+}
+
+/// `//` 是占位行，与空行一样不参与有效行对齐。
+bool _isCandidatePlaceholder(String text) => text.trim() == '//';
+
+List<_CandidateSupplementalLine> _withoutCandidatePlaceholders(
+  List<_CandidateSupplementalLine> lines,
+) {
+  return lines
+      .where((line) => !_isCandidatePlaceholder(line.text))
+      .toList(growable: false);
+}
+
+String _candidateLineContent(LyricLine line) {
+  final String content;
+  if (line is SyncLyricLine) {
+    content = line.words.map((word) => word.content).join().trim();
+  } else if (line is UnsyncLyricLine) {
+    content = line.content.trim();
+  } else {
+    return '';
+  }
+  return _isCandidatePlaceholder(content) ? '' : content;
 }
 
 String _candidateLrcTime(Duration duration) {

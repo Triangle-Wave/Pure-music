@@ -156,6 +156,71 @@ List<_LineData> _parseTimedTextLines(String text) {
   return lines;
 }
 
+/// 把补充文本行（罗马音）对齐到歌词行，返回每条歌词对应的补充行下标。
+///
+/// 两侧有效行数相等时按行序一一对应，补充行与歌词行的时间戳偏移不影响
+/// 对齐结果；行数不等时按时间戳做单向最近邻匹配，首行在
+/// [firstLineRelaxedToleranceMs] 内放宽，补偿源文件首行时间戳的整体偏移。
+/// 补充行更贴近下一句、或已落在下一句的 [toleranceMs] 内时首行不启用放宽，
+/// 该行留给下一句。
+/// 返回列表长度为 [lyricStartsMs] 的长度，`null` 表示该行没有补充内容。
+List<int?> alignSupplementalLines({
+  required List<int> lyricStartsMs,
+  required List<int> supplementalStartsMs,
+  int toleranceMs = 300,
+  int firstLineRelaxedToleranceMs = 3000,
+}) {
+  final result = List<int?>.filled(lyricStartsMs.length, null);
+  if (lyricStartsMs.isEmpty || supplementalStartsMs.isEmpty) {
+    return result;
+  }
+
+  if (lyricStartsMs.length == supplementalStartsMs.length) {
+    for (var i = 0; i < lyricStartsMs.length; i++) {
+      result[i] = i;
+    }
+    return result;
+  }
+
+  var cursor = 0;
+  for (var i = 0; i < lyricStartsMs.length; i++) {
+    // 首行放宽时会把补充行预留给下一句，已填充的行不再处理。
+    if (result[i] != null) continue;
+    final lineMs = lyricStartsMs[i];
+    while (cursor < supplementalStartsMs.length) {
+      final diff = lineMs - supplementalStartsMs[cursor];
+      if (diff.abs() <= toleranceMs) {
+        result[i] = cursor;
+        cursor++;
+        break;
+      }
+      // 首行罗马音与歌词的时间戳整体错开时允许较大偏移，提前或滞后都适用，
+      // 避免首句永久匹配失败。放宽前先比较首句与下一句到补充行的距离，
+      // 更贴近下一句、或已落在下一句容差内时留给下一句，避免首句抢占。
+      if (i == 0 &&
+          cursor == 0 &&
+          diff.abs() <= firstLineRelaxedToleranceMs) {
+        final supplementalMs = supplementalStartsMs[cursor];
+        final firstDistance = (lyricStartsMs[i] - supplementalMs).abs();
+        if (i + 1 < lyricStartsMs.length) {
+          final nextDistance = (lyricStartsMs[i + 1] - supplementalMs).abs();
+          if (nextDistance <= toleranceMs || nextDistance < firstDistance) {
+            result[i + 1] = cursor;
+            cursor++;
+            break;
+          }
+        }
+        result[i] = cursor;
+        cursor++;
+        break;
+      }
+      if (diff < 0) break;
+      cursor++;
+    }
+  }
+  return result;
+}
+
 // ──────────────────────────────────────────────
 // 🎯 主入口：解析 KaraOK 格式文本 → Pure Music Lyric
 // ──────────────────────────────────────────────
@@ -216,13 +281,43 @@ Lyric? parseKaraokToPureLyric(
   final romanLines = romanizationText != null && romanizationText.isNotEmpty
       ? _parseTimedTextLines(romanizationText)
       : <_LineData>[];
+  final romanEntries = <_LineData>[];
+  for (final r in romanLines) {
+    final text = r.rawText?.trim();
+    if (text == null || text.isEmpty || text == '//') continue;
+    romanEntries.add(r);
+  }
 
-  // 构建最终的 SyncLyricLine 列表（两指针法匹配翻译与罗马音）
+  // 罗马音按有效歌词行对齐：行数相等走行序，不等走时间戳兜底。
+  // `//` 占位行与空行不占用行序，避免挤掉后续行的罗马音。
+  final effectiveLineIndices = <int>[];
+  final lyricStartsMs = <int>[];
+  for (var i = 0; i < lines.length; i++) {
+    final lineText = lines[i].words.map((word) => word.text).join().trim();
+    if (lineText.isEmpty || lineText == '//') continue;
+    effectiveLineIndices.add(i);
+    lyricStartsMs.add(lines[i].start.inMilliseconds);
+  }
+  final romanAlignment = alignSupplementalLines(
+    lyricStartsMs: lyricStartsMs,
+    supplementalStartsMs: [
+      for (final r in romanEntries) r.start.inMilliseconds,
+    ],
+  );
+  final romanizationByLine = <int, String>{};
+  for (var i = 0; i < romanAlignment.length; i++) {
+    final romanIndex = romanAlignment[i];
+    if (romanIndex == null) continue;
+    romanizationByLine[effectiveLineIndices[i]] = romanEntries[romanIndex]
+        .rawText!
+        .trim();
+  }
+
+  // 构建最终的 SyncLyricLine 列表（翻译用两指针法按时间戳匹配）
   final resultLines = <SyncLyricLine>[];
   final metadataResultLines = <SyncLyricLine>{};
   const toleranceMs = 300;
   int transIdx = 0;
-  int romanIdx = 0;
 
   for (int i = 0; i < lines.length; i++) {
     final l = lines[i];
@@ -245,24 +340,7 @@ Lyric? parseKaraokToPureLyric(
       }
     }
 
-    String? romanization;
-    while (romanIdx < romanLines.length) {
-      final r = romanLines[romanIdx];
-      final diff = l.start.inMilliseconds - r.start.inMilliseconds;
-
-      if (diff.abs() <= toleranceMs) {
-        final text = r.rawText?.trim();
-        if (text != null && text.isNotEmpty && text != '//') {
-          romanization = text;
-        }
-        romanIdx++;
-        break;
-      } else if (diff < 0) {
-        break;
-      } else {
-        romanIdx++;
-      }
-    }
+    final romanization = romanizationByLine[i];
 
     final line = _buildLine(
       l.start,
