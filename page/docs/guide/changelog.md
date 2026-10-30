@@ -5,9 +5,30 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.12**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.13**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases) · [Gitee 镜像](https://gitee.com/qingyueyin/Pure-music)（同步常滞后）
+
+<details>
+<summary><strong>2.3.13</strong></summary>
+
+**音质标记**
+
+- 音乐列表、播放队列与统计页歌曲排行显示 Hi-Res 与 DSD 徽章。
+- Hi-Res 判定：采样率高于 44.1 kHz，或 44.1 kHz 且位深不低于 24 bit。
+- DSD 曲目同时显示 DSD 与 Hi-Res 徽章；SACD 虚拟轨、DSF/DFF、DSD 采样率与 DSD 源文件都能识别。
+
+**曲库与音质信息**
+
+- 曲目位深进入曲库索引与列表，24bit/44.1kHz 这类边缘 Hi-Res 不再漏标。
+- 索引升级后首次启动会重新读取一次标签以补齐位深，期间界面可正常使用。
+- DSF 位深按 DSD 原生 1 bit 记录，详情页与列表保持一致。
+
+**歌词**
+
+- 修复部分歌曲第一句缺少罗马音的问题；罗马音与歌词行数一致时按行序对齐，行数不一致时按时间戳匹配并容忍首句偏移。
+
+</details>
 
 <details>
 <summary><strong>2.3.12</strong></summary>
