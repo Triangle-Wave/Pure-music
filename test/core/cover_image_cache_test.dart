@@ -9,6 +9,8 @@ import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/cover_disk_cache.dart';
 
 void main() {
+  // 普通 test 也需要 binding，保证 PaintingBinding 与图片解码可用。
+  TestWidgetsFlutterBinding.ensureInitialized();
   final cache = CoverImageCache.instance;
 
   setUp(() {
@@ -74,9 +76,7 @@ void main() {
     expect(cache.stableImageConfigurationCountForTesting, configurationCount);
   });
 
-  testWidgets('decoded bytes cache hits the same path and mtime', (
-    tester,
-  ) async {
+  test('decoded bytes cache hits the same path and mtime', () async {
     const path = r'C:\music\album\track.flac';
     final bytes = Uint8List.fromList([1, 2, 3, 4]);
     cache.putDecodedBytes(
@@ -97,7 +97,7 @@ void main() {
     expect(hit, same(bytes));
   });
 
-  testWidgets('decoded bytes cache key includes mtime', (tester) async {
+  test('decoded bytes cache key includes mtime', () async {
     const path = r'C:\music\album\track.flac';
     final first = Uint8List.fromList([1]);
     final second = Uint8List.fromList([2]);
@@ -126,7 +126,7 @@ void main() {
     );
   });
 
-  testWidgets('decoded bytes cache keeps at most 20 covers', (tester) async {
+  test('decoded bytes cache keeps at most 20 covers', () {
     for (var i = 0; i < 21; i++) {
       cache.putDecodedBytes(
         path: 'track-$i.flac',
@@ -139,35 +139,42 @@ void main() {
     expect(cache.decodedBytesCountForTesting, 20);
   });
 
-  testWidgets('trimMemory drops bytes that finish loading afterwards', (
-    tester,
-  ) async {
-    final directory = await Directory.systemTemp.createTemp('cover-trim-');
-    addTearDown(() async {
-      CoverDiskCache.instance.invalidateRoot();
-      if (directory.existsSync()) {
-        await directory.delete(recursive: true);
-      }
-    });
-    CoverDiskCache.instance.configure(rootPath: directory.path);
-    final imagePath = p.join(directory.path, 'cover.png');
-    await File(imagePath).writeAsBytes(
-      base64Decode(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
-        'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-      ),
-    );
+  test(
+    'trimMemory drops bytes that finish loading afterwards',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('cover-trim-');
+      addTearDown(() async {
+        CoverDiskCache.instance.invalidateRoot();
+        try {
+          if (await directory.exists()) {
+            await directory.delete(recursive: true);
+          }
+        } catch (_) {
+          // 临时目录清理失败不影响断言结果。
+        }
+      });
+      CoverDiskCache.instance.configure(rootPath: directory.path);
+      final imagePath = p.join(directory.path, 'cover.png');
+      await File(imagePath).writeAsBytes(
+        base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+          'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        ),
+      );
 
-    final loading = cache.loadBytes(
-      path: imagePath,
-      width: 160,
-      height: 160,
-    );
-    // 清理发生在加载完成前，迟到的结果不允许写回。
-    cache.trimMemory(keepPath: r'C:\music\current.flac');
-    final bytes = await loading;
+      final loading = cache.loadBytes(
+        path: imagePath,
+        width: 160,
+        height: 160,
+      );
+      // 清理发生在加载完成前，迟到的结果不允许写回。
+      cache.trimMemory(keepPath: r'C:\music\current.flac');
+      final bytes = await loading;
 
-    expect(bytes, isNotNull);
-    expect(cache.decodedBytesCountForTesting, 0);
-  });
+      expect(bytes, isNotNull);
+      expect(cache.decodedBytesCountForTesting, 0);
+    },
+    // 文件读取与图片解码走真实事件循环，超时兜底避免缺陷时长时间挂起。
+    timeout: const Timeout(Duration(seconds: 20)),
+  );
 }
