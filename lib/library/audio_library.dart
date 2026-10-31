@@ -2537,11 +2537,7 @@ class AudioLibrary {
     );
   }
 
-  static Audio? Function(String path)? remoteAudioResolver;
-
   Audio? audioByPath(String path) {
-    final remote = remoteAudioResolver?.call(path);
-    if (remote != null) return remote;
     final key = _audioPathLookupKey(path);
     if (key.isEmpty) return null;
     return _audioByPath[key];

@@ -86,26 +86,6 @@ void main() {
       );
     });
 
-    test('远程曲目的 by=DSF 不参与判定', () {
-      expect(
-        isDsdAudio(
-          _audio(path: 'remote://navidrome/track', by: 'DSF'),
-        ),
-        isFalse,
-      );
-    });
-
-    test('远程曲目 by 恰为艺术家名 dsf 时不误判', () {
-      expect(
-        isDsdAudio(_audio(path: 'remote://webdav/track', by: 'dsf')),
-        isFalse,
-      );
-      expect(
-        isDsdAudio(_audio(path: 'remote://webdav/track', by: 'sacd')),
-        isFalse,
-      );
-    });
-
     test('352.8k PCM 不是 DSD', () {
       expect(
         isDsdAudio(
@@ -116,15 +96,6 @@ void main() {
           ),
         ),
         isFalse,
-      );
-    });
-
-    test('远程曲目仍按 DSD 采样率判定', () {
-      expect(
-        isDsdAudio(
-          _audio(path: 'remote://navidrome/track', sampleRate: 2822400),
-        ),
-        isTrue,
       );
     });
   });

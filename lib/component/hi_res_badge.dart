@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:pure_music/library/audio_library.dart';
-import 'package:pure_music/remote/remote_source.dart';
 
 /// 列表数据只有采样率、位深与码率：采样率高于 CD 的 44.1 kHz 即为 Hi-Res，
 /// 44.1 kHz 则需要位深不低于 24 bit；DSD 本身即高解析，一律算 Hi-Res。
@@ -15,14 +14,11 @@ bool isHiResAudio(Audio audio) {
 
 /// DSD 判定：SACD 虚拟轨、DSF/DFF 来源、DSD 采样率或 DSD 源文件路径
 /// 任一命中即为 DSD；`by` 记录标签来源，SACD ISO 解析出的轨道标记为 sacd。
-/// 远程曲目的 `by` 记录艺术家或源名称，不参与格式判定。
 bool isDsdAudio(Audio audio) {
   if (audio.isSacdTrack) return true;
 
-  if (!audio.path.startsWith(remotePathPrefix)) {
-    final by = audio.by?.toLowerCase();
-    if (by == 'dsf' || by == 'dff' || by == 'sacd') return true;
-  }
+  final by = audio.by?.toLowerCase();
+  if (by == 'dsf' || by == 'dff' || by == 'sacd') return true;
 
   final sampleRate = audio.sampleRate;
   if (sampleRate != null && sampleRate >= 2822400) return true;

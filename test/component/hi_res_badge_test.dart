@@ -68,13 +68,4 @@ void main() {
       expect(isHiResAudio(_audio(sampleRate: 44100, bitDepth: 23)), isFalse);
     });
   });
-
-  group('isDsdAudio 远程曲目', () {
-    test('remote:// 曲目的 by=DFF 不参与判定', () {
-      expect(
-        isDsdAudio(_audio(path: 'remote://webdav/track', by: 'DFF')),
-        isFalse,
-      );
-    });
-  });
 }
