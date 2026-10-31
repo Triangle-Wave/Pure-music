@@ -1,7 +1,7 @@
 {
   "tag_name": "v2.3.15",
   "name": "v2.3.15",
-  "body": "**Full Changelog**: https://github.com/Triangle-Wave/Pure-music/compare/v2.3.14...v2.3.15",
+  "body": "## 2.3.15 更新日志\n\n**播放与性能**\n\n- 窗口不可见时换出工作集并停止定时器，降低后台内存占用。\n- 播放页装饰动画降到 30fps，减少不必要的绘制。\n- 窗口真正可见后再恢复绘制和动画，最小化与托盘恢复更平滑。\n- 流光背景先绘制小图再放大，并复用颜色矩阵。\n\n**歌词**\n\n- 元数据行单独标记与绘制，不再参与正文滚动。\n- 歌词尺寸未就绪时跳过滚动，避免跳动。\n- LRC 导出与写回按设置保留元数据行。\n\n**曲库与界面**\n\n- 曲库未对齐时不缓存空歌单。\n- 封面搜索记住图片尺寸。\n- 封面与专辑色释放后不再写回进行中的请求。\n- 波浪进度条设置在播放中切换立即生效。\n\n**构建**\n\n- 安装包与可执行文件的版本信息跟随发布版本更新。",
   "html_url": "https://github.com/Triangle-Wave/Pure-music/releases/tag/v2.3.15",
   "gitee_release_url": null,
   "gitee_available": false,
