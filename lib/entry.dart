@@ -296,6 +296,7 @@ class _EntryState extends State<Entry>
   Timer? _geometrySaveTimer;
   VoidCallback? _routeLogListener;
   String? _routeLogPath;
+  int _minimizeEpoch = 0;
 
   @override
   void initState() {
@@ -374,6 +375,7 @@ class _EntryState extends State<Entry>
 
   @override
   void onWindowMinimize() {
+    _minimizeEpoch++;
     WindowRenderGate.instance.setWindowMinimized(true);
     MemoryMonitorService.instance.trimWindowMinimized();
     PlayService.existingPlaybackService?.startSmtcKeepAlive();
@@ -381,8 +383,15 @@ class _EntryState extends State<Entry>
 
   @override
   void onWindowRestore() {
+    final epoch = _minimizeEpoch;
     // 等这次系统回调返回后再生效。回调里立刻画，会和还没恢复的窗口表面死锁。
     Timer.run(() {
+      if (!windowRestoreStillCurrent(
+        scheduledEpoch: epoch,
+        currentEpoch: _minimizeEpoch,
+      )) {
+        return;
+      }
       WindowRenderGate.instance.setWindowMinimized(false);
       MemoryMonitorService.instance.stopHiddenTrim();
       PlayService.existingPlaybackService?.stopSmtcKeepAlive();

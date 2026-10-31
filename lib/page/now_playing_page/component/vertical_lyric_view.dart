@@ -2310,16 +2310,8 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
   }
 
   /// 判断一行是否已被 blankMetadataLines 清空（不需要渲染）
-  bool _isLineBlankFiltered(LyricLine line) {
-    if (line is SyncLyricLine) {
-      return line.words.isEmpty && line.length <= const Duration(seconds: 3);
-    } else if (line is LrcLine) {
-      return line.isBlank &&
-          (line.length <= const Duration(seconds: 3) ||
-              line.start > Duration.zero);
-    }
-    return false;
-  }
+  bool _isLineBlankFiltered(LyricLine line) =>
+      isBlankLyricLineFiltered(line);
 
   int? _nearestRenderableLineIndex(
     int lineIndex, {

@@ -83,20 +83,28 @@ jobs:
           $minor = [int]$parts[1]
           $patch = [int]$parts[2]
           $build = if ($parts.Count -ge 4) { [int]$parts[3] } else { 0 }
-          $path = "windows/runner/Runner.rc"
+          # 解析为绝对路径，写入不依赖进程当前目录。
+          $path = (Resolve-Path -LiteralPath "windows/runner/Runner.rc" -ErrorAction Stop).Path
+          # 保留原文件的 BOM 状态，对已是目标版本的文件重复执行时字节完全不变。
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+          $utf8 = [System.Text.UTF8Encoding]::new($hasBom)
           $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-          $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+$', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
-          $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
-          $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
-          $expected = @(
-            "#define VERSION_AS_NUMBER $major,$minor,$patch,$build",
-            "#define PRODUCT_VERSION `"$major.$minor.$patch`"",
-            "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
-          )
-          foreach ($line in $expected) {
-            if (-not $content.Contains($line)) { throw "Runner.rc version sync failed, missing: $line" }
+          # 行尾用零宽前瞻锚定，匹配不消耗 \r，CRLF 与 LF 文件的换行风格都保持原样。
+          $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+(?=\r?$)', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+          $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"(?=\r?$)', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+          $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"(?=\r?$)', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+          $expected = [ordered]@{
+            VERSION_AS_NUMBER = "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+            PRODUCT_VERSION    = "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+            FILE_VERSION_STR   = "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
           }
-          Set-Content -LiteralPath $path -Value $content -Encoding utf8NoBOM -NoNewline
+          foreach ($field in $expected.Keys) {
+            if (-not $content.Contains($expected[$field])) {
+              throw "Runner.rc version sync failed: $field did not update (expected: $($expected[$field]))"
+            }
+          }
+          [System.IO.File]::WriteAllText($path, $content, $utf8)
           Write-Output "Synced Runner.rc to $major.$minor.$patch.$build"
 
       - name: Setup Flutter

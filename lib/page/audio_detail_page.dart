@@ -1905,6 +1905,7 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
       wordFormat: settings.lyricTagWordFormat,
       includeTranslation: settings.lyricTagIncludeTranslation,
       includeRomanization: settings.lyricTagIncludeRomanization,
+      keepMetadata: settings.keepLyricMetadata,
     );
   }
 

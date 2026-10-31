@@ -28,6 +28,7 @@ import 'package:pure_music/core/immersive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/system_volume_service.dart';
+import 'package:pure_music/core/ticker_timing.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/playlist.dart';
@@ -1925,6 +1926,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   static const _wavyCycle = Duration(seconds: 4);
   bool _wavyActive = false;
   Duration? _lastWavyTick;
+  late final VoidCallback _settingsListener;
 
   @override
   void initState() {
@@ -1941,6 +1943,11 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
       _syncProgressDriver(state);
     };
     _playbackService.playerStateNotifier.addListener(_playerStateListener);
+    // 波浪开关对应的通知不经过 playerState，播放中切换设置也需要重新同步。
+    _settingsListener = () {
+      _syncWavyAnimation(_playbackService.playerState);
+    };
+    AppSettings.rebuildNotifier.addListener(_settingsListener);
     _nowPlayingListener = () {
       _syncFromNative(force: true);
       _syncProgressDriver(_playbackService.playerState);
@@ -2068,6 +2075,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   void dispose() {
     _positionSyncTimer?.cancel();
     _progressTicker?.dispose();
+    AppSettings.rebuildNotifier.removeListener(_settingsListener);
     _playbackService.playerStateNotifier.removeListener(_playerStateListener);
     _playbackService.nowPlayingNotifier.removeListener(_nowPlayingListener);
     _playbackService.positionSyncNotifier.removeListener(_positionSyncListener);
@@ -2681,6 +2689,7 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   int _rotationMemoryGeneration = 0;
   Ticker? _rotationTicker;
   Duration? _lastRotationTick;
+  bool? _tickerModeEnabled;
 
   bool get _isPlaying => _playerState == PlayerState.playing;
 
@@ -2705,6 +2714,15 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    if (tickerModeResumed(
+      previousEnabled: _tickerModeEnabled,
+      enabled: tickerModeEnabled,
+    )) {
+      // 静音期间 Ticker 不回调，恢复后的 elapsed 含整段静音时长，丢弃旧基准。
+      _lastRotationTick = null;
+    }
+    _tickerModeEnabled = tickerModeEnabled;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     if (_reduceMotion == reduceMotion) return;
     _reduceMotion = reduceMotion;
@@ -2770,7 +2788,7 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   void _onRotationTick(Duration elapsed) {
     final last = _lastRotationTick;
     if (last != null && elapsed - last < _rotationTickInterval) return;
-    final delta = last == null ? Duration.zero : elapsed - last;
+    final delta = tickerFrameDelta(last, elapsed);
     _lastRotationTick = elapsed;
     if (delta <= Duration.zero) return;
     final step =

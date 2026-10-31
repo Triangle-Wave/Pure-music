@@ -1,9 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/cover_disk_cache.dart';
 
 void main() {
   final cache = CoverImageCache.instance;
@@ -134,5 +137,37 @@ void main() {
       );
     }
     expect(cache.decodedBytesCountForTesting, 20);
+  });
+
+  testWidgets('trimMemory drops bytes that finish loading afterwards', (
+    tester,
+  ) async {
+    final directory = await Directory.systemTemp.createTemp('cover-trim-');
+    addTearDown(() async {
+      CoverDiskCache.instance.invalidateRoot();
+      if (directory.existsSync()) {
+        await directory.delete(recursive: true);
+      }
+    });
+    CoverDiskCache.instance.configure(rootPath: directory.path);
+    final imagePath = p.join(directory.path, 'cover.png');
+    await File(imagePath).writeAsBytes(
+      base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+        'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      ),
+    );
+
+    final loading = cache.loadBytes(
+      path: imagePath,
+      width: 160,
+      height: 160,
+    );
+    // 清理发生在加载完成前，迟到的结果不允许写回。
+    cache.trimMemory(keepPath: r'C:\music\current.flac');
+    final bytes = await loading;
+
+    expect(bytes, isNotNull);
+    expect(cache.decodedBytesCountForTesting, 0);
   });
 }

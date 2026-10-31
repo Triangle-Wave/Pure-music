@@ -671,6 +671,7 @@ class LyricService extends ChangeNotifier {
       wordFormat: wordFormat ?? AppSettings.instance.lyricTagWordFormat,
       includeTranslation: AppSettings.instance.lyricTagIncludeTranslation,
       includeRomanization: AppSettings.instance.lyricTagIncludeRomanization,
+      keepMetadata: AppSettings.instance.keepLyricMetadata,
     );
     if (lrcText.trim().isEmpty) return null;
 
@@ -1776,6 +1777,7 @@ class LyricService extends ChangeNotifier {
         wordFormat: AppSettings.instance.lyricTagWordFormat,
         includeTranslation: AppSettings.instance.lyricTagIncludeTranslation,
         includeRomanization: AppSettings.instance.lyricTagIncludeRomanization,
+        keepMetadata: AppSettings.instance.keepLyricMetadata,
       );
       if (lrcText.trim().isEmpty) return;
       // 标签里已是同一份歌词，说明之前写过且内容未变，不再提示

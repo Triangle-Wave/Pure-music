@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/painting.dart';
 import 'package:pure_music/core/database.dart';
 import 'package:pure_music/core/settings.dart';
@@ -360,6 +361,10 @@ class Playlist {
     _audiosCache = null;
     _audiosCacheLibrary = null;
   }
+
+  /// 曲库未对齐时空结果不写入缓存，供测试确认不会把空列表钉住。
+  @visibleForTesting
+  bool get hasCachedAudiosForTesting => _audiosCache != null;
 
   Future<Uint8List?> resolveCoverBytes() async {
     if (coverSource == null || coverSource!.isEmpty) return null;

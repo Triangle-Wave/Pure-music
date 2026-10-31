@@ -11,6 +11,20 @@ import 'package:pure_music/lyric/metadata_detector.dart';
 import 'package:pure_music/lyric/roman_word_mapper.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart';
 
+/// 被 [blankMetadataLines] 清空的元数据行不需要绘制；
+/// 由 [markMetadataLines] 只做标记、保留内容的元数据行照常绘制。
+bool isBlankLyricLineFiltered(LyricLine line) {
+  if (line is SyncLyricLine) {
+    return line.words.isEmpty && line.length <= const Duration(seconds: 3);
+  }
+  if (line is LrcLine) {
+    return line.isBlank &&
+        (line.length <= const Duration(seconds: 3) ||
+            line.start > Duration.zero);
+  }
+  return false;
+}
+
 /// 智能清理空白行：
 /// 1. 移除连续的空白行（只保留第一个）
 /// 2. 移除时间间隔小于 800ms 的空白行（太短无意义）

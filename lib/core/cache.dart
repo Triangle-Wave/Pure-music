@@ -1263,6 +1263,8 @@ class CoverImageCache {
   /// 释放不常用的缓存层，保留小图缓存以维持列表流畅滚动
   /// [keepPath] 指定保留当前播放曲目的缓存，避免回退时重新 FFI 加载
   void trimMemory({String? keepPath}) {
+    // 清理即让进行中的加载写回失效，否则刚释放的封面会在加载完成后重新驻留。
+    _generation++;
     if (keepPath != null) {
       final prefix = '$keepPath|';
       bool notKeep(String key) => !key.startsWith(prefix);
@@ -1273,7 +1275,6 @@ class CoverImageCache {
       _decodedBytes.removeWhere(notKeep);
       _missing.removeWhere(notKeep);
     } else {
-      _generation++;
       _medium.clear();
       _large.clear();
       _pending.clear();

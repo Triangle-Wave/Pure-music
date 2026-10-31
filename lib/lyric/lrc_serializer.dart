@@ -1,3 +1,4 @@
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/lyric/lrc.dart';
 import 'package:pure_music/lyric/lyric.dart';
 import 'package:pure_music/lyric/lyric_tag_word_format.dart';
@@ -7,11 +8,16 @@ String serializeLyricToLrc(
   required LyricTagWordFormat wordFormat,
   bool includeTranslation = true,
   bool includeRomanization = true,
+  bool? keepMetadata,
 }) {
+  final shouldKeepMetadata =
+      keepMetadata ?? AppSettings.instance.keepLyricMetadata;
   final output = _extractLrcMetadata(lyric.rawText);
   for (final line in lyric.lines) {
+    // 元数据行的保留与丢弃跟随设置，和解析侧的 keepMetadata 语义一致。
+    if (line.isMetadata && !shouldKeepMetadata) continue;
     if (line is LrcLine) {
-      if (line.isMetadata || line.content.trim().isEmpty) continue;
+      if (line.content.trim().isEmpty) continue;
       output.add('${_lrcTime(line.start)}${line.content}');
       _appendSupplementalLines(
         output,

@@ -189,6 +189,18 @@ void main() {
       expect((lyric.lines.first as SyncLyricLine).romanLyric, first);
     });
 
+    test('元数据行不生成罗马音', () {
+      final metadata = _line('ありがとう')..isMetadata = true;
+      final lyric = Lyric([metadata, _line('ありがとう')]);
+
+      applyAutoRomanization(lyric);
+
+      expect(metadata.romanLyric, isNull);
+      expect(metadata.romanWords, isNull);
+      expect(metadata.autoRomanized, isFalse);
+      expect((lyric.lines[1] as SyncLyricLine).romanLyric, 'arigatou');
+    });
+
     test('回退只清除生成内容，保留自带罗马音', () {
       final lyric = Lyric([
         _line('ありがとう'),
