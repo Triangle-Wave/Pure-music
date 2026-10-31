@@ -582,9 +582,6 @@ class _TransitionControllerManager {
   int _lastNativeSyncMs = 0;
   static const int _nativeSyncMs = 1000;
   Duration _lastTickElapsed = Duration.zero;
-  Duration? _lastPaintElapsed;
-  // 间奏倒计时和呼吸动画跟随屏幕刷新率逐帧推进。
-  static const _paintInterval = Duration.zero;
   late final VoidCallback _playerStateListener = _syncPlaybackState;
   late final VoidCallback _positionSyncListener = _syncPosition;
 
@@ -681,14 +678,12 @@ class _TransitionControllerManager {
     _progressTicker ??= Ticker(_tickProgress);
     if (_progressTicker!.isActive) return;
     _lastTickElapsed = Duration.zero;
-    _lastPaintElapsed = null;
     _progressTicker!.start();
   }
 
   void _stopProgressTicker() {
     _progressTicker?.stop();
     _lastTickElapsed = Duration.zero;
-    _lastPaintElapsed = null;
     _positionClock.stop();
   }
 
@@ -697,9 +692,6 @@ class _TransitionControllerManager {
       _syncProgressTicker();
       return;
     }
-    final lastPaint = _lastPaintElapsed;
-    if (lastPaint != null && elapsed - lastPaint < _paintInterval) return;
-    _lastPaintElapsed = elapsed;
     final tickDelta = _lastTickElapsed == Duration.zero
         ? Duration.zero
         : elapsed - _lastTickElapsed;

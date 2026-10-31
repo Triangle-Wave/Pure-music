@@ -13,6 +13,7 @@ import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/lyric_render_config.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/theme.dart';
+import 'package:pure_music/core/ticker_timing.dart';
 import 'package:pure_music/lyric/lyric_manual_offset.dart';
 import 'package:pure_music/lyric/lrc.dart';
 import 'package:pure_music/lyric/lyric.dart';
@@ -119,9 +120,6 @@ class _LyricsLineWidgetState extends State<LyricsLineWidget>
   final ValueNotifier<double> _currentTimeNotifier = ValueNotifier(0);
   late final VoidCallback _playerStateListener;
   Duration _lastTickElapsed = Duration.zero;
-  Duration? _lastPaintElapsed;
-  // 逐字高亮跟随屏幕刷新率逐帧推进。
-  static const _paintInterval = Duration.zero;
 
   /// seek 后用于过滤旧进度回调的临时目标
   double? _pendingSeekMs;
@@ -563,7 +561,6 @@ class _LyricsLineWidgetState extends State<LyricsLineWidget>
     if (_needsProgressTicker) {
       _syncToNativePosition();
       _lastTickElapsed = Duration.zero;
-      _lastPaintElapsed = null;
       _pendingSeekMs = null;
       _pendingSeekAt = null;
       final isPlaying =
@@ -648,13 +645,12 @@ class _LyricsLineWidgetState extends State<LyricsLineWidget>
   }
 
   void _onTick(Duration elapsed) {
-    final lastPaint = _lastPaintElapsed;
-    if (lastPaint != null && elapsed - lastPaint < _paintInterval) return;
-    _lastPaintElapsed = elapsed;
     final previousTimeMs = _currentTimeMs;
-    final elapsedDelta = _lastTickElapsed == Duration.zero
-        ? Duration.zero
-        : elapsed - _lastTickElapsed;
+    // TickerMode 静音或长时间掉帧后，本帧只校准基准，不按整段间隔推进。
+    final elapsedDelta = tickerFrameDelta(
+      _lastTickElapsed == Duration.zero ? null : _lastTickElapsed,
+      elapsed,
+    );
     _lastTickElapsed = elapsed;
 
     final rate = widget.usesAuthoredTiming

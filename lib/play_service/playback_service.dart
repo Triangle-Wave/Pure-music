@@ -515,7 +515,7 @@ class PlaybackService extends ChangeNotifier {
     final audio = nowPlaying;
     if (audio != null && BassPlayer.isMidiPath(audio.path) && applied) {
       final position = _player.position;
-      _player.setSource(_playbackPathFor(audio));
+      _player.setSource(audio.path);
       if (position > 0.2) _player.seek(position);
       _player.start();
     }
@@ -553,8 +553,6 @@ class PlaybackService extends ChangeNotifier {
   }
 
   void reapplyOutputGain() => _eq.reapplyOutputGain();
-
-  String _playbackPathFor(Audio audio) => audio.path;
 
   Future<double?> _readReplayGain(String path) async {
     if (!_pref.replayGainEnabled) return null;
@@ -1237,7 +1235,7 @@ class PlaybackService extends ChangeNotifier {
     );
     _pendingGaplessTransition = pending;
     final prepared = _player.prepareGaplessSource(
-      _playbackPathFor(target.incoming),
+      target.incoming.path,
       transitionId: pending.id,
       transitionMode: TransitionMode.crossfade,
     );
@@ -1354,7 +1352,7 @@ class PlaybackService extends ChangeNotifier {
       return;
     }
     if (!_player.prepareGaplessSource(
-      _playbackPathFor(audio),
+      audio.path,
       transitionId: pending.id,
     )) {
       _pendingGaplessTransition = null;

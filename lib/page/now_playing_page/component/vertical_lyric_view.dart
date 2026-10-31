@@ -7,6 +7,7 @@ import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/lyric_render_config.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/theme.dart';
+import 'package:pure_music/core/ticker_timing.dart';
 import 'package:pure_music/core/route_visibility.dart';
 import 'package:pure_music/core/window_render_gate.dart';
 import 'package:pure_music/lyric/lyric_manual_offset.dart';
@@ -628,10 +629,8 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
   late final ValueNotifier<double> _sharedLyricPositionMs;
   Ticker? _sharedLyricPositionTicker;
   Duration _sharedLyricLastTick = Duration.zero;
-  Duration? _sharedLyricLastPaint;
-  // 逐字高亮跟随屏幕刷新率逐帧推进。
-  static const _sharedLyricPaintInterval = Duration.zero;
   bool _resumeSharedLyricFromFrozen = false;
+  bool? _tickerModeEnabled;
   late StreamSubscription<LyricLineUpdate> lyricLineStreamSubscription;
   Timer? _positionResyncTimer;
   Timer? _positionResyncStopTimer;
@@ -776,32 +775,27 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
       }
       _sharedLyricPositionTicker?.stop();
       _sharedLyricLastTick = Duration.zero;
-      _sharedLyricLastPaint = null;
       return;
     }
     _sharedLyricPositionTicker ??= createTicker(_onSharedLyricTick);
     if (!_sharedLyricPositionTicker!.isActive) {
       _sharedLyricLastTick = Duration.zero;
-      _sharedLyricLastPaint = null;
       _sharedLyricPositionTicker!.start();
     }
   }
 
   void _onSharedLyricTick(Duration elapsed) {
     if (_disposed || !mounted) return;
-    final lastPaint = _sharedLyricLastPaint;
-    if (lastPaint != null && elapsed - lastPaint < _sharedLyricPaintInterval) {
-      return;
-    }
-    _sharedLyricLastPaint = elapsed;
     if (_resumeSharedLyricFromFrozen) {
       _resumeSharedLyricFromFrozen = false;
       _sharedLyricLastTick = elapsed;
       return;
     }
-    final delta = _sharedLyricLastTick == Duration.zero
-        ? Duration.zero
-        : elapsed - _sharedLyricLastTick;
+    // TickerMode 静音或长时间掉帧后，本帧只校准基准，不按整段间隔推进。
+    final delta = tickerFrameDelta(
+      _sharedLyricLastTick == Duration.zero ? null : _sharedLyricLastTick,
+      elapsed,
+    );
     _sharedLyricLastTick = elapsed;
     final previousMs = _sharedLyricPositionMs.value;
     final predictedMs =
@@ -1012,6 +1006,8 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
       return;
     }
     if (_disposed || !mounted) return;
+    // 窗口恢复绘制时 Ticker 的 elapsed 已跨过不可见区间，先丢弃旧基准。
+    _sharedLyricLastTick = Duration.zero;
     lyricService.forceEmitCurrentLine();
     _syncToPlaybackPosition(duration: Duration.zero, forceScroll: true);
   }
@@ -1743,6 +1739,16 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    if (tickerModeResumed(
+      previousEnabled: _tickerModeEnabled,
+      enabled: tickerModeEnabled,
+    )) {
+      // 静音期间 Ticker 不回调，恢复后的 elapsed 含整段静音时长，丢弃旧基准。
+      _sharedLyricLastTick = Duration.zero;
+    }
+    _tickerModeEnabled = tickerModeEnabled;
+
     final route = ModalRoute.of(context);
     if (_route != route) {
       final oldRoute = _route;
