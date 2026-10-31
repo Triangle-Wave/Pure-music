@@ -1917,7 +1917,8 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   Ticker? _progressTicker;
   Duration _lastProgressTickElapsed = Duration.zero;
   Duration _lastProcessedElapsed = Duration.zero;
-  static const _progressTickInterval = Duration(milliseconds: 33); // ~30fps
+  // 进度条与波浪装饰跟随屏幕刷新率逐帧推进。
+  static const _progressTickInterval = Duration.zero;
   int _lastPositionMs = -1;
   bool _tickerModeEnabled = true;
   bool _isPlaying = false;
@@ -1987,7 +1988,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     final enabled = AppSettings.instance.wavyBarEnabledModes.contains(
       widget.mode,
     );
-    // 波浪不再自己跑 ticker，改由进度 ticker 按 30fps 推进相位
+    // 波浪不再自己跑 ticker，改由进度 ticker 逐帧推进相位
     final shouldRun = enabled && state == PlayerState.playing;
     if (shouldRun == _wavyActive) return;
     _wavyActive = shouldRun;
@@ -2031,7 +2032,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
       _lastProcessedElapsed = elapsed;
       return;
     }
-    // ~30fps 节流，跳过间隔过短的帧
+    // 节流间隔为零，跟随屏幕刷新率逐帧更新位置
     if (elapsed - _lastProcessedElapsed < _progressTickInterval) return;
     _lastProcessedElapsed = elapsed;
     final delta = elapsed - _lastProgressTickElapsed;
@@ -2678,8 +2679,8 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   static const _pausedCoverScale = 0.88;
   static const _pauseSettleDuration = Duration(milliseconds: 180);
   static const _pauseSettleTurns = 0.018;
-  // 旋转是慢速装饰动画，30fps 推进即可，不必按屏幕刷新率跑
-  static const _rotationTickInterval = Duration(milliseconds: 33);
+  // 旋转装饰跟随屏幕刷新率，每帧推进。
+  static const _rotationTickInterval = Duration.zero;
 
   final playback = PlayService.instance.playbackService;
   late final AnimationController _rotationController;

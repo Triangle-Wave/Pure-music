@@ -583,8 +583,8 @@ class _TransitionControllerManager {
   static const int _nativeSyncMs = 1000;
   Duration _lastTickElapsed = Duration.zero;
   Duration? _lastPaintElapsed;
-  // 间奏倒计时和呼吸动画 30fps 足够，不必跟着屏幕刷新率跑
-  static const _paintInterval = Duration(milliseconds: 33);
+  // 间奏倒计时和呼吸动画跟随屏幕刷新率逐帧推进。
+  static const _paintInterval = Duration.zero;
   late final VoidCallback _playerStateListener = _syncPlaybackState;
   late final VoidCallback _positionSyncListener = _syncPosition;
 

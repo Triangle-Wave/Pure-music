@@ -120,8 +120,8 @@ class _LyricsLineWidgetState extends State<LyricsLineWidget>
   late final VoidCallback _playerStateListener;
   Duration _lastTickElapsed = Duration.zero;
   Duration? _lastPaintElapsed;
-  // 逐字高亮 60fps 足够
-  static const _paintInterval = Duration(milliseconds: 16);
+  // 逐字高亮跟随屏幕刷新率逐帧推进。
+  static const _paintInterval = Duration.zero;
 
   /// seek 后用于过滤旧进度回调的临时目标
   double? _pendingSeekMs;

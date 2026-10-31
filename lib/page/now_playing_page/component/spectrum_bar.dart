@@ -36,8 +36,8 @@ class _SpectrumBarState extends State<SpectrumBar>
   static const _lerpDurationMs = 110.0;
   static const _maxStepSeconds = 0.1;
   static const _settleEpsilon = 0.004;
-  // 插值按 30fps 刷新即可，避免 144Hz 屏上白跑 4 倍绘制
-  static const _paintInterval = Duration(milliseconds: 33);
+  // 插值跟随屏幕刷新率逐帧刷新。
+  static const _paintInterval = Duration.zero;
 
   late final PlaybackService _playback;
   StreamSubscription<Float32List>? _subscription;

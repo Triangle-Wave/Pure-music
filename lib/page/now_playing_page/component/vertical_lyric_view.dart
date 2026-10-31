@@ -629,8 +629,8 @@ class _VerticalLyricScrollViewState extends State<_VerticalLyricScrollView>
   Ticker? _sharedLyricPositionTicker;
   Duration _sharedLyricLastTick = Duration.zero;
   Duration? _sharedLyricLastPaint;
-  // 逐字高亮 60fps 足够，144Hz 屏上不必每帧都去取播放位置
-  static const _sharedLyricPaintInterval = Duration(milliseconds: 16);
+  // 逐字高亮跟随屏幕刷新率逐帧推进。
+  static const _sharedLyricPaintInterval = Duration.zero;
   bool _resumeSharedLyricFromFrozen = false;
   late StreamSubscription<LyricLineUpdate> lyricLineStreamSubscription;
   Timer? _positionResyncTimer;

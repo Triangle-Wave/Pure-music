@@ -782,10 +782,8 @@ class _SoftMeshGradient extends StatefulWidget {
 class _SoftMeshGradientState extends State<_SoftMeshGradient>
     with SingleTickerProviderStateMixin {
   static const _shaderAssetPath = MeshGradientBackground.shaderAssetPath;
+  // 装饰动画跟随屏幕刷新率，每帧推进着色器时间。
   static const double _timeScale = 1.0;
-  // 重绘压到 24fps，时间按真实步进累积。
-  static const double _meshFrameIntervalSeconds =
-      42 / Duration.millisecondsPerSecond;
 
   late final Ticker _ticker;
   late final ValueNotifier<double> _time;
@@ -810,7 +808,6 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
         (elapsed - previous).inMicroseconds / Duration.microsecondsPerSecond;
     if (deltaSeconds <= 0) return;
     _pendingSeconds += deltaSeconds * _timeScale;
-    if (_pendingSeconds < _meshFrameIntervalSeconds) return;
     _time.value += _pendingSeconds;
     _pendingSeconds = 0;
   }
