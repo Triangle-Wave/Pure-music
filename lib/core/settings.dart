@@ -210,7 +210,7 @@ class AppSettings {
   static final listMotionNotifier = RebuildNotifier();
   static const String version = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '2.3.14',
+    defaultValue: '2.3.15',
   );
 
   static GitHub? _github;
