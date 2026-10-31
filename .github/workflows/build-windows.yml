@@ -70,6 +70,35 @@ jobs:
           "App version: $version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      # exe 的文件属性来自 windows/runner/Runner.rc；build_windows.ps1 的版本同步只在编译模式执行，
+      # 而 CI 直接调用 flutter build windows，因此在两次编译之前先把版本写进资源脚本。
+      - name: Sync Runner.rc version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.app-version.outputs.version }}"
+          $parts = $version.Split('.')
+          if ($parts.Count -lt 3) { throw "invalid version: $version" }
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $patch = [int]$parts[2]
+          $build = if ($parts.Count -ge 4) { [int]$parts[3] } else { 0 }
+          $path = "windows/runner/Runner.rc"
+          $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+          $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+$', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+          $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+          $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+          $expected = @(
+            "#define VERSION_AS_NUMBER $major,$minor,$patch,$build",
+            "#define PRODUCT_VERSION `"$major.$minor.$patch`"",
+            "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+          )
+          foreach ($line in $expected) {
+            if (-not $content.Contains($line)) { throw "Runner.rc version sync failed, missing: $line" }
+          }
+          Set-Content -LiteralPath $path -Value $content -Encoding utf8NoBOM -NoNewline
+          Write-Output "Synced Runner.rc to $major.$minor.$patch.$build"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
