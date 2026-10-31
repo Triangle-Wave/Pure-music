@@ -37,6 +37,7 @@ class LyricLine {
   String? translation;
   String? romanLyric;
   List<SyncLyricWord>? romanWords;
+  bool isMetadata = false;
 
   /// 罗马音由本地转写生成，仅用于显示，不写回歌词文件。
   bool autoRomanized;

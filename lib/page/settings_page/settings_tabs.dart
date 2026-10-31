@@ -830,6 +830,10 @@ class _MotionEffectSwitchState extends State<_MotionEffectSwitch> {
   }
 }
 
+/// 波浪进度条设置的持久化入口。测试替换后可避免写入真实配置文件。
+@visibleForTesting
+Future<bool> Function()? wavyBarSettingsPersistForTest;
+
 class _WavyProgressBarSwitch extends StatefulWidget {
   const _WavyProgressBarSwitch();
 
@@ -839,6 +843,32 @@ class _WavyProgressBarSwitch extends StatefulWidget {
 
 class _WavyProgressBarSwitchState extends State<_WavyProgressBarSwitch> {
   final settings = AppSettings.instance;
+
+  Future<void> _toggleMode(int index) async {
+    final mode = NowPlayingMode.values[index];
+    final enabledModes = settings.wavyBarEnabledModes;
+    final wasEnabled = enabledModes.contains(mode);
+    setState(() {
+      if (wasEnabled) {
+        enabledModes.remove(mode);
+      } else {
+        enabledModes.add(mode);
+      }
+    });
+    AppSettings.rebuildNotifier.rebuild();
+    final persist = wavyBarSettingsPersistForTest ?? settings.saveSettings;
+    final saved = await persist();
+    if (saved) return;
+    if (wasEnabled) {
+      enabledModes.add(mode);
+    } else {
+      enabledModes.remove(mode);
+    }
+    AppSettings.rebuildNotifier.rebuild();
+    if (!mounted) return;
+    setState(() {});
+    showTextOnSnackBar('波浪进度条设置保存失败', variant: ToastVariant.error);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -856,17 +886,7 @@ class _WavyProgressBarSwitchState extends State<_WavyProgressBarSwitch> {
           isSelected: NowPlayingMode.values
               .map((m) => enabledModes.contains(m))
               .toList(),
-          onPressed: (i) {
-            setState(() {
-              final mode = NowPlayingMode.values[i];
-              if (enabledModes.contains(mode)) {
-                enabledModes.remove(mode);
-              } else {
-                enabledModes.add(mode);
-              }
-            });
-            settings.saveSettings();
-          },
+          onPressed: _toggleMode,
           borderRadius: AppRadius.smCircular,
           fillColor: scheme.primaryContainer,
           selectedColor: scheme.onPrimaryContainer,

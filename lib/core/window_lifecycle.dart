@@ -389,6 +389,7 @@ class WindowLifecycleService with WindowListener, TrayListener {
   Future<void> showWindow() async {
     if (_isExiting) return;
     _cancelTrayTrim();
+    MemoryMonitorService.instance.stopHiddenTrim();
     WindowRenderGate.instance.enterForeground();
     SleepBlocker.instance.setMainWindowVisible(true);
     await WindowRenderGate.instance.waitForWarmup();

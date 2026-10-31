@@ -322,12 +322,28 @@ function Update-RunnerRcVersion([string]$version) {
     $patch = $parts[2]
     $build = "0"
 
-    $content = Get-Content -Path $runnerRcPath -Raw -Encoding UTF8
-    $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+$', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
-    $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
-    $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+    # 保留原文件的 BOM 状态，对已是目标版本的文件重复执行时字节完全不变。
+    $bytes = [System.IO.File]::ReadAllBytes($runnerRcPath)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $utf8 = [System.Text.UTF8Encoding]::new($hasBom)
+    $content = Get-Content -LiteralPath $runnerRcPath -Raw -Encoding UTF8
+    # 行尾用零宽前瞻锚定，匹配不消耗 \r，CRLF 与 LF 文件的换行风格都保持原样。
+    $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+(?=\r?$)', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+    $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"(?=\r?$)', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+    $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"(?=\r?$)', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
 
-    Set-Content -Path $runnerRcPath -Value $content -Encoding UTF8 -NoNewline
+    $expected = [ordered]@{
+        VERSION_AS_NUMBER = "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+        PRODUCT_VERSION    = "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+        FILE_VERSION_STR   = "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+    }
+    foreach ($field in $expected.Keys) {
+        if (-not $content.Contains($expected[$field])) {
+            throw "Runner.rc version sync failed: $field did not update (expected: $($expected[$field]))"
+        }
+    }
+
+    [System.IO.File]::WriteAllText($runnerRcPath, $content, $utf8)
     Write-Host "Synced Runner.rc: ProductVersion=$major.$minor.$patch, FileVersion=$major.$minor.$patch.$build" -ForegroundColor Gray
 }
 

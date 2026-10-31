@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/painting.dart';
 import 'package:pure_music/core/database.dart';
 import 'package:pure_music/core/settings.dart';
@@ -361,6 +362,10 @@ class Playlist {
     _audiosCacheLibrary = null;
   }
 
+  /// 曲库未对齐时空结果不写入缓存，供测试确认不会把空列表钉住。
+  @visibleForTesting
+  bool get hasCachedAudiosForTesting => _audiosCache != null;
+
   Future<Uint8List?> resolveCoverBytes() async {
     if (coverSource == null || coverSource!.isEmpty) return null;
     if (coverSource!.startsWith('file:')) {
@@ -434,6 +439,12 @@ class Playlist {
         })
         .whereType<Audio>()
         .toList();
+    // 曲库暂时对不上时不要把空列表缓存住，否则歌单会一直显示 0 首。
+    if (paths.isNotEmpty && resolved.isEmpty) {
+      _audiosCache = null;
+      _audiosCacheLibrary = null;
+      return const [];
+    }
     _audiosCache = resolved;
     _audiosCacheLibrary = library;
     return List<Audio>.from(resolved);
@@ -442,9 +453,12 @@ class Playlist {
   Audio? get firstAudio {
     final library = AudioLibrary.instance;
     final cached = _audiosCache;
-    if (cached != null && identical(_audiosCacheLibrary, library)) {
-      return cached.isEmpty ? null : cached.first;
+    if (cached != null &&
+        cached.isNotEmpty &&
+        identical(_audiosCacheLibrary, library)) {
+      return cached.first;
     }
+    // 空缓存不能当成最终结果，否则曲库稍后对上了仍会一直拿不到第一首。
     for (final path in paths) {
       final key = _playlistPathKey(path);
       if (key.isEmpty) continue;

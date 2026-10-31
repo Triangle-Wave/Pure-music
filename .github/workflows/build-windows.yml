@@ -70,6 +70,43 @@ jobs:
           "App version: $version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      # exe 的文件属性来自 windows/runner/Runner.rc；build_windows.ps1 的版本同步只在编译模式执行，
+      # 而 CI 直接调用 flutter build windows，因此在两次编译之前先把版本写进资源脚本。
+      - name: Sync Runner.rc version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.app-version.outputs.version }}"
+          $parts = $version.Split('.')
+          if ($parts.Count -lt 3) { throw "invalid version: $version" }
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $patch = [int]$parts[2]
+          $build = if ($parts.Count -ge 4) { [int]$parts[3] } else { 0 }
+          # 解析为绝对路径，写入不依赖进程当前目录。
+          $path = (Resolve-Path -LiteralPath "windows/runner/Runner.rc" -ErrorAction Stop).Path
+          # 保留原文件的 BOM 状态，对已是目标版本的文件重复执行时字节完全不变。
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+          $utf8 = [System.Text.UTF8Encoding]::new($hasBom)
+          $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+          # 行尾用零宽前瞻锚定，匹配不消耗 \r，CRLF 与 LF 文件的换行风格都保持原样。
+          $content = $content -replace '(?m)^#define\s+VERSION_AS_NUMBER\s+[\d,]+(?=\r?$)', "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+          $content = $content -replace '(?m)^#define\s+PRODUCT_VERSION\s+"[^"]*"(?=\r?$)', "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+          $content = $content -replace '(?m)^#define\s+FILE_VERSION_STR\s+"[^"]*"(?=\r?$)', "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+          $expected = [ordered]@{
+            VERSION_AS_NUMBER = "#define VERSION_AS_NUMBER $major,$minor,$patch,$build"
+            PRODUCT_VERSION    = "#define PRODUCT_VERSION `"$major.$minor.$patch`""
+            FILE_VERSION_STR   = "#define FILE_VERSION_STR `"$major.$minor.$patch.$build`""
+          }
+          foreach ($field in $expected.Keys) {
+            if (-not $content.Contains($expected[$field])) {
+              throw "Runner.rc version sync failed: $field did not update (expected: $($expected[$field]))"
+            }
+          }
+          [System.IO.File]::WriteAllText($path, $content, $utf8)
+          Write-Output "Synced Runner.rc to $major.$minor.$patch.$build"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:

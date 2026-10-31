@@ -11,6 +11,13 @@ bool windowRenderShouldEnableFrames({
 bool shouldAcceptLyricUiUpdate({required bool windowFramesEnabled}) =>
     windowFramesEnabled;
 
+/// 恢复窗口的回调排队期间窗口可能再次最小化，只有仍属于同一次恢复
+/// 才允许把窗口状态改回非最小化。
+bool windowRestoreStillCurrent({
+  required int scheduledEpoch,
+  required int currentEpoch,
+}) => scheduledEpoch == currentEpoch;
+
 void applyWindowSchedulerFrames(bool enabled) {
   final binding = WidgetsBinding.instance;
   final next = enabled ? AppLifecycleState.resumed : AppLifecycleState.hidden;

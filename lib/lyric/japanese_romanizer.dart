@@ -291,6 +291,8 @@ const Map<String, String> _youonRomaji = {
 /// 为缺少罗马音的日文同步歌词行补全显示用罗马音。
 void applyAutoRomanization(Lyric lyric) {
   for (final line in lyric.lines) {
+    // 元数据行按纯文本绘制，生成罗马音不会被使用。
+    if (line.isMetadata) continue;
     if (line is! SyncLyricLine) continue;
     if (line.autoRomanized) continue;
     final existing = line.romanLyric;

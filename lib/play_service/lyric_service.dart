@@ -671,6 +671,7 @@ class LyricService extends ChangeNotifier {
       wordFormat: wordFormat ?? AppSettings.instance.lyricTagWordFormat,
       includeTranslation: AppSettings.instance.lyricTagIncludeTranslation,
       includeRomanization: AppSettings.instance.lyricTagIncludeRomanization,
+      keepMetadata: AppSettings.instance.keepLyricMetadata,
     );
     if (lrcText.trim().isEmpty) return null;
 
@@ -1019,19 +1020,25 @@ class LyricService extends ChangeNotifier {
   void _setCurrLyric(Lyric lyric) {
     // 先还原歌词中被 * 屏蔽的脏话词，避免星号/连字符干扰元数据检测
     applyProfanityUncensor(lyric);
+    final keepMetadata = AppSettings.instance.keepLyricMetadata;
     if (lyric is Ttml && _activeLyricSourceType == LyricSourceType.amll) {
       blankAmllTtmlCreatorLines(lyric.lines);
-    } else if (!AppSettings.instance.keepLyricMetadata) {
+    } else {
       final nowPlaying = _getNowPlaying();
       final artists = nowPlaying == null
           ? const <String>[]
           : <String>{...nowPlaying.splitedArtists, nowPlaying.artist}
                 .where((artist) => artist.trim().isNotEmpty)
                 .toList(growable: false);
-      blankMetadataLines(
-        lyric.lines,
-        StripOptions(matchTitle: nowPlaying?.title, matchArtists: artists),
+      final options = StripOptions(
+        matchTitle: nowPlaying?.title,
+        matchArtists: artists,
       );
+      if (keepMetadata) {
+        markMetadataLines(lyric.lines, options);
+      } else {
+        blankMetadataLines(lyric.lines, options);
+      }
     }
 
     if (AppSettings.instance.autoRomanizeLyric) {
@@ -1770,6 +1777,7 @@ class LyricService extends ChangeNotifier {
         wordFormat: AppSettings.instance.lyricTagWordFormat,
         includeTranslation: AppSettings.instance.lyricTagIncludeTranslation,
         includeRomanization: AppSettings.instance.lyricTagIncludeRomanization,
+        keepMetadata: AppSettings.instance.keepLyricMetadata,
       );
       if (lrcText.trim().isEmpty) return;
       // 标签里已是同一份歌词，说明之前写过且内容未变，不再提示

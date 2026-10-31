@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -1904,6 +1905,7 @@ class _FetchLyricFromNetDialogState extends State<_FetchLyricFromNetDialog> {
       wordFormat: settings.lyricTagWordFormat,
       includeTranslation: settings.lyricTagIncludeTranslation,
       includeRomanization: settings.lyricTagIncludeRomanization,
+      keepMetadata: settings.keepLyricMetadata,
     );
   }
 
@@ -2534,7 +2536,6 @@ class _CoverSearchDialogState extends State<_CoverSearchDialog> {
   Future<void> _loadImageSize(String url) async {
     if (_coverImageSizeCache.containsKey(url)) return;
     io.HttpClient? client;
-    ui.Codec? codec;
     try {
       final uri = Uri.tryParse(url);
       if (uri == null || uri.scheme != 'https') return;
@@ -2554,19 +2555,29 @@ class _CoverSearchDialogState extends State<_CoverSearchDialog> {
         bytes.setRange(offset, offset + chunk.length, chunk);
         offset += chunk.length;
       }
-      codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      try {
-        if (!mounted) return;
-        setState(() {
-          _coverImageSizeCache[url] = (frame.image.width, frame.image.height);
-        });
-      } finally {
-        frame.image.dispose();
-      }
+      final size = await readEncodedImageSize(bytes);
+      if (!mounted) return;
+      setState(() {
+        _coverImageSizeCache[url] = size;
+      });
     } catch (_) {
-    } finally {
-      codec?.dispose();
+      return;
     }
+  }
+}
+
+@visibleForTesting
+Future<(int, int)> readEncodedImageSize(Uint8List bytes) async {
+  final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+  try {
+    final descriptor = await ui.ImageDescriptor.encoded(buffer);
+    try {
+      // 只读图片头里的宽高，避免把整张封面解码成像素。
+      return (descriptor.width, descriptor.height);
+    } finally {
+      descriptor.dispose();
+    }
+  } finally {
+    buffer.dispose();
   }
 }

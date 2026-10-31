@@ -1,25 +1,114 @@
 import 'dart:async';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/matcher.dart';
 import 'package:pure_music/core/utils.dart';
+import 'package:pure_music/core/window_render_gate.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/native/bass/bass_player.dart';
 import 'package:pure_music/page/now_playing_page/component/lyrics_line_painter.dart';
 import 'package:pure_music/page/now_playing_page/component/lyrics_line_widget.dart';
 import 'package:pure_music/play_service/play_service.dart';
 
-/// 内存监控服务：定时检查 RSS，分级清理缓存
+typedef _SetProcessWorkingSetSizeNative =
+    ffi.Int32 Function(ffi.IntPtr, ffi.IntPtr, ffi.IntPtr);
+typedef _SetProcessWorkingSetSizeDart = int Function(int, int, int);
+
+/// 内存监控服务：定时检查 RSS，分级清理缓存。
+/// 窗口不可见时换出工作集页：最小化只换出，托盘隐藏额外卸界面并清图片/排版缓存。
 class MemoryMonitorService {
   static final instance = MemoryMonitorService._();
   MemoryMonitorService._();
 
   Timer? _timer;
+  Timer? _settleTrimTimer;
+  Timer? _settleTrimFollowUpTimer;
+  Timer? _hiddenTrimTimer;
+  Listenable? _hiddenNowPlaying;
+  String? _hiddenSongPath;
   DateTime? _lastTier1CleanupAt;
   DateTime? _lastTier2CleanupAt;
   DateTime? _lastTier3CleanupAt;
+
+  static ffi.DynamicLibrary? _kernel32;
+  static _SetProcessWorkingSetSizeDart? _setProcessWorkingSetSize;
+
+  /// 把工作集页换出到备用列表。只动内存页，不碰音频缓冲，也不丢缓存数据。
+  void _trimWorkingSet() {
+    try {
+      _kernel32 ??= ffi.DynamicLibrary.open('kernel32.dll');
+      _setProcessWorkingSetSize ??= _kernel32!
+          .lookupFunction<
+            _SetProcessWorkingSetSizeNative,
+            _SetProcessWorkingSetSizeDart
+          >('SetProcessWorkingSetSize');
+      // 传 -1/-1 等于 EmptyWorkingSet。
+      _setProcessWorkingSetSize!(-1, -1, -1);
+    } catch (_) {
+      _setProcessWorkingSetSize = null;
+    }
+  }
+
+  /// 隐藏期间定时换出工作集：先等界面落定，再按间隔补。
+  void _holdWorkingSetWhileHidden(Duration interval) {
+    _armSettleTrim();
+    _hiddenTrimTimer?.cancel();
+    _hiddenTrimTimer = Timer.periodic(interval, (_) {
+      if (WindowRenderGate.instance.framesEnabled.value) return;
+      _trimWorkingSet();
+    });
+    _watchHiddenSongChange();
+  }
+
+  void _armSettleTrim() {
+    _settleTrimTimer?.cancel();
+    _settleTrimTimer = Timer(const Duration(seconds: 3), () {
+      _settleTrimTimer = null;
+      if (WindowRenderGate.instance.framesEnabled.value) return;
+      _trimWorkingSet();
+    });
+  }
+
+  /// 隐藏时切歌会重新分配歌词、封面和缩略图，等 3 秒再补一次换出，把刚涨上来的页推回备用列表。
+  void _watchHiddenSongChange() {
+    final notifier = PlayService.existingPlaybackService?.nowPlayingNotifier;
+    if (identical(notifier, _hiddenNowPlaying)) return;
+    _hiddenNowPlaying?.removeListener(_onHiddenSongChanged);
+    _hiddenNowPlaying = notifier;
+    _hiddenSongPath = PlayService.existingPlaybackService?.nowPlaying?.path;
+    notifier?.addListener(_onHiddenSongChanged);
+  }
+
+  void _onHiddenSongChanged() {
+    final path = PlayService.existingPlaybackService?.nowPlaying?.path;
+    if (path == _hiddenSongPath) return;
+    _hiddenSongPath = path;
+    if (WindowRenderGate.instance.framesEnabled.value) return;
+    _armSettleTrim();
+    // 切歌后的分配会持续几秒，3 秒那次之后再补一次。
+    _settleTrimFollowUpTimer?.cancel();
+    _settleTrimFollowUpTimer = Timer(const Duration(seconds: 8), () {
+      _settleTrimFollowUpTimer = null;
+      if (WindowRenderGate.instance.framesEnabled.value) return;
+      _trimWorkingSet();
+    });
+  }
+
+  /// 回到前台：停掉隐藏期间的换出，缓存和页面都不动。
+  void stopHiddenTrim() {
+    _settleTrimTimer?.cancel();
+    _settleTrimTimer = null;
+    _settleTrimFollowUpTimer?.cancel();
+    _settleTrimFollowUpTimer = null;
+    _hiddenTrimTimer?.cancel();
+    _hiddenTrimTimer = null;
+    _hiddenNowPlaying?.removeListener(_onHiddenSongChanged);
+    _hiddenNowPlaying = null;
+    _hiddenSongPath = null;
+  }
 
   bool _cleanupDue(DateTime now, DateTime? lastRun, Duration cooldown) =>
       lastRun == null || now.difference(lastRun) >= cooldown;
@@ -140,6 +229,7 @@ class MemoryMonitorService {
   void stop() {
     _timer?.cancel();
     _timer = null;
+    stopHiddenTrim();
   }
 
   void trimAfterSongChange() {
@@ -151,7 +241,7 @@ class MemoryMonitorService {
   }
 
   /// 托盘驻留清理：释放大图/位图等大头，但保留 48px 小图与当前曲目，
-  /// 且不做工作集压缩，保证恢复窗口时列表不卡、不触发 page fault
+  /// 保证恢复窗口时列表不卡；隐藏期间按间隔换出工作集页。
   void trimTrayHidden() {
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
@@ -162,9 +252,11 @@ class MemoryMonitorService {
     LyricsLinePainter.trimPool();
     LyricsLineWidget.clearBlurFilterCache();
     AudioLibrary.instance.evictStaleCoverBytes();
+    _holdWorkingSetWhileHidden(const Duration(seconds: 15));
   }
 
-  /// 任务栏最小化清理：只回收可重建的非当前资源，保留恢复所需的页面对象。
+  /// 任务栏最小化清理：只回收可重建的非当前资源，保留恢复所需的页面对象；
+  /// 界面还在，只换出工作集页，不按 RSS 瘦身。
   void trimWindowMinimized() {
     final playingPath = PlayService.existingPlaybackService?.nowPlaying?.filePath;
     PaintingBinding.instance.imageCache.clear();
@@ -174,6 +266,7 @@ class MemoryMonitorService {
     LyricsLinePainter.trimPool();
     LyricsLineWidget.clearBlurFilterCache();
     AudioLibrary.instance.evictStaleCoverBytes();
+    _holdWorkingSetWhileHidden(const Duration(seconds: 30));
   }
 
   /// 强制释放可回收内存，用于窗口最小化/低内存通知等场景

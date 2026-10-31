@@ -28,6 +28,7 @@ import 'package:pure_music/core/immersive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/system_volume_service.dart';
+import 'package:pure_music/core/ticker_timing.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/playlist.dart';
@@ -1922,14 +1923,15 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   bool _isPlaying = false;
   double _trackLength = 1.0;
   late final AnimationController _wavyController;
+  static const _wavyCycle = Duration(seconds: 4);
+  bool _wavyActive = false;
+  Duration? _lastWavyTick;
+  late final VoidCallback _settingsListener;
 
   @override
   void initState() {
     super.initState();
-    _wavyController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 4),
-    );
+    _wavyController = AnimationController(vsync: this, duration: _wavyCycle);
     _playbackService = context.read<PlaybackService>();
     _isPlaying = _playbackService.playerState == PlayerState.playing;
     _syncFromNative(force: true);
@@ -1941,6 +1943,11 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
       _syncProgressDriver(state);
     };
     _playbackService.playerStateNotifier.addListener(_playerStateListener);
+    // 波浪开关对应的通知不经过 playerState，播放中切换设置也需要重新同步。
+    _settingsListener = () {
+      _syncWavyAnimation(_playbackService.playerState);
+    };
+    AppSettings.rebuildNotifier.addListener(_settingsListener);
     _nowPlayingListener = () {
       _syncFromNative(force: true);
       _syncProgressDriver(_playbackService.playerState);
@@ -1949,6 +1956,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     _positionSyncListener = () {
       _lastProgressTickElapsed = Duration.zero;
       _lastProcessedElapsed = Duration.zero;
+      _lastWavyTick = null;
       _syncFromNative(force: true);
     };
     _playbackService.nowPlayingNotifier.addListener(_nowPlayingListener);
@@ -1964,6 +1972,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     if (!tickerModeEnabled) return;
     _lastProgressTickElapsed = Duration.zero;
     _lastProcessedElapsed = Duration.zero;
+    _lastWavyTick = null;
     _syncFromNative(force: true);
     _syncWavyAnimation(_playbackService.playerState);
   }
@@ -1978,11 +1987,11 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     final enabled = AppSettings.instance.wavyBarEnabledModes.contains(
       widget.mode,
     );
-    if (enabled && state == PlayerState.playing) {
-      if (!_wavyController.isAnimating) _wavyController.repeat();
-    } else {
-      _wavyController.stop();
-    }
+    // 波浪不再自己跑 ticker，改由进度 ticker 按 30fps 推进相位
+    final shouldRun = enabled && state == PlayerState.playing;
+    if (shouldRun == _wavyActive) return;
+    _wavyActive = shouldRun;
+    _lastWavyTick = null;
   }
 
   void _syncProgressDriver(PlayerState state) {
@@ -2004,12 +2013,14 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     if (_progressTicker?.isActive == true) return;
     _lastProgressTickElapsed = Duration.zero;
     _lastProcessedElapsed = Duration.zero;
+    _lastWavyTick = null;
     _progressTicker ??= createTicker(_onProgressTick);
     _progressTicker!.start();
   }
 
   void _onProgressTick(Duration elapsed) {
     if (!_isPlaying) return;
+    _advanceWavyBar(elapsed);
     if (isDragging.value) {
       _lastProgressTickElapsed = elapsed;
       _lastProcessedElapsed = elapsed;
@@ -2029,6 +2040,17 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     final length = _trackLength;
     final next = livePosition.value + delta.inMicroseconds / 1000000.0;
     _syncLivePosition(length > 0 ? next.clamp(0.0, length).toDouble() : next);
+  }
+
+  void _advanceWavyBar(Duration elapsed) {
+    if (!_wavyActive) return;
+    final last = _lastWavyTick;
+    if (last != null && elapsed - last < _progressTickInterval) return;
+    final delta = last == null ? Duration.zero : elapsed - last;
+    _lastWavyTick = elapsed;
+    if (delta <= Duration.zero) return;
+    final step = delta.inMicroseconds / _wavyCycle.inMicroseconds;
+    _wavyController.value = (_wavyController.value + step) % 1.0;
   }
 
   void _syncLivePosition(double position, {bool force = false}) {
@@ -2053,6 +2075,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   void dispose() {
     _positionSyncTimer?.cancel();
     _progressTicker?.dispose();
+    AppSettings.rebuildNotifier.removeListener(_settingsListener);
     _playbackService.playerStateNotifier.removeListener(_playerStateListener);
     _playbackService.nowPlayingNotifier.removeListener(_nowPlayingListener);
     _playbackService.positionSyncNotifier.removeListener(_positionSyncListener);
@@ -2651,10 +2674,12 @@ class _PlaybackCoverMotion extends StatefulWidget {
 }
 
 class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   static const _pausedCoverScale = 0.88;
   static const _pauseSettleDuration = Duration(milliseconds: 180);
   static const _pauseSettleTurns = 0.018;
+  // 旋转是慢速装饰动画，30fps 推进即可，不必按屏幕刷新率跑
+  static const _rotationTickInterval = Duration(milliseconds: 33);
 
   final playback = PlayService.instance.playbackService;
   late final AnimationController _rotationController;
@@ -2662,6 +2687,9 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   bool _reduceMotion = false;
   bool _isSettling = false;
   int _rotationMemoryGeneration = 0;
+  Ticker? _rotationTicker;
+  Duration? _lastRotationTick;
+  bool? _tickerModeEnabled;
 
   bool get _isPlaying => _playerState == PlayerState.playing;
 
@@ -2686,6 +2714,15 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    if (tickerModeResumed(
+      previousEnabled: _tickerModeEnabled,
+      enabled: tickerModeEnabled,
+    )) {
+      // 静音期间 Ticker 不回调，恢复后的 elapsed 含整段静音时长，丢弃旧基准。
+      _lastRotationTick = null;
+    }
+    _tickerModeEnabled = tickerModeEnabled;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     if (_reduceMotion == reduceMotion) return;
     _reduceMotion = reduceMotion;
@@ -2702,6 +2739,7 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
 
   void _syncRotation({required bool immediate}) {
     if (!widget.rotate || _reduceMotion) {
+      _stopRotationTicker();
       _rotationController.stop(canceled: false);
       _isSettling = false;
       return;
@@ -2712,13 +2750,13 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
         _rotationController.stop(canceled: false);
         _isSettling = false;
       }
-      if (!_rotationController.isAnimating) {
-        _rotationController.repeat();
-      }
+      _startRotationTicker();
       return;
     }
 
-    if (!_rotationController.isAnimating || _isSettling) return;
+    final rotating = _rotationTicker?.isActive == true;
+    if (!rotating || _isSettling) return;
+    _stopRotationTicker();
     _rotationController.stop(canceled: false);
     if (immediate) return;
 
@@ -2735,6 +2773,29 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
         .whenCompleteOrCancel(() => _isSettling = false);
   }
 
+  void _startRotationTicker() {
+    if (_rotationTicker?.isActive == true) return;
+    _lastRotationTick = null;
+    _rotationTicker ??= createTicker(_onRotationTick);
+    _rotationTicker!.start();
+  }
+
+  void _stopRotationTicker() {
+    _rotationTicker?.stop();
+    _lastRotationTick = null;
+  }
+
+  void _onRotationTick(Duration elapsed) {
+    final last = _lastRotationTick;
+    if (last != null && elapsed - last < _rotationTickInterval) return;
+    final delta = tickerFrameDelta(last, elapsed);
+    _lastRotationTick = elapsed;
+    if (delta <= Duration.zero) return;
+    final step =
+        delta.inMicroseconds / _playbackCoverRotationPeriod.inMicroseconds;
+    _rotationController.value = (_rotationController.value + step) % 1.0;
+  }
+
   @override
   void didUpdateWidget(covariant _PlaybackCoverMotion oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -2742,6 +2803,7 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
       _syncRotation(immediate: !widget.rotate);
     }
     if (oldWidget.identity != widget.identity) {
+      _stopRotationTicker();
       _rotationController.stop(canceled: false);
       _rotationController.value = _PlaybackCoverRotationMemory.initialTurns(
         path: widget.identity,
@@ -2764,6 +2826,7 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
       );
     }
     playback.playerStateNotifier.removeListener(_onPlayerStateChanged);
+    _rotationTicker?.dispose();
     _rotationController.dispose();
     super.dispose();
   }
@@ -3158,7 +3221,8 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
     final motion = _PlaybackCoverMotion(
       rotate: AppSettings.instance.circlePlaybackCover,
       identity: nowPlayingPath,
-      child: framed,
+      // 封面内容单独成层，旋转/缩放时只做合成，不重画图片和阴影
+      child: RepaintBoundary(child: framed),
     );
     return SizedBox(
       width: coverSize,

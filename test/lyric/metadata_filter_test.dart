@@ -838,5 +838,56 @@ void main() {
       expect(lines.first.length, const Duration(seconds: 20));
       expect(lines.last, same(lyricLine));
     });
+
+    test('mark then blank uses the same metadata region', () {
+      final lyricLine = LrcLine(
+        const Duration(seconds: 1),
+        '歌词一行',
+        requiredIsBlank: false,
+        length: const Duration(seconds: 2),
+      );
+      final footerCredit = LrcLine(
+        const Duration(seconds: 8),
+        '混音师：赵靖',
+        requiredIsBlank: false,
+        length: const Duration(seconds: 3),
+      );
+      final lines = <LyricLine>[lyricLine, footerCredit];
+
+      markMetadataLines(lines);
+      expect(footerCredit.isMetadata, isTrue);
+      expect(footerCredit.content, '混音师：赵靖');
+      expect(lyricLine.isMetadata, isFalse);
+
+      blankMetadataLines(lines);
+      expect(footerCredit.isBlank, isTrue);
+      expect(footerCredit.content, isEmpty);
+      expect(lyricLine.content, '歌词一行');
+    });
+
+    test('only blanked lyric lines are skipped when rendering', () {
+      final marked = LrcLine(
+        const Duration(seconds: 8),
+        '混音师：赵靖',
+        requiredIsBlank: false,
+        length: const Duration(seconds: 3),
+      )..isMetadata = true;
+      final blanked = LrcLine(
+        const Duration(seconds: 8),
+        '',
+        requiredIsBlank: true,
+        length: const Duration(seconds: 3),
+      );
+      final ordinary = LrcLine(
+        const Duration(seconds: 1),
+        '歌词一行',
+        requiredIsBlank: false,
+        length: const Duration(seconds: 2),
+      );
+
+      expect(isBlankLyricLineFiltered(marked), isFalse);
+      expect(isBlankLyricLineFiltered(blanked), isTrue);
+      expect(isBlankLyricLineFiltered(ordinary), isFalse);
+    });
   });
 }

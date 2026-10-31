@@ -150,6 +150,17 @@ void main() {
     expect(shouldAcceptLyricUiUpdate(windowFramesEnabled: true), isTrue);
   });
 
+  test('restore callback is dropped when the window minimized again', () {
+    expect(
+      windowRestoreStillCurrent(scheduledEpoch: 4, currentEpoch: 4),
+      isTrue,
+    );
+    expect(
+      windowRestoreStillCurrent(scheduledEpoch: 4, currentEpoch: 5),
+      isFalse,
+    );
+  });
+
   testWidgets('warmup completes after a resumed frame', (tester) async {
     final gate = WindowRenderGate(applyFramesEnabled: (_) {});
     addTearDown(gate.detach);

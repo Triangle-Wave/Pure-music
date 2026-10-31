@@ -46,6 +46,14 @@ void main() {
     expect(restored.paths, [r'D:\Music\Song.mp3', 'extra.mp3']);
   });
 
+  test('does not cache an unresolved empty playlist', () {
+    final playlist = Playlist('Missing', [r'D:\Music\missing-track.mp3']);
+
+    expect(playlist.audios, isEmpty);
+    expect(playlist.hasCachedAudiosForTesting, isFalse);
+    expect(playlist.firstAudio, isNull);
+  });
+
   test('loads playlists and all ordered items with two bulk queries', () {
     final database = sqlite3.openInMemory();
     try {

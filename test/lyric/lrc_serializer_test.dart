@@ -98,6 +98,37 @@ void main() {
       expect(text, isNot(contains('arigatou')));
     });
 
+    test('keepMetadata decides whether metadata rows are written', () {
+      final lyric = Lyric([
+        LrcLine(
+          const Duration(seconds: 1),
+          '作词：Someone',
+          requiredIsBlank: false,
+        )..isMetadata = true,
+        LrcLine(
+          const Duration(seconds: 5),
+          '歌词一行',
+          requiredIsBlank: false,
+        ),
+      ]);
+
+      final kept = serializeLyricToLrc(
+        lyric,
+        wordFormat: LyricTagWordFormat.standard,
+        keepMetadata: true,
+      );
+      expect(kept, contains('[00:01.000]作词：Someone'));
+      expect(kept, contains('[00:05.000]歌词一行'));
+
+      final dropped = serializeLyricToLrc(
+        lyric,
+        wordFormat: LyricTagWordFormat.standard,
+        keepMetadata: false,
+      );
+      expect(dropped, isNot(contains('作词：Someone')));
+      expect(dropped, contains('[00:05.000]歌词一行'));
+    });
+
     for (final format in LyricTagWordFormat.values) {
       test('${format.name} keeps grouping through an LRC round trip', () {
         final text = serializeLyricToLrc(_syncLyric(), wordFormat: format);

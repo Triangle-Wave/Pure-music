@@ -32,6 +32,7 @@ class AlbumColorCache {
   static const _cacheVersion = 1;
 
   bool _initialized = false;
+  int _generation = 0;
   static const int _maxEntries = 200;
   final Map<String, Map<String, Object?>> _entries = {};
   final Map<String, Future<AlbumColor?>> _inFlight = {};
@@ -71,7 +72,13 @@ class AlbumColorCache {
     final existing = _inFlight[key];
     if (existing != null) return existing;
 
-    final fut = _computeAndStore(album, key: key, signature: signature);
+    final generation = _generation;
+    final fut = _computeAndStore(
+      album,
+      key: key,
+      signature: signature,
+      generation: generation,
+    );
     _inFlight[key] = fut;
     unawaited(
       fut.whenComplete(() {
@@ -153,12 +160,13 @@ class AlbumColorCache {
     Album album, {
     required String key,
     required String signature,
+    required int generation,
   }) async {
     try {
       final bytes = await _getAlbumCoverBytes(album);
       if (bytes == null) return null;
       final rgb = await _computeAverageRgb(bytes);
-      if (rgb == null) return null;
+      if (rgb == null || generation != _generation) return null;
 
       final primary = Color(0xff000000 | rgb);
       final onPrimary = primary.computeLuminance() < 0.42
@@ -196,7 +204,10 @@ class AlbumColorCache {
   }
 
   void dispose() {
+    _generation++;
     _flushTimer?.cancel();
+    _flushTimer = null;
+    _initialized = false;
     _entries.clear();
     _inFlight.clear();
   }
@@ -315,11 +326,16 @@ class AlbumColorCache {
       targetWidth: 40,
       targetHeight: 40,
     );
-    final frame = await codec.getNextFrame();
-    final img = frame.image;
-    codec.dispose();
-    final data = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-    img.dispose();
+    ui.Image? img;
+    ByteData? data;
+    try {
+      final frame = await codec.getNextFrame();
+      img = frame.image;
+      data = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+    } finally {
+      img?.dispose();
+      codec.dispose();
+    }
     if (data == null) return null;
 
     final rgba = data.buffer.asUint8List();
@@ -848,6 +864,7 @@ class CoverImageCache {
 
     if (_missing.get(key) == true) return null;
 
+    final generation = _generation;
     final future = _coverLoadSemaphore.run(
       () => _loadBytesUncached(
         path: path,
@@ -860,10 +877,12 @@ class CoverImageCache {
     _pendingBytes[key] = future;
     try {
       final result = await future;
-      if (result == null) {
-        _missing.set(key, true);
-      } else {
-        _decodedBytes.set(key, result);
+      if (generation == _generation) {
+        if (result == null) {
+          _missing.set(key, true);
+        } else {
+          _decodedBytes.set(key, result);
+        }
       }
       return result;
     } finally {
@@ -1116,8 +1135,10 @@ class CoverImageCache {
   }
 
   Future<void> _warmPersistent(Map<String, int> targets) async {
+    final generation = _generation;
     var processed = 0;
     for (final entry in targets.entries) {
+      if (generation != _generation) break;
       const size = 200;
       final key = '${entry.key}|${entry.value}|${size}x$size';
       if (_persistentWarmCompleted.contains(key) ||
@@ -1132,7 +1153,9 @@ class CoverImageCache {
           modified: entry.value,
           lowPriority: true,
         );
-        _persistentWarmCompleted.add(key);
+        if (generation == _generation) {
+          _persistentWarmCompleted.add(key);
+        }
       } catch (error, trace) {
         log.app.debug(
           'legacy',
@@ -1176,6 +1199,7 @@ class CoverImageCache {
   }
 
   Future<void> _preloadNowPlayingCover(Audio audio) async {
+    final generation = _generation;
     // 虚拟轨的 path 是合成路径，读取封面必须用真实源文件路径。
     final path = audio.filePath;
     final modified = audio.modified;
@@ -1198,7 +1222,7 @@ class CoverImageCache {
         numColors: 8,
       );
       final bytes = result.$1;
-      if (bytes != null) {
+      if (bytes != null && generation == _generation) {
         putDecodedBytes(
           path: path,
           width: 160,
@@ -1207,7 +1231,7 @@ class CoverImageCache {
           modified: modified,
         );
       }
-      if (result.$2.isNotEmpty) {
+      if (generation == _generation && result.$2.isNotEmpty) {
         colors.cachePaletteForPath(path, [
           for (final argb in result.$2) Color(argb),
         ], modified: modified);
@@ -1239,6 +1263,8 @@ class CoverImageCache {
   /// 释放不常用的缓存层，保留小图缓存以维持列表流畅滚动
   /// [keepPath] 指定保留当前播放曲目的缓存，避免回退时重新 FFI 加载
   void trimMemory({String? keepPath}) {
+    // 清理即让进行中的加载写回失效，否则刚释放的封面会在加载完成后重新驻留。
+    _generation++;
     if (keepPath != null) {
       final prefix = '$keepPath|';
       bool notKeep(String key) => !key.startsWith(prefix);
@@ -1249,7 +1275,6 @@ class CoverImageCache {
       _decodedBytes.removeWhere(notKeep);
       _missing.removeWhere(notKeep);
     } else {
-      _generation++;
       _medium.clear();
       _large.clear();
       _pending.clear();
