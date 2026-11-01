@@ -12,7 +12,14 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 <details>
 <summary><strong>2.3.16</strong></summary>
 
-**Full Changelog**: https://github.com/Triangle-Wave/Pure-music/compare/v2.3.15...v2.3.16
+**播放与性能**
+
+- 播放页装饰动画跟随屏幕刷新率，不再固定 30/60fps；高刷新率屏幕下进度条、封面旋转、波浪、逐字高亮、频谱与流光更顺滑。
+- 最小化或窗口不可见时动画与定时器仍会停止，恢复后歌词与动画基准重新对齐。
+
+**曲库**
+
+- 归档远程曲库：移除侧边栏远程入口、远程页面与相关设置；本地曲库、CUE、SACD 与 TAK 不受影响。
 
 </details>
 
