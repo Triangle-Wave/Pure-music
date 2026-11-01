@@ -1916,8 +1916,6 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   Timer? _positionSyncTimer;
   Ticker? _progressTicker;
   Duration _lastProgressTickElapsed = Duration.zero;
-  Duration _lastProcessedElapsed = Duration.zero;
-  static const _progressTickInterval = Duration(milliseconds: 33); // ~30fps
   int _lastPositionMs = -1;
   bool _tickerModeEnabled = true;
   bool _isPlaying = false;
@@ -1955,7 +1953,6 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     };
     _positionSyncListener = () {
       _lastProgressTickElapsed = Duration.zero;
-      _lastProcessedElapsed = Duration.zero;
       _lastWavyTick = null;
       _syncFromNative(force: true);
     };
@@ -1971,7 +1968,6 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     _tickerModeEnabled = tickerModeEnabled;
     if (!tickerModeEnabled) return;
     _lastProgressTickElapsed = Duration.zero;
-    _lastProcessedElapsed = Duration.zero;
     _lastWavyTick = null;
     _syncFromNative(force: true);
     _syncWavyAnimation(_playbackService.playerState);
@@ -1987,7 +1983,7 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     final enabled = AppSettings.instance.wavyBarEnabledModes.contains(
       widget.mode,
     );
-    // 波浪不再自己跑 ticker，改由进度 ticker 按 30fps 推进相位
+    // 波浪不再自己跑 ticker，改由进度 ticker 逐帧推进相位
     final shouldRun = enabled && state == PlayerState.playing;
     if (shouldRun == _wavyActive) return;
     _wavyActive = shouldRun;
@@ -2012,7 +2008,6 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   void _startProgressTicker() {
     if (_progressTicker?.isActive == true) return;
     _lastProgressTickElapsed = Duration.zero;
-    _lastProcessedElapsed = Duration.zero;
     _lastWavyTick = null;
     _progressTicker ??= createTicker(_onProgressTick);
     _progressTicker!.start();
@@ -2023,17 +2018,12 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
     _advanceWavyBar(elapsed);
     if (isDragging.value) {
       _lastProgressTickElapsed = elapsed;
-      _lastProcessedElapsed = elapsed;
       return;
     }
     if (_lastProgressTickElapsed == Duration.zero) {
       _lastProgressTickElapsed = elapsed;
-      _lastProcessedElapsed = elapsed;
       return;
     }
-    // ~30fps 节流，跳过间隔过短的帧
-    if (elapsed - _lastProcessedElapsed < _progressTickInterval) return;
-    _lastProcessedElapsed = elapsed;
     final delta = elapsed - _lastProgressTickElapsed;
     _lastProgressTickElapsed = elapsed;
     if (delta <= Duration.zero) return;
@@ -2045,7 +2035,6 @@ class _NowPlayingSliderState extends State<_NowPlayingSlider>
   void _advanceWavyBar(Duration elapsed) {
     if (!_wavyActive) return;
     final last = _lastWavyTick;
-    if (last != null && elapsed - last < _progressTickInterval) return;
     final delta = last == null ? Duration.zero : elapsed - last;
     _lastWavyTick = elapsed;
     if (delta <= Duration.zero) return;
@@ -2678,8 +2667,6 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
   static const _pausedCoverScale = 0.88;
   static const _pauseSettleDuration = Duration(milliseconds: 180);
   static const _pauseSettleTurns = 0.018;
-  // 旋转是慢速装饰动画，30fps 推进即可，不必按屏幕刷新率跑
-  static const _rotationTickInterval = Duration(milliseconds: 33);
 
   final playback = PlayService.instance.playbackService;
   late final AnimationController _rotationController;
@@ -2787,7 +2774,6 @@ class _PlaybackCoverMotionState extends State<_PlaybackCoverMotion>
 
   void _onRotationTick(Duration elapsed) {
     final last = _lastRotationTick;
-    if (last != null && elapsed - last < _rotationTickInterval) return;
     final delta = tickerFrameDelta(last, elapsed);
     _lastRotationTick = elapsed;
     if (delta <= Duration.zero) return;

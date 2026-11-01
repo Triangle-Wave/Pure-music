@@ -782,10 +782,8 @@ class _SoftMeshGradient extends StatefulWidget {
 class _SoftMeshGradientState extends State<_SoftMeshGradient>
     with SingleTickerProviderStateMixin {
   static const _shaderAssetPath = MeshGradientBackground.shaderAssetPath;
+  // 装饰动画跟随屏幕刷新率，每帧推进着色器时间。
   static const double _timeScale = 1.0;
-  // 重绘压到 24fps，时间按真实步进累积。
-  static const double _meshFrameIntervalSeconds =
-      42 / Duration.millisecondsPerSecond;
 
   late final Ticker _ticker;
   late final ValueNotifier<double> _time;
@@ -793,7 +791,6 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
   late final Listenable _repaint;
   late final _SoftMeshGradientPainter _painter;
   Duration? _lastElapsed;
-  double _pendingSeconds = 0;
   VoidCallback? _controllerListener;
   bool _tickerModeEnabled = true;
 
@@ -809,10 +806,7 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
     final deltaSeconds =
         (elapsed - previous).inMicroseconds / Duration.microsecondsPerSecond;
     if (deltaSeconds <= 0) return;
-    _pendingSeconds += deltaSeconds * _timeScale;
-    if (_pendingSeconds < _meshFrameIntervalSeconds) return;
-    _time.value += _pendingSeconds;
-    _pendingSeconds = 0;
+    _time.value += deltaSeconds * _timeScale;
   }
 
   void _syncTicker() {
@@ -821,12 +815,10 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
         (widget.controller == null || widget.controller!.isAnimating.value);
     if (shouldRun && !_ticker.isActive) {
       _lastElapsed = null;
-      _pendingSeconds = 0;
       _ticker.start();
     } else if (!shouldRun && _ticker.isActive) {
       _ticker.stop();
       _lastElapsed = null;
-      _pendingSeconds = 0;
     }
   }
 

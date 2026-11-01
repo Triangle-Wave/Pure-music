@@ -21,7 +21,6 @@ const _kDarkNeutralBackground = Color(0xFF171717);
 const _kLightNeutralBackground = Color(0xFFF0F0F0);
 const _kArtworkTransitionDuration = Duration(milliseconds: 300);
 const _kPlaybackSpeedTransitionDuration = Duration(milliseconds: 650);
-const _kFrameInterval = Duration(milliseconds: 42);
 
 const _kCoverPeriod1 = 75.0;
 const _kCoverPeriod2 = 55.0;
@@ -174,7 +173,6 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   late final _FlowingLightPainter _painter;
   final _FlowMotionState _motion = _FlowMotionState();
   Duration? _lastTickElapsed;
-  Duration? _lastPaintElapsed;
 
   final ValueNotifier<int> _frameNotifier = ValueNotifier(0);
   final AudioReactiveFlowEnvelope _envelope = AudioReactiveFlowEnvelope();
@@ -379,12 +377,10 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     final shouldTick = shouldMove || shouldTransition;
     if (shouldTick && !_ticker.isActive) {
       _lastTickElapsed = null;
-      _lastPaintElapsed = null;
       _ticker.start();
     } else if (!shouldTick && _ticker.isActive) {
       _ticker.stop();
       _lastTickElapsed = null;
-      _lastPaintElapsed = null;
     }
   }
 
@@ -435,19 +431,6 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
         : 1.0;
     _motion.time +=
         deltaSeconds * widget.inputs.flowSpeed * averageSpeed * audioSpeed;
-
-    // 状态每帧都推进，重绘压到 24fps，避免模糊着色器按屏幕刷新率跑。
-    final lastPaintElapsed = _lastPaintElapsed;
-    if (lastPaintElapsed == null) {
-      _lastPaintElapsed = elapsed;
-    } else {
-      final sinceLastPaint = elapsed - lastPaintElapsed;
-      if (sinceLastPaint < _kFrameInterval) return;
-      final completedIntervals =
-          sinceLastPaint.inMicroseconds ~/ _kFrameInterval.inMicroseconds;
-      _lastPaintElapsed =
-          lastPaintElapsed + _kFrameInterval * completedIntervals;
-    }
 
     if (_previousCoverImage != null &&
         _transitionClock.elapsed >= _kArtworkTransitionDuration) {
