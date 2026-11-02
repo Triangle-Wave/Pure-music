@@ -180,6 +180,7 @@ class _ArtistLinkDialogState extends State<_ArtistLinkDialog> {
                   fontWeight: AppType.weightBold,
                 ),
               ),
+              const SizedBox(height: 4.0),
               Text(
                 '把不同写法的名字归到同一个歌手，作品合并显示',
                 style: TextStyle(
@@ -187,7 +188,7 @@ class _ArtistLinkDialogState extends State<_ArtistLinkDialog> {
                   fontSize: AppType.caption,
                 ),
               ),
-              const SizedBox(height: 12.0),
+              const SizedBox(height: 24.0),
               Focus(
                 onFocusChange: HotkeysHelper.onFocusChanges,
                 child: TextField(
@@ -199,7 +200,7 @@ class _ArtistLinkDialogState extends State<_ArtistLinkDialog> {
                   onSubmitted: (_) => _save(),
                 ),
               ),
-              const SizedBox(height: 12.0),
+              const SizedBox(height: 16.0),
               Focus(
                 onFocusChange: HotkeysHelper.onFocusChanges,
                 child: TextField(

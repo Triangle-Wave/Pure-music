@@ -330,7 +330,7 @@ class _NowPlayingLibraryLinkButton<T> extends StatelessWidget {
     return switch (target) {
       CollectionLinkUnavailable<T>() => _button(),
       CollectionLinkSingle<T>(:final value) => _button(
-        onPressed: () => context.push(route, extra: value),
+        onPressed: () => context.pushReplacement(route, extra: value),
       ),
       CollectionLinkMultiple<T>(:final options) => MenuAnchor(
         style: appMenuStyle,
@@ -340,7 +340,7 @@ class _NowPlayingLibraryLinkButton<T> extends StatelessWidget {
               style: appMenuItemStyle,
               onPressed: option.value == null
                   ? null
-                  : () => context.push(route, extra: option.value),
+                  : () => context.pushReplacement(route, extra: option.value),
               leadingIcon: Icon(icon),
               child: Text(option.label),
             ),
