@@ -355,6 +355,7 @@ class _NowPlayingLibraryLinkButton<T> extends StatelessWidget {
           },
         ),
       ),
+      _ => _button(),
     };
   }
 }

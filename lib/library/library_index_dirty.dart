@@ -49,19 +49,17 @@ Future<bool> markLibraryIndexDirectoryDirty(
 
     database = sqlite3.open(databaseFile.path);
     database.execute('PRAGMA busy_timeout = 3000');
-    database.execute(
-      'UPDATE folders SET modified = 0 WHERE path COLLATE NOCASE = ?',
-      [target],
-    );
-    if (database.updatedRows == 0) {
-      // 索引库由 Rust 侧写入，路径分隔符可能和 Dart 侧不一致。
-      database.execute(
-        'UPDATE folders SET modified = 0 '
-        "WHERE REPLACE(path, '/', '\\') = REPLACE(?, '/', '\\') COLLATE NOCASE",
-        [target],
-      );
-    }
-    if (database.updatedRows == 0) {
+    // 索引库由 Rust 侧写入，路径分隔符可能和 Dart 侧不一致。
+    const matchClause =
+        "path COLLATE NOCASE = ? OR "
+        "REPLACE(path, '/', '\\') = REPLACE(?, '/', '\\') COLLATE NOCASE";
+    final matched = database
+        .select('SELECT 1 FROM folders WHERE $matchClause LIMIT 1', [
+          target,
+          target,
+        ])
+        .isNotEmpty;
+    if (!matched) {
       log.library.debug(
         'legacy',
         '曲库索引中没有该目录，跳过重扫标记',
@@ -69,6 +67,10 @@ Future<bool> markLibraryIndexDirectoryDirty(
       );
       return false;
     }
+    database.execute(
+      'UPDATE folders SET modified = 0 WHERE $matchClause',
+      [target, target],
+    );
     return true;
   } catch (error, trace) {
     log.library.error(
