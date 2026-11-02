@@ -306,6 +306,12 @@ void main() {
       final decoded = jsonDecode(File('update/version.json').readAsStringSync());
       expect(decoded, isA<Map<String, dynamic>>());
       final manifest = decoded as Map<String, dynamic>;
+      // 未配置 Gitee 镜像时清单里没有镜像地址可校验。
+      if (manifest['gitee_available'] != true) {
+        expect(manifest['gitee_installer_url'], isNull);
+        expect(manifest['gitee_installer_checksum_url'], isNull);
+        return;
+      }
       final installer = manifest['gitee_installer_url'] as String;
       final checksum = manifest['gitee_installer_checksum_url'] as String;
 
