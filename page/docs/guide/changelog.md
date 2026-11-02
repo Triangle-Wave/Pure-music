@@ -5,9 +5,20 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.18**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.19**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.19</strong></summary>
+
+**导航**
+
+- 详情页之间跳转时替换当前页，连续切换歌手、专辑、歌曲详情不再层层叠加。
+- 从详情页返回直接回到进入详情页之前的位置。
+- 从列表页、播放页首次进入详情页仍可返回原页面。
+
+</details>
 
 <details>
 <summary><strong>2.3.18</strong></summary>
