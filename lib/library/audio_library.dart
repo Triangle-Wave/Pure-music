@@ -3196,6 +3196,12 @@ class Audio {
   /// 播放次数（从 library.sqlite 读取/写入）
   int playCount;
 
+  /// 虚拟轨（CUE/SACD）的本地覆盖标签；实体文件为 null。
+  ///
+  /// [TrackOverride] 中超出 [Audio] 字段的标签（流派、年份、作曲等）只在这里
+  /// 保留，供详情页展示与再次编辑。
+  TrackOverride? virtualOverride;
+
   String? _searchNorm;
   String? _searchPinyin;
   _SearchTextCache? _searchAlbum;
@@ -3344,6 +3350,7 @@ class Audio {
 
   /// 把本地覆盖值合并到当前曲目；null 字段保留原值。
   void applyTrackOverride(TrackOverride override) {
+    virtualOverride = override;
     title = override.title ?? title;
     artist = override.artist ?? artist;
     album = override.album ?? album;

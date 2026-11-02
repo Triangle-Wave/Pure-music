@@ -119,25 +119,65 @@ class _NowPlayingLargePage extends StatelessWidget {
           alignment: Alignment.centerRight,
           child: _CursorIdleVisibility(
             cursorHidden: cursorHidden,
-            child: _rightTools(),
+            child: _rightTools(
+              playbackService,
+              controlColor,
+              disabledColor,
+            ),
           ),
         ),
       ],
     );
   }
 
-  Widget _rightTools() {
-    return const Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _NowPlayingVolDspSlider(),
-        SizedBox(width: 8.0),
-        NowPlayingPitchControl(),
-        SizedBox(width: 8.0),
-        SetLyricSourceBtn(),
-        SizedBox(width: 8.0),
-        _NowPlayingMoreAction(showLyricSource: false),
-      ],
+  Widget _rightTools(
+    PlaybackService playbackService,
+    Color controlColor,
+    Color disabledColor,
+  ) {
+    return ListenableBuilder(
+      listenable: playbackService.nowPlayingNotifier,
+      builder: (context, _) {
+        final nowPlaying = playbackService.nowPlaying;
+        final artistTarget = resolveCollectionLinkTarget<Artist>(
+          nowPlaying?.splitedArtists ?? const <String>[],
+          AudioLibrary.instance.artistCollection,
+        );
+        final albumTarget = resolveCollectionLinkTarget<Album>(
+          nowPlaying == null ? const <String>[] : [nowPlaying.album],
+          AudioLibrary.instance.albumCollection,
+        );
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _NowPlayingLibraryLinkButton<Artist>(
+              tooltip: '歌手',
+              icon: Symbols.artist,
+              route: app_paths.ARTIST_DETAIL_PAGE,
+              target: artistTarget,
+              color: controlColor,
+              disabledColor: disabledColor,
+            ),
+            const SizedBox(width: 8.0),
+            _NowPlayingLibraryLinkButton<Album>(
+              tooltip: '专辑',
+              icon: Symbols.album,
+              route: app_paths.ALBUM_DETAIL_PAGE,
+              target: albumTarget,
+              color: controlColor,
+              disabledColor: disabledColor,
+            ),
+            const SizedBox(width: 8.0),
+            const _NowPlayingVolDspSlider(),
+            const SizedBox(width: 8.0),
+            const NowPlayingPitchControl(),
+            const SizedBox(width: 8.0),
+            const SetLyricSourceBtn(),
+            const SizedBox(width: 8.0),
+            const _NowPlayingMoreAction(showLyricSource: false),
+          ],
+        );
+      },
     );
   }
 
@@ -254,6 +294,68 @@ class _NowPlayingLargePage extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// 播放页右下角的曲库跳转入口：唯一目标直接跳转，多个目标弹出菜单。
+class _NowPlayingLibraryLinkButton<T> extends StatelessWidget {
+  const _NowPlayingLibraryLinkButton({
+    required this.tooltip,
+    required this.icon,
+    required this.route,
+    required this.target,
+    required this.color,
+    required this.disabledColor,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final String route;
+  final CollectionLinkTarget<T> target;
+  final Color color;
+  final Color disabledColor;
+
+  IconButton _button({VoidCallback? onPressed}) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon),
+      color: color,
+      disabledColor: disabledColor,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (target) {
+      CollectionLinkUnavailable<T>() => _button(),
+      CollectionLinkSingle<T>(:final value) => _button(
+        onPressed: () => context.push(route, extra: value),
+      ),
+      CollectionLinkMultiple<T>(:final options) => MenuAnchor(
+        style: appMenuStyle,
+        menuChildren: [
+          for (final option in options)
+            MenuItemButton(
+              style: appMenuItemStyle,
+              onPressed: option.value == null
+                  ? null
+                  : () => context.push(route, extra: option.value),
+              leadingIcon: Icon(icon),
+              child: Text(option.label),
+            ),
+        ],
+        builder: (context, controller, _) => _button(
+          onPressed: () {
+            if (controller.isOpen) {
+              controller.close();
+            } else {
+              controller.open();
+            }
+          },
+        ),
+      ),
+    };
   }
 }
 

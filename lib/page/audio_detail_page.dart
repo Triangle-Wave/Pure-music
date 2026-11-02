@@ -17,6 +17,7 @@ import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/library/library_index_dirty.dart';
 import 'package:pure_music/library/track_override.dart';
 import 'package:pure_music/lyric/lrc_serializer.dart';
 import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
@@ -104,6 +105,32 @@ String? _findItem(List<rust_tag_reader.AudioExtraItem> items, String key) {
   return null;
 }
 
+String? _emptyToNull(String? value) {
+  final text = value?.trim() ?? '';
+  return text.isEmpty ? null : text;
+}
+
+int? _parseOptionalInt(String? value) {
+  final text = value?.trim() ?? '';
+  if (text.isEmpty) return null;
+  return int.tryParse(text);
+}
+
+/// 虚拟轨详情页补充展示的覆盖标签，键与 Rust 标签键一致。
+const Map<String, String> _virtualOverrideLabels = <String, String>{
+  'genre': 'genre',
+  'year': 'year',
+  'track_total': 'track_total',
+  'disc_total': 'disc_total',
+  'composer': 'composer',
+  'lyricist': 'lyricist',
+  'label': 'label',
+  'comment': 'comment',
+  'language': 'language',
+  'copyright': 'copyright',
+  'license': 'license',
+};
+
 class _FieldControllers {
   final title = TextEditingController();
   final artist = TextEditingController();
@@ -124,25 +151,35 @@ class _FieldControllers {
   final copyright = TextEditingController();
   final license = TextEditingController();
 
-  void initFrom(Audio audio, List<rust_tag_reader.AudioExtraItem> items) {
+  void initFrom(
+    Audio audio,
+    List<rust_tag_reader.AudioExtraItem> items, {
+    TrackOverride? override,
+  }) {
     title.text = audio.title;
     artist.text = audio.artist;
     album.text = audio.album;
     albumArtist.text = audio.albumArtist ?? '';
-    genre.text = _findItem(items, 'genre') ?? '';
-    year.text = _findItem(items, 'year') ?? '';
+    genre.text = override?.genre ?? _findItem(items, 'genre') ?? '';
+    year.text = override?.year ?? _findItem(items, 'year') ?? '';
     track.text = audio.track > 0 ? audio.track.toString() : '';
-    trackTotal.text = _findItem(items, 'track_total') ?? '';
+    trackTotal.text =
+        override?.trackTotal?.toString() ??
+        _findItem(items, 'track_total') ??
+        '';
     disc.text = _findItem(items, 'disc') ?? '';
-    discTotal.text = _findItem(items, 'disc_total') ?? '';
-    composer.text = _findItem(items, 'composer') ?? '';
-    lyricist.text = _findItem(items, 'lyricist') ?? '';
-    label.text = _findItem(items, 'label') ?? '';
-    comment.text = _findItem(items, 'comment') ?? '';
-    bpm.text = _findItem(items, 'bpm') ?? '';
-    language.text = _findItem(items, 'language') ?? '';
-    copyright.text = _findItem(items, 'copyright') ?? '';
-    license.text = _findItem(items, 'license') ?? '';
+    discTotal.text =
+        override?.discTotal?.toString() ??
+        _findItem(items, 'disc_total') ??
+        '';
+    composer.text = override?.composer ?? _findItem(items, 'composer') ?? '';
+    lyricist.text = override?.lyricist ?? _findItem(items, 'lyricist') ?? '';
+    label.text = override?.label ?? _findItem(items, 'label') ?? '';
+    comment.text = override?.comment ?? _findItem(items, 'comment') ?? '';
+    bpm.text = override?.bpm ?? _findItem(items, 'bpm') ?? '';
+    language.text = override?.language ?? _findItem(items, 'language') ?? '';
+    copyright.text = override?.copyright ?? _findItem(items, 'copyright') ?? '';
+    license.text = override?.license ?? _findItem(items, 'license') ?? '';
   }
 
   void dispose() {
@@ -283,7 +320,11 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
       future: _getAudioExtra(audio),
       isMounted: () => mounted && requestToken == _editRequestToken,
       apply: (meta) {
-        _controllers.initFrom(audio, meta.items);
+        _controllers.initFrom(
+          audio,
+          meta.items,
+          override: audio.isVirtualTrack ? audio.virtualOverride : null,
+        );
         setState(() {
           _isEditing = true;
           _pendingCoverBytes = null;
@@ -373,6 +414,8 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         track: int.tryParse(_controllers.track.text.trim()) ?? 0,
         disc: int.tryParse(_controllers.disc.text.trim()),
       );
+      // 写标签不改变目录 mtime，标记目录让下次增量扫描重读该文件。
+      await markAudioDirectoryIndexDirty(audio.path);
       _refreshSystemNowPlaying();
       if (mounted) {
         showTextOnSnackBar(
@@ -417,18 +460,30 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
           : albumArtistText.trim();
       final track = int.tryParse((payload.track ?? '').trim()) ?? audio.track;
       final disc = int.tryParse((payload.disc ?? '').trim()) ?? audio.disc;
-      await TrackOverrideStore.instance.save(
-        TrackOverride(
-          trackUid: segment.trackUid,
-          title: title,
-          artist: artist,
-          album: album,
-          albumArtist: albumArtist,
-          track: track,
-          disc: disc,
-          updatedAt: DateTime.now().millisecondsSinceEpoch,
-        ),
+      final override = TrackOverride(
+        trackUid: segment.trackUid,
+        title: title,
+        artist: artist,
+        album: album,
+        albumArtist: albumArtist,
+        track: track,
+        disc: disc,
+        genre: _emptyToNull(payload.genre),
+        year: _emptyToNull(payload.year),
+        trackTotal: _parseOptionalInt(payload.trackTotal),
+        discTotal: _parseOptionalInt(payload.discTotal),
+        composer: _emptyToNull(payload.composer),
+        lyricist: _emptyToNull(payload.lyricist),
+        label: _emptyToNull(payload.label),
+        comment: _emptyToNull(payload.comment),
+        bpm: _emptyToNull(payload.bpm),
+        language: _emptyToNull(payload.language),
+        copyright: _emptyToNull(payload.copyright),
+        license: _emptyToNull(payload.license),
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
       );
+      await TrackOverrideStore.instance.save(override);
+      audio.virtualOverride = override;
       audio.albumArtist = albumArtist;
       AudioLibrary.instance.updateAudioTags(
         audio,
@@ -1035,6 +1090,8 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     final tagFields = <Widget>[
       _DetailField(label: '音轨', value: audio.track.toString()),
     ];
+    final overrideValues = _virtualOverrideValues;
+    final emittedKeys = <String>{};
     for (final item in data?.items ?? const []) {
       final key = item.key.trim();
       final normalizedKey = key.toLowerCase();
@@ -1045,13 +1102,52 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         continue;
       }
       if (normalizedKey == 'bpm') continue;
-      tagFields.add(_DetailField(label: key, value: item.value));
+      emittedKeys.add(normalizedKey);
+      tagFields.add(
+        _DetailField(
+          label: key,
+          value: overrideValues[normalizedKey] ?? item.value,
+        ),
+      );
+    }
+    for (final entry in _virtualOverrideLabels.entries) {
+      if (emittedKeys.contains(entry.key)) continue;
+      final value = overrideValues[entry.key];
+      if (value == null) continue;
+      tagFields.add(_DetailField(label: entry.value, value: value));
     }
     return tagFields;
   }
 
+  /// 虚拟轨覆盖层里已设置的非空标签；实体文件返回空表。
+  Map<String, String> get _virtualOverrideValues {
+    final override = audio.isVirtualTrack ? audio.virtualOverride : null;
+    if (override == null) return const <String, String>{};
+    final values = <String, String>{
+      'genre': override.genre ?? '',
+      'year': override.year ?? '',
+      'track_total': override.trackTotal?.toString() ?? '',
+      'disc_total': override.discTotal?.toString() ?? '',
+      'composer': override.composer ?? '',
+      'lyricist': override.lyricist ?? '',
+      'label': override.label ?? '',
+      'comment': override.comment ?? '',
+      'bpm': override.bpm ?? '',
+      'language': override.language ?? '',
+      'copyright': override.copyright ?? '',
+      'license': override.license ?? '',
+    };
+    values.removeWhere((_, value) => value.trim().isEmpty);
+    return values;
+  }
+
   List<Widget> _viewTechnicalFields(rust_tag_reader.AudioExtraMetadata? data) {
-    final bpm = _extraItemValue(data, 'bpm');
+    final overrideBpm = audio.isVirtualTrack
+        ? audio.virtualOverride?.bpm?.trim()
+        : null;
+    final bpm = overrideBpm == null || overrideBpm.isEmpty
+        ? _extraItemValue(data, 'bpm')
+        : overrideBpm;
     final bitDepth = audio.bitDepth ?? data?.bitDepth;
     return [
       _DetailField(
@@ -1190,11 +1286,52 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     double maxWidth,
     rust_tag_reader.AudioExtraMetadata? data,
   ) {
-    return _editSectionLayout(
+    final layout = _editSectionLayout(
       maxWidth,
       _editTagSection(scheme, maxWidth),
       _editTechnicalSection(data),
       _editFileSection(data),
+    );
+    if (!audio.isVirtualTrack) return layout;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _virtualTrackNotice(scheme),
+        const SizedBox(height: 12),
+        layout,
+      ],
+    );
+  }
+
+  Widget _virtualTrackNotice(ColorScheme scheme) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.secondaryContainer.withValues(alpha: 0.6),
+        borderRadius: AppRadius.smCircular,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Symbols.info_i,
+              size: 16,
+              color: scheme.onSecondaryContainer,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '此修改仅保存在本应用内，不会写入 CUE 或 ISO 文件',
+                style: TextStyle(
+                  fontSize: AppType.caption,
+                  color: scheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

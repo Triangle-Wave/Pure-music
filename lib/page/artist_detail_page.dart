@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:pure_music/component/online_candidate_dialog.dart';
+import 'package:pure_music/core/artist_alias_groups.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/preference.dart';
@@ -14,6 +15,7 @@ import 'package:pure_music/component/album_tile.dart';
 import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
+import 'package:pure_music/page/artist_link_dialog.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
 import 'package:pure_music/services/online_album/online_album_models.dart';
@@ -228,6 +230,54 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     );
   }
 
+  /// 标题下的关联歌手入口：已有关联时列出成员，未关联时给出入口。
+  Widget _artistLinkSubtitle(BuildContext context, Artist artist) {
+    final members = artistGroupMembers(
+      artist.name,
+      AppSettings.instance.artistAliases,
+    );
+    final scheme = Theme.of(context).colorScheme;
+    return TextButton(
+      onPressed: () => unawaited(_editArtistLinks(artist)),
+      style: TextButton.styleFrom(
+        foregroundColor: scheme.onSurfaceVariant,
+        padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+      ),
+      child: Text(
+        members.isEmpty ? '关联歌手' : '关联：${_artistLinkMemberLabel(members)}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: AppType.body,
+          color: scheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
+  String _artistLinkMemberLabel(List<String> members) {
+    const inlineLimit = 3;
+    if (members.length <= inlineLimit) return members.join('、');
+    return '${members.take(inlineLimit).join('、')} 等 ${members.length} 个';
+  }
+
+  Future<void> _editArtistLinks(Artist artist) async {
+    final result = await showArtistLinkDialog(
+      context,
+      artistName: artist.name,
+    );
+    if (!mounted) return;
+    if (result == null || result.displayName == artist.name) {
+      setState(() {});
+      return;
+    }
+    // 显示名变化意味着改名或合并，当前页面的 Artist 对象已失效。
+    await Navigator.of(context).maybePop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final artist = widget.artist;
@@ -243,6 +293,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       picShape: PicShape.oval,
       title: artist.name,
       subtitle: '${artist.works.length} 首作品',
+      subtitleExtra: _artistLinkSubtitle(context, artist),
       heroTag: 'artist:${artist.identityPath}',
       primaryPicSeed: artist.cachedDetailPicture,
       headerTrailing: _headerTrailing,
