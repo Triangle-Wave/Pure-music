@@ -8,10 +8,10 @@ import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/menu_styles.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 
@@ -78,8 +78,11 @@ class _AlbumTileState extends State<AlbumTile> {
       MenuItemButton(
         style: menuItemStyle,
         onPressed: hasWorks
-            ? () =>
-                  context.push(app_paths.ALBUM_DETAIL_PAGE, extra: widget.album)
+            ? () => pushDetailPage(
+                context,
+                app_paths.ALBUM_DETAIL_PAGE,
+                extra: widget.album,
+              )
             : null,
         leadingIcon: const Icon(Symbols.open_in_new),
         child: const Text('打开'),
@@ -149,7 +152,11 @@ class _AlbumTileState extends State<AlbumTile> {
     }
     if (!isMultiSelectView) {
       if (widget.album.works.isNotEmpty) {
-        context.push(app_paths.ALBUM_DETAIL_PAGE, extra: widget.album);
+        pushDetailPage(
+          context,
+          app_paths.ALBUM_DETAIL_PAGE,
+          extra: widget.album,
+        );
       }
       return;
     }

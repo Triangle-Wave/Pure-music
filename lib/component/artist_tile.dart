@@ -7,13 +7,13 @@ import 'package:pure_music/component/scroll_aware_future_builder.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/menu_styles.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/services/online_album/online_album_models.dart';
 import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 
@@ -99,7 +99,8 @@ class _ArtistTileState extends State<ArtistTile> {
       MenuItemButton(
         style: menuItemStyle,
         onPressed: hasWorks
-            ? () => context.push(
+            ? () => pushDetailPage(
+                context,
                 app_paths.ARTIST_DETAIL_PAGE,
                 extra: widget.artist,
               )
@@ -257,7 +258,11 @@ class _ArtistTileState extends State<ArtistTile> {
     }
     if (!isMultiSelectView) {
       if (widget.artist.works.isNotEmpty) {
-        context.push(app_paths.ARTIST_DETAIL_PAGE, extra: widget.artist);
+        pushDetailPage(
+          context,
+          app_paths.ARTIST_DETAIL_PAGE,
+          extra: widget.artist,
+        );
       }
       return;
     }

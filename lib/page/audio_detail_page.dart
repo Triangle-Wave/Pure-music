@@ -6,11 +6,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:path/path.dart' as p;
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/matcher.dart';
 import 'package:pure_music/core/mouse_back_exit.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
@@ -820,7 +820,11 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
         return TextButton(
           onPressed: artist == null
               ? null
-              : () => context.push(app_paths.ARTIST_DETAIL_PAGE, extra: artist),
+              : () => pushDetailPage(
+                  context,
+                  app_paths.ARTIST_DETAIL_PAGE,
+                  extra: artist,
+                ),
           style: TextButton.styleFrom(
             visualDensity: VisualDensity.compact,
             padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -838,7 +842,11 @@ class _AudioDetailPageState extends State<AudioDetailPage> {
     return TextButton.icon(
       onPressed: album == null
           ? null
-          : () => context.push(app_paths.ALBUM_DETAIL_PAGE, extra: album),
+          : () => pushDetailPage(
+              context,
+              app_paths.ALBUM_DETAIL_PAGE,
+              extra: album,
+            ),
       icon: const Icon(Symbols.album, size: 18),
       label: Text(audio.album, maxLines: 1, overflow: TextOverflow.ellipsis),
       style: TextButton.styleFrom(

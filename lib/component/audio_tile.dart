@@ -5,6 +5,7 @@ import 'package:pure_music/component/hi_res_badge.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/scroll_aware_future_builder.dart';
 import 'package:pure_music/core/cache.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/design_tokens.dart';
@@ -16,7 +17,6 @@ import 'package:pure_music/library/playlist.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 /// 徽章组按原尺寸展示的整行宽度下限；低于该值时整体等比缩小，避免横向溢出。
@@ -296,7 +296,11 @@ class _AudioTileState extends State<AudioTile> {
         onPressed: artist == null
             ? null
             : () {
-                context.push(app_paths.ARTIST_DETAIL_PAGE, extra: artist);
+                pushDetailPage(
+                  context,
+                  app_paths.ARTIST_DETAIL_PAGE,
+                  extra: artist,
+                );
               },
         leadingIcon: const Icon(Symbols.artist),
         child: Text(name),
@@ -315,7 +319,11 @@ class _AudioTileState extends State<AudioTile> {
       onPressed: album == null
           ? null
           : () {
-              context.push(app_paths.ALBUM_DETAIL_PAGE, extra: album);
+              pushDetailPage(
+                context,
+                app_paths.ALBUM_DETAIL_PAGE,
+                extra: album,
+              );
             },
       leadingIcon: const Icon(Symbols.album),
       child: Text(audio.album),
@@ -478,7 +486,7 @@ class _AudioTileState extends State<AudioTile> {
     return MenuItemButton(
       style: menuItemStyle,
       onPressed: () {
-        context.push(app_paths.AUDIO_DETAIL_PAGE, extra: audio);
+        pushDetailPage(context, app_paths.AUDIO_DETAIL_PAGE, extra: audio);
       },
       leadingIcon: const Icon(Symbols.info),
       child: const Text('详细信息'),

@@ -1,9 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/library/audio_library.dart';
@@ -499,13 +499,13 @@ class _StatsPageState extends State<StatsPage> {
   void _openArtist(String name) {
     final artist = AudioLibrary.instance.artistCollection[name];
     if (artist == null) return;
-    context.push(app_paths.STATS_ARTIST_DETAIL_PAGE, extra: artist);
+    pushDetailPage(context, app_paths.STATS_ARTIST_DETAIL_PAGE, extra: artist);
   }
 
   void _openAlbum(String name) {
     final album = AudioLibrary.instance.albumCollection[name];
     if (album == null) return;
-    context.push(app_paths.STATS_ALBUM_DETAIL_PAGE, extra: album);
+    pushDetailPage(context, app_paths.STATS_ALBUM_DETAIL_PAGE, extra: album);
   }
 
   int _estimatedListenSeconds(List<Audio> audios, List<PlayCountRecord>? data) {
