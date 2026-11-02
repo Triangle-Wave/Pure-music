@@ -20,6 +20,28 @@ pub(super) static SUPPORTED_FORMATS: phf::Set<&'static str> = phf::phf_set! {
     "ape",
 };
 
+/// lofty 能写入标签的扩展名白名单；其余受支持格式（WMA/ASF、AC3、AMR、MIDI、
+/// MKV、CAF、DSF/DFF）只读。
+pub(super) static WRITABLE_TAG_FORMATS: phf::Set<&'static str> = phf::phf_set! {
+    "mp3", "mp2", "mp1", "mpa",
+    "flac",
+    "m4a", "mp4", "m4b", "m4p", "m4r", "3gp", "3g2",
+    "wav", "wave",
+    "aif", "aiff", "aifc", "afc",
+    "ape",
+    "wv",
+    "mpc", "mp+", "mpp",
+    "ogg", "oga", "opus", "spx",
+    "aac", "adts",
+};
+
+pub(super) fn is_tag_writable_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| WRITABLE_TAG_FORMATS.contains(extension.as_str()))
+}
+
 pub(super) fn is_dsf_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("dsf"))

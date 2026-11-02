@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/union_search_result.dart';
 
@@ -25,6 +26,11 @@ Audio _audio(
 void main() {
   setUp(() {
     AudioLibrary.instance.dispose();
+    AppSettings.instance.artistAliases = {};
+  });
+
+  tearDown(() {
+    AppSettings.instance.artistAliases = {};
   });
 
   test('precomputed search matches title and pinyin initials', () {
@@ -109,6 +115,21 @@ void main() {
           .single
           .name,
       '告白',
+    );
+  });
+
+  test('artist search matches a linked member name', () {
+    AppSettings.instance.artistAliases = {'夜遊': 'YOASOBI'};
+    AudioLibrary.instance.artistCollection = {
+      'YOASOBI': Artist(name: 'YOASOBI'),
+    };
+
+    expect(
+      UnionSearchResult.search(
+        '夜遊',
+        scope: SearchScope.artist,
+      ).artists.single.name,
+      'YOASOBI',
     );
   });
 

@@ -70,6 +70,7 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.headerTrailing,
     this.headerTrailingSideMinWidth = 0,
     this.headerCoverOverlay,
+    this.subtitleExtra,
   });
 
   final PagePreference pref;
@@ -138,6 +139,9 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
 
   /// 叠加在头图上的控件，例如在线封面切换器。
   final Widget? headerCoverOverlay;
+
+  /// 标题下方附加的一行内容，例如歌手详情页的关联歌手入口。
+  final Widget? subtitleExtra;
 
   @override
   State<UniDetailPage<P, S, T>> createState() => _UniDetailPageState<P, S, T>();
@@ -524,6 +528,7 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           headerTrailing: widget.headerTrailing,
           trailingSideMinWidth: widget.headerTrailingSideMinWidth,
           headerCoverOverlay: widget.headerCoverOverlay,
+          subtitleExtra: widget.subtitleExtra,
         );
         if (!_enableHeaderCollapse(context)) {
           return buildHeader(0);
@@ -1284,6 +1289,7 @@ class UniDetailPageHeader extends StatelessWidget {
     this.headerTrailing,
     this.trailingSideMinWidth = 0,
     this.headerCoverOverlay,
+    this.subtitleExtra,
   });
 
   final Future<ImageProvider?> pic;
@@ -1306,6 +1312,7 @@ class UniDetailPageHeader extends StatelessWidget {
   final Widget? headerTrailing;
   final double trailingSideMinWidth;
   final Widget? headerCoverOverlay;
+  final Widget? subtitleExtra;
 
   @override
   Widget build(BuildContext context) {
@@ -1465,6 +1472,17 @@ class UniDetailPageHeader extends StatelessWidget {
             ),
           ),
         ),
+        if (subtitleExtra != null)
+          ClipRect(
+            child: Align(
+              alignment: Alignment.topLeft,
+              heightFactor: expandedContentOpacity,
+              child: Opacity(
+                opacity: expandedContentOpacity,
+                child: subtitleExtra,
+              ),
+            ),
+          ),
         SizedBox(height: 8.0 * expandedContentOpacity),
         _ActionsRow(
           actions: multiSelectController == null

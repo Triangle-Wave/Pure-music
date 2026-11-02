@@ -102,6 +102,17 @@ void main() {
     );
   });
 
+  test('cyclic aliases replace in a single hop without looping', () {
+    expect(
+      ArtistNameSplitter.split(
+        'A/B',
+        separators: separators,
+        aliases: const {'A': 'B', 'B': 'A'},
+      ),
+      ['B', 'A'],
+    );
+  });
+
   test('alias map keeps the first mapping and ignores identity rows', () {
     expect(
       normalizedArtistAliases({

@@ -10,10 +10,12 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use anyhow::Context as _;
 use dsf_meta::DsfFile;
 use id3::TagLike;
 use image::{imageops, DynamicImage};
 use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
+use lofty::file::TaggedFile;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::{Accessor, AudioFile, ItemKey, TaggedFileExt};
 use lofty::probe::Probe;
@@ -40,7 +42,7 @@ use super::library_db;
 mod format_detection;
 use format_detection::{
     is_asf_path, is_dff_path, is_dsf_path, is_generic_id3_path, is_iso_path, is_midi_path,
-    is_supported_audio_path, is_symphonia_path, SUPPORTED_FORMATS,
+    is_supported_audio_path, is_symphonia_path, is_tag_writable_path, SUPPORTED_FORMATS,
 };
 
 mod format_readers;
@@ -1611,10 +1613,274 @@ macro_rules! get_or_create_tag {
             } else if let Some(tag) = $tagged_file.first_tag_mut() {
                 tag
             } else {
-                return Err("failed to create tag".to_string());
+                return Err(anyhow::anyhow!("无法为该音频文件创建标签"));
             }
         }
     };
+}
+
+/// 标签写入临时文件序号，保证同一进程内命名唯一。
+static TEMP_FILE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+/// 与目标同目录的临时副本，Drop 时自动删除，避免失败路径残留半成品。
+struct TempSiblingFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempSiblingFile {
+    fn create(target: &Path) -> anyhow::Result<Self> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("目标路径没有父目录：{}", target.display()))?;
+        let file_name = target
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("目标路径没有文件名：{}", target.display()))?;
+        let stem = target.file_stem().unwrap_or(file_name);
+        let extension = target.extension();
+
+        for attempt in 0..8u32 {
+            let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            // 扩展名保留在末尾，lofty 依据扩展名判定容器格式。
+            let mut name = std::ffi::OsString::from(".");
+            name.push(stem);
+            name.push(format!(
+                ".{}.{}.{}.tmp",
+                std::process::id(),
+                sequence,
+                attempt
+            ));
+            if let Some(extension) = extension {
+                name.push(".");
+                name.push(extension);
+            }
+            let path = parent.join(name);
+            match fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path, armed: true }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "无法创建标签写入临时文件：{}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+
+        anyhow::bail!("无法为 {} 创建唯一的临时文件", target.display())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 替换成功后解除清理，临时文件此时已改名到目标路径。
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempSiblingFile {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = fs::remove_file(&self.path) {
+            log::warn!(
+                target: "tag",
+                "删除标签写入临时文件失败 {}: {}",
+                self.path.display(),
+                error
+            );
+        }
+    }
+}
+
+/// 校验扩展名是否属于 lofty 可写标签的格式；不可写时给出中文错误，绝不尝试写入。
+fn ensure_tag_writable(path: &Path) -> Result<(), String> {
+    if is_tag_writable_path(path) {
+        return Ok(());
+    }
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| "无扩展名".to_string());
+    Err(format!(
+        "不支持写入该音频格式的标签：{extension}。可写入格式：MP3、FLAC、M4A/MP4、WAV、AIFF、APE、WV、MPC、OGG、AAC"
+    ))
+}
+
+fn probe_tagged_file(path: &Path) -> anyhow::Result<TaggedFile> {
+    let options = ParseOptions::new()
+        .parsing_mode(ParsingMode::Relaxed)
+        .read_cover_art(true)
+        .read_properties(false)
+        .read_tags(true);
+    let probe = Probe::open(path)
+        .map_err(|error| anyhow::anyhow!("无法打开音频文件：{}（{:?}）", path.display(), error.kind()))?;
+    probe.options(options).read().map_err(|error| {
+        anyhow::anyhow!(
+            "无法解析音频文件：{}（{:?}）",
+            path.display(),
+            error.kind()
+        )
+    })
+}
+
+/// 同目录临时副本 → 写入 → 回读校验 → 原子替换。
+fn rewrite_file_safely<W>(target: &Path, rewrite: W) -> anyhow::Result<()>
+where
+    W: FnOnce(&Path) -> anyhow::Result<()>,
+{
+    rewrite_file_safely_with(target, rewrite, library_db::replace_file_atomically)
+}
+
+fn rewrite_file_safely_with<W, R>(target: &Path, rewrite: W, replace: R) -> anyhow::Result<()>
+where
+    W: FnOnce(&Path) -> anyhow::Result<()>,
+    R: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let temp = TempSiblingFile::create(target)?;
+
+    fs::copy(target, temp.path()).with_context(|| {
+        format!(
+            "无法复制音频文件到临时文件：{} -> {}",
+            target.display(),
+            temp.path().display()
+        )
+    })?;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp.path())
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("无法刷新临时文件：{}", temp.path().display()))?;
+
+    rewrite(temp.path()).map_err(|error| {
+        error.context(format!("写入音频标签失败：{}", target.display()))
+    })?;
+
+    replace(temp.path(), target)
+        .with_context(|| format!("无法原子替换音频文件：{}", target.display()))?;
+    temp.keep();
+    Ok(())
+}
+
+/// 回读临时文件，校验写入的关键文本字段与请求一致。
+fn verify_written_audio_tags(path: &Path, payload: &WriteTagPayload) -> anyhow::Result<()> {
+    let tagged_file = probe_tagged_file(path)?;
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+        .ok_or_else(|| anyhow::anyhow!("标签回读校验失败：写入后无法读取标签"))?;
+
+    let checks = [
+        ("标题", payload.title.as_deref(), ItemKey::TrackTitle),
+        ("艺术家", payload.artist.as_deref(), ItemKey::TrackArtist),
+        ("专辑", payload.album.as_deref(), ItemKey::AlbumTitle),
+        (
+            "专辑艺术家",
+            payload.album_artist.as_deref(),
+            ItemKey::AlbumArtist,
+        ),
+        ("流派", payload.genre.as_deref(), ItemKey::Genre),
+        ("作曲", payload.composer.as_deref(), ItemKey::Composer),
+        ("作词", payload.lyricist.as_deref(), ItemKey::Lyricist),
+        ("厂牌", payload.label.as_deref(), ItemKey::Label),
+        ("评论", payload.comment.as_deref(), ItemKey::Comment),
+        ("语言", payload.language.as_deref(), ItemKey::Language),
+        (
+            "版权",
+            payload.copyright.as_deref(),
+            ItemKey::CopyrightMessage,
+        ),
+    ];
+
+    for (label, expected, key) in checks {
+        let Some(expected) = expected.map(str::trim).filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        let actual = tag.get_string(&key).map(str::trim).unwrap_or_default();
+        if actual != expected {
+            anyhow::bail!(
+                "标签回读校验失败：{} 期望 {:?}，实际 {:?}",
+                label,
+                expected,
+                actual
+            );
+        }
+    }
+
+    // 数字字段按数值比较：部分容器会把音轨号与总数合并存成 "3/12"。
+    verify_number_field(tag, "音轨号", payload.track.as_deref(), Tag::track)?;
+    verify_number_field(
+        tag,
+        "音轨总数",
+        payload.track_total.as_deref(),
+        Tag::track_total,
+    )?;
+    verify_number_field(tag, "碟号", payload.disc.as_deref(), Tag::disk)?;
+    verify_number_field(
+        tag,
+        "碟总数",
+        payload.disc_total.as_deref(),
+        Tag::disk_total,
+    )?;
+
+    Ok(())
+}
+
+fn verify_number_field(
+    tag: &Tag,
+    label: &str,
+    expected: Option<&str>,
+    read: impl FnOnce(&Tag) -> Option<u32>,
+) -> anyhow::Result<()> {
+    let Some(expected) = expected.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(());
+    };
+    let Ok(expected_number) = expected.parse::<u32>() else {
+        // 非数字文本由各格式自行处理，避免把自定义写法判成校验失败。
+        return Ok(());
+    };
+    let actual = read(tag);
+    if actual != Some(expected_number) {
+        anyhow::bail!(
+            "标签回读校验失败：{} 期望 {}，实际 {:?}",
+            label,
+            expected_number,
+            actual
+        );
+    }
+    Ok(())
+}
+
+/// 回读临时文件，校验前置封面的存在性与请求一致。
+fn verify_written_cover(path: &Path, expect_cover: bool) -> anyhow::Result<()> {
+    let tagged_file = probe_tagged_file(path)?;
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+        .ok_or_else(|| anyhow::anyhow!("封面回读校验失败：写入后无法读取标签"))?;
+    let has_cover = tag
+        .pictures()
+        .iter()
+        .any(|picture| picture.pic_type() == PictureType::CoverFront);
+    if has_cover == expect_cover {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "封面回读校验失败：期望{}封面，实际{}封面",
+        if expect_cover { "存在" } else { "不存在" },
+        if has_cover { "存在" } else { "不存在" }
+    )
 }
 
 /// for Flutter
@@ -1624,128 +1890,120 @@ pub fn write_audio_tags(
     payload: WriteTagPayload,
     only_changed: bool,
 ) -> Result<(), String> {
-    let path_ref = Path::new(&path);
-    let options = ParseOptions::new()
-        .parsing_mode(ParsingMode::Relaxed)
-        .read_cover_art(true)
-        .read_properties(false)
-        .read_tags(true);
+    let target = Path::new(&path);
+    ensure_tag_writable(target)?;
 
-    let mut tagged_file = match Probe::open(path_ref) {
-        Ok(v) => match v.options(options).read() {
-            Ok(f) => f,
-            Err(err) => return Err(format!("Error reading file: {:?}", err.kind())),
-        },
-        Err(err) => return Err(format!("Error opening file: {:?}", err.kind())),
-    };
+    rewrite_file_safely(target, |temp| {
+        let mut tagged_file = probe_tagged_file(temp)?;
 
-    let tag = get_or_create_tag!(tagged_file);
+        let tag = get_or_create_tag!(tagged_file);
 
-    macro_rules! write_field {
-        ($val:expr, $key:expr) => {
-            if let Some(v) = &$val {
-                let trimmed = v.trim().to_string();
-                if trimmed.is_empty() {
-                    let _ = tag.remove_key(&$key);
+        macro_rules! write_field {
+            ($val:expr, $key:expr) => {
+                if let Some(v) = &$val {
+                    let trimmed = v.trim().to_string();
+                    if trimmed.is_empty() {
+                        let _ = tag.remove_key(&$key);
+                    } else {
+                        tag.insert_text($key, trimmed);
+                    }
+                }
+            };
+        }
+
+        if !only_changed {
+            let _ = tag.remove_key(&ItemKey::TrackTitle);
+            let _ = tag.remove_key(&ItemKey::TrackArtist);
+            let _ = tag.remove_key(&ItemKey::AlbumTitle);
+            let _ = tag.remove_key(&ItemKey::AlbumArtist);
+            let _ = tag.remove_key(&ItemKey::Genre);
+            let _ = tag.remove_key(&ItemKey::Year);
+            let _ = tag.remove_key(&ItemKey::RecordingDate);
+            let _ = tag.remove_key(&ItemKey::TrackNumber);
+            let _ = tag.remove_key(&ItemKey::TrackTotal);
+            let _ = tag.remove_key(&ItemKey::DiscNumber);
+            let _ = tag.remove_key(&ItemKey::DiscTotal);
+            let _ = tag.remove_key(&ItemKey::Composer);
+            let _ = tag.remove_key(&ItemKey::Lyricist);
+            let _ = tag.remove_key(&ItemKey::Label);
+            let _ = tag.remove_key(&ItemKey::Comment);
+            let _ = tag.remove_key(&ItemKey::Bpm);
+            let _ = tag.remove_key(&ItemKey::IntegerBpm);
+            let _ = tag.remove_key(&ItemKey::Language);
+            let _ = tag.remove_key(&ItemKey::CopyrightMessage);
+            let _ = tag.remove_key(&ItemKey::License);
+            let _ = tag.remove_key(&ItemKey::Unknown("LICENSE".to_string()));
+        }
+
+        write_field!(payload.title, ItemKey::TrackTitle);
+        write_field!(payload.artist, ItemKey::TrackArtist);
+        write_field!(payload.album, ItemKey::AlbumTitle);
+        write_field!(payload.album_artist, ItemKey::AlbumArtist);
+        write_field!(payload.genre, ItemKey::Genre);
+        write_field!(payload.year, ItemKey::RecordingDate);
+        write_field!(payload.track, ItemKey::TrackNumber);
+        write_field!(payload.track_total, ItemKey::TrackTotal);
+        write_field!(payload.disc, ItemKey::DiscNumber);
+        write_field!(payload.disc_total, ItemKey::DiscTotal);
+        write_field!(payload.composer, ItemKey::Composer);
+        write_field!(payload.lyricist, ItemKey::Lyricist);
+        write_field!(payload.label, ItemKey::Label);
+        write_field!(payload.comment, ItemKey::Comment);
+        write_field!(payload.bpm, ItemKey::IntegerBpm);
+        write_field!(payload.language, ItemKey::Language);
+        write_field!(payload.copyright, ItemKey::CopyrightMessage);
+        if let Some(value) = &payload.license {
+            let trimmed = value.trim().to_string();
+            let _ = tag.remove_key(&ItemKey::License);
+            let custom_key = ItemKey::Unknown("LICENSE".to_string());
+            let _ = tag.remove_key(&custom_key);
+            if !trimmed.is_empty() {
+                if tag.tag_type() == TagType::Id3v2 {
+                    tag.insert_unchecked(TagItem::new(custom_key, ItemValue::Text(trimmed)));
                 } else {
-                    tag.insert_text($key, trimmed);
+                    tag.insert_text(ItemKey::License, trimmed);
                 }
             }
-        };
-    }
-
-    if !only_changed {
-        let _ = tag.remove_key(&ItemKey::TrackTitle);
-        let _ = tag.remove_key(&ItemKey::TrackArtist);
-        let _ = tag.remove_key(&ItemKey::AlbumTitle);
-        let _ = tag.remove_key(&ItemKey::AlbumArtist);
-        let _ = tag.remove_key(&ItemKey::Genre);
-        let _ = tag.remove_key(&ItemKey::Year);
-        let _ = tag.remove_key(&ItemKey::RecordingDate);
-        let _ = tag.remove_key(&ItemKey::TrackNumber);
-        let _ = tag.remove_key(&ItemKey::TrackTotal);
-        let _ = tag.remove_key(&ItemKey::DiscNumber);
-        let _ = tag.remove_key(&ItemKey::DiscTotal);
-        let _ = tag.remove_key(&ItemKey::Composer);
-        let _ = tag.remove_key(&ItemKey::Lyricist);
-        let _ = tag.remove_key(&ItemKey::Label);
-        let _ = tag.remove_key(&ItemKey::Comment);
-        let _ = tag.remove_key(&ItemKey::Bpm);
-        let _ = tag.remove_key(&ItemKey::IntegerBpm);
-        let _ = tag.remove_key(&ItemKey::Language);
-        let _ = tag.remove_key(&ItemKey::CopyrightMessage);
-        let _ = tag.remove_key(&ItemKey::License);
-        let _ = tag.remove_key(&ItemKey::Unknown("LICENSE".to_string()));
-    }
-
-    write_field!(payload.title, ItemKey::TrackTitle);
-    write_field!(payload.artist, ItemKey::TrackArtist);
-    write_field!(payload.album, ItemKey::AlbumTitle);
-    write_field!(payload.album_artist, ItemKey::AlbumArtist);
-    write_field!(payload.genre, ItemKey::Genre);
-    write_field!(payload.year, ItemKey::RecordingDate);
-    write_field!(payload.track, ItemKey::TrackNumber);
-    write_field!(payload.track_total, ItemKey::TrackTotal);
-    write_field!(payload.disc, ItemKey::DiscNumber);
-    write_field!(payload.disc_total, ItemKey::DiscTotal);
-    write_field!(payload.composer, ItemKey::Composer);
-    write_field!(payload.lyricist, ItemKey::Lyricist);
-    write_field!(payload.label, ItemKey::Label);
-    write_field!(payload.comment, ItemKey::Comment);
-    write_field!(payload.bpm, ItemKey::IntegerBpm);
-    write_field!(payload.language, ItemKey::Language);
-    write_field!(payload.copyright, ItemKey::CopyrightMessage);
-    if let Some(value) = &payload.license {
-        let trimmed = value.trim().to_string();
-        let _ = tag.remove_key(&ItemKey::License);
-        let custom_key = ItemKey::Unknown("LICENSE".to_string());
-        let _ = tag.remove_key(&custom_key);
-        if !trimmed.is_empty() {
-            if tag.tag_type() == TagType::Id3v2 {
-                tag.insert_unchecked(TagItem::new(custom_key, ItemValue::Text(trimmed)));
-            } else {
-                tag.insert_text(ItemKey::License, trimmed);
-            }
         }
-    }
 
-    tagged_file
-        .save_to_path(&path, WriteOptions::default())
-        .map_err(|e| format!("Error saving tags: {:?}", e.kind()))?;
-    Ok(())
+        tagged_file
+            .save_to_path(temp, WriteOptions::default())
+            .map_err(|error| {
+                anyhow::anyhow!("无法写入标签：{}（{:?}）", temp.display(), error.kind())
+            })?;
+
+        verify_written_audio_tags(temp, &payload)
+    })
+    .map_err(|error| format!("{error:#}"))
 }
 
 /// for Flutter
 /// 写入歌词到音频文件标签（ID3/VorbisComment/MP4 等），使用 Lofty 的 `ItemKey::Lyrics` 映射
 /// 使用 ParsingMode::Relaxed 兼容更多有问题的标签文件
 pub fn write_lyric_to_path(path: String, lyric: String) -> Result<(), String> {
-    let path_ref = Path::new(&path);
-    let options = ParseOptions::new()
-        .parsing_mode(ParsingMode::Relaxed)
-        .read_cover_art(true)
-        .read_properties(false)
-        .read_tags(true);
+    let target = Path::new(&path);
+    ensure_tag_writable(target)?;
 
-    let mut tagged_file = match Probe::open(path_ref) {
-        Ok(v) => match v.options(options).read() {
-            Ok(f) => f,
-            Err(err) => return Err(format!("Error reading file: {:?}", err.kind())),
-        },
-        Err(err) => return Err(format!("Error opening file: {:?}", err.kind())),
-    };
+    rewrite_file_safely(target, |temp| {
+        let mut tagged_file = probe_tagged_file(temp)?;
+        let tag = get_or_create_tag!(tagged_file);
 
-    let tag = get_or_create_tag!(tagged_file);
+        let _ = tag.remove_key(&ItemKey::Lyrics);
+        tag.insert_text(ItemKey::Lyrics, lyric.clone());
+        tagged_file
+            .save_to_path(temp, WriteOptions::default())
+            .map_err(|error| {
+                anyhow::anyhow!("无法写入歌词：{}（{:?}）", temp.display(), error.kind())
+            })?;
 
-    let _ = tag.remove_key(&ItemKey::Lyrics);
-    tag.insert_text(ItemKey::Lyrics, lyric.clone());
-    tagged_file
-        .save_to_path(&path, WriteOptions::default())
-        .map_err(|e| format!("Error saving lyrics: {:?}", e.kind()))?;
-    match _get_lyric_from_lofty(&path) {
-        Some(saved) if lyrics_text_equiv(&saved, &lyric) => Ok(()),
-        Some(_) => Err("written lyrics do not match the saved tag".to_string()),
-        None => Err("written lyrics could not be read back".to_string()),
-    }
+        let temp_path = temp.to_string_lossy();
+        match _get_lyric_from_lofty(temp_path.as_ref()) {
+            Some(saved) if lyrics_text_equiv(&saved, &lyric) => Ok(()),
+            Some(_) => Err(anyhow::anyhow!("歌词回读校验失败：标签内容与写入内容不一致")),
+            None => Err(anyhow::anyhow!("歌词回读校验失败：无法从标签读取歌词")),
+        }
+    })
+    .map_err(|error| format!("{error:#}"))
 }
 
 fn lyrics_text_equiv(a: &str, b: &str) -> bool {
@@ -1758,26 +2016,11 @@ fn lyrics_text_equiv(a: &str, b: &str) -> bool {
 /// `bytes` 为空时移除封面。图片最长边超过 1600 时等比缩放。
 /// 保留原始格式（PNG/JPEG/GIF），无法识别格式时降级为 JPEG。
 pub fn write_audio_cover(path: String, bytes: Vec<u8>) -> Result<(), String> {
-    let path_ref = Path::new(&path);
-    let options = ParseOptions::new()
-        .parsing_mode(ParsingMode::Relaxed)
-        .read_cover_art(true)
-        .read_properties(false)
-        .read_tags(true);
+    let target = Path::new(&path);
+    ensure_tag_writable(target)?;
 
-    let mut tagged_file = match Probe::open(path_ref) {
-        Ok(v) => match v.options(options).read() {
-            Ok(f) => f,
-            Err(err) => return Err(format!("Error reading file: {:?}", err.kind())),
-        },
-        Err(err) => return Err(format!("Error opening file: {:?}", err.kind())),
-    };
-
-    let tag = get_or_create_tag!(tagged_file);
-
-    tag.remove_picture_type(PictureType::CoverFront);
-
-    if !bytes.is_empty() {
+    let expect_cover = !bytes.is_empty();
+    let encoded = if expect_cover {
         let img =
             image::load_from_memory(&bytes).map_err(|e| format!("Error decoding image: {e}"))?;
 
@@ -1789,15 +2032,37 @@ pub fn write_audio_cover(path: String, bytes: Vec<u8>) -> Result<(), String> {
         };
 
         // 按原始格式编码，无法识别时降级 JPEG
-        let (encoded, mime) = detect_and_encode(&img, &bytes)?;
+        Some(detect_and_encode(&img, &bytes)?)
+    } else {
+        None
+    };
 
-        let picture = Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, encoded);
-        tag.push_picture(picture);
-    }
+    rewrite_file_safely(target, move |temp| {
+        let mut tagged_file = probe_tagged_file(temp)?;
+        let tag = get_or_create_tag!(tagged_file);
 
-    tagged_file
-        .save_to_path(&path, WriteOptions::default())
-        .map_err(|e| format!("Error saving cover: {:?}", e.kind()))?;
+        tag.remove_picture_type(PictureType::CoverFront);
+
+        if let Some((encoded, mime)) = encoded {
+            let picture = Picture::new_unchecked(
+                PictureType::CoverFront,
+                Some(mime),
+                None,
+                encoded,
+            );
+            tag.push_picture(picture);
+        }
+
+        tagged_file
+            .save_to_path(temp, WriteOptions::default())
+            .map_err(|error| {
+                anyhow::anyhow!("无法写入封面：{}（{:?}）", temp.display(), error.kind())
+            })?;
+
+        verify_written_cover(temp, expect_cover)
+    })
+    .map_err(|error| format!("{error:#}"))?;
+
     evict_picture_cache_for_path(&path);
     Ok(())
 }
@@ -4169,9 +4434,219 @@ pub fn update_index(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_network_path, validate_scan_roots, NETWORK_FOLDER_ERROR};
+    use super::*;
     use std::io::ErrorKind;
-    use std::path::Path;
+
+    /// 测试用临时目录，Drop 时递归删除，避免测试残留。
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "pure-music-tag-write-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create temp test dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn directory_entries(dir: &Path) -> Vec<String> {
+        let mut entries = fs::read_dir(dir)
+            .expect("read temp dir")
+            .map(|entry| {
+                entry
+                    .expect("read temp dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    fn empty_payload() -> WriteTagPayload {
+        WriteTagPayload {
+            title: None,
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            year: None,
+            track: None,
+            track_total: None,
+            disc: None,
+            disc_total: None,
+            composer: None,
+            lyricist: None,
+            label: None,
+            comment: None,
+            bpm: None,
+            language: None,
+            copyright: None,
+            license: None,
+        }
+    }
+
+    /// 构造一个最小的合法 PCM WAV，供标签写入测试使用。
+    fn minimal_wav() -> Vec<u8> {
+        let sample_rate: u32 = 44_100;
+        let channels: u16 = 1;
+        let bits: u16 = 16;
+        let data: [u8; 2] = [0, 0];
+        let block_align = channels * bits / 8;
+        let byte_rate = sample_rate * u32::from(block_align);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36u32 + data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        bytes
+    }
+
+    #[test]
+    fn rewrite_file_safely_replaces_target_and_removes_temp() {
+        let dir = TestDir::new("rewrite-ok");
+        let target = dir.path().join("song.mp3");
+        fs::write(&target, b"original-bytes").expect("write original");
+
+        rewrite_file_safely_with(
+            &target,
+            |temp| fs::write(temp, b"updated-bytes").map_err(anyhow::Error::from),
+            library_db::replace_file_atomically,
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(fs::read(&target).unwrap(), b"updated-bytes");
+        assert_eq!(directory_entries(dir.path()), vec!["song.mp3"]);
+    }
+
+    #[test]
+    fn rewrite_file_failure_keeps_original_and_removes_temp() {
+        let dir = TestDir::new("rewrite-fail");
+        let target = dir.path().join("song.mp3");
+        fs::write(&target, b"original-bytes").expect("write original");
+
+        let result = rewrite_file_safely_with(
+            &target,
+            |_temp| Err(anyhow::anyhow!("模拟写入失败")),
+            library_db::replace_file_atomically,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original-bytes");
+        assert_eq!(directory_entries(dir.path()), vec!["song.mp3"]);
+    }
+
+    #[test]
+    fn replace_failure_keeps_original_and_removes_temp() {
+        let dir = TestDir::new("replace-fail");
+        let target = dir.path().join("song.mp3");
+        fs::write(&target, b"original-bytes").expect("write original");
+
+        let result = rewrite_file_safely_with(
+            &target,
+            |temp| fs::write(temp, b"updated-bytes").map_err(anyhow::Error::from),
+            |_source, _target| Err(io::Error::other("模拟替换失败")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original-bytes");
+        assert_eq!(directory_entries(dir.path()), vec!["song.mp3"]);
+    }
+
+    #[test]
+    fn rejects_tag_write_for_unsupported_extension() {
+        let dir = TestDir::new("unsupported");
+        let target = dir.path().join("song.wma");
+        fs::write(&target, b"original-bytes").expect("write original");
+
+        let error = write_audio_tags(
+            target.to_string_lossy().into_owned(),
+            empty_payload(),
+            false,
+        )
+        .expect_err("wma must be rejected");
+
+        assert!(error.contains("不支持"), "unexpected error: {error}");
+        assert_eq!(fs::read(&target).unwrap(), b"original-bytes");
+        assert_eq!(directory_entries(dir.path()), vec!["song.wma"]);
+    }
+
+    #[test]
+    fn write_audio_tags_round_trips_on_wav() {
+        let dir = TestDir::new("wav-round-trip");
+        let target = dir.path().join("track.wav");
+        fs::write(&target, minimal_wav()).expect("write wav");
+        let payload = WriteTagPayload {
+            title: Some("新标题".to_string()),
+            artist: Some("歌手".to_string()),
+            album: Some("专辑".to_string()),
+            track: Some("3".to_string()),
+            disc: Some("1".to_string()),
+            ..empty_payload()
+        };
+
+        write_audio_tags(
+            target.to_string_lossy().into_owned(),
+            payload,
+            false,
+        )
+        .expect("wav tag write should succeed");
+
+        let tagged_file = probe_tagged_file(&target).expect("read back wav");
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+            .expect("wav should carry a tag");
+        assert_eq!(tag.get_string(&ItemKey::TrackTitle), Some("新标题"));
+        assert_eq!(tag.get_string(&ItemKey::TrackArtist), Some("歌手"));
+        assert_eq!(tag.get_string(&ItemKey::AlbumTitle), Some("专辑"));
+        assert_eq!(tag.track(), Some(3));
+        assert_eq!(tag.disk(), Some(1));
+        assert_eq!(directory_entries(dir.path()), vec!["track.wav"]);
+    }
+
+    #[test]
+    fn write_audio_tags_keeps_original_when_target_is_corrupt() {
+        let dir = TestDir::new("corrupt");
+        let target = dir.path().join("broken.wav");
+        fs::write(&target, b"not a real wav file").expect("write corrupt file");
+
+        let before = fs::read(&target).unwrap();
+        let result = write_audio_tags(
+            target.to_string_lossy().into_owned(),
+            empty_payload(),
+            false,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), before);
+        assert_eq!(directory_entries(dir.path()), vec!["broken.wav"]);
+    }
 
     #[test]
     fn recognizes_windows_network_paths() {

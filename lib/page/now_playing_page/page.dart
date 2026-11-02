@@ -16,6 +16,7 @@ import 'package:pure_music/component/side_nav.dart';
 import 'package:pure_music/component/title_bar.dart';
 import 'package:pure_music/core/menu_styles.dart';
 import 'package:pure_music/core/color_extraction.dart';
+import 'package:pure_music/core/collection_link_target.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/memory_monitor.dart';
 import 'package:pure_music/core/now_playing_perf_probe.dart';
@@ -66,6 +67,10 @@ part 'immersive_page.dart';
 final nowPlayingViewMode = ValueNotifier(
   AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode,
 );
+
+/// 普通播放页切到紧凑布局的宽度上限：右下角控件组加入歌手、专辑入口后
+/// 需要更宽的窗口才能与中组拉开距离。
+const double _nowPlayingLargeLayoutMinWidth = 1000.0;
 
 bool _usesCompactNowPlayingLayout(BuildContext context, ScreenType screenType) {
   return screenType == ScreenType.small ||
@@ -549,6 +554,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   Widget _nowPlayingForeground(BuildContext context, bool immersive) {
     if (immersive) return const _NowPlayingImmersivePage();
     return ResponsiveBuilder2(
+      largeMinWidth: _nowPlayingLargeLayoutMinWidth,
       builder: (context, screenType) {
         if (_usesCompactNowPlayingLayout(context, screenType)) {
           return _NowPlayingSmallPage(cursorHidden: _cursorHiddenNotifier);
@@ -623,6 +629,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     return Row(
       children: [
         ResponsiveBuilder2(
+          largeMinWidth: _nowPlayingLargeLayoutMinWidth,
           builder: (context, screenType) {
             if (!_usesCompactNowPlayingLayout(context, screenType)) {
               return const SizedBox.shrink();

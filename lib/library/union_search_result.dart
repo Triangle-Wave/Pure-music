@@ -1,5 +1,7 @@
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/core/artist_alias_groups.dart';
 import 'package:pure_music/core/search_action_state.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 
 enum SearchScope { music, artist, album }
@@ -47,8 +49,11 @@ class UnionSearchResult {
     }
 
     if (scope == null || scope == SearchScope.artist) {
+      final groups = groupArtistAliases(AppSettings.instance.artistAliases);
       for (Artist item in library.artistCollection.values) {
-        if (_matchesQuery(item.name, queryInLowerCase)) {
+        final members = groups[item.name] ?? const <String>[];
+        if (_matchesQuery(item.name, queryInLowerCase) ||
+            members.any((name) => _matchesQuery(name, queryInLowerCase))) {
           result.artists.add(item);
         }
       }

@@ -152,7 +152,7 @@ fn index_temp_file(index_path: &Path) -> io::Result<(PathBuf, std::fs::File)> {
 }
 
 #[cfg(windows)]
-fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
@@ -180,7 +180,7 @@ fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn replace_file_atomically(source: &Path, target: &Path) -> io::Result<()> {
     fs::rename(source, target)
 }
 
