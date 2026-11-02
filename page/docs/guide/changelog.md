@@ -5,9 +5,23 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.17**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.18**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.18</strong></summary>
+
+**播放页**
+
+- 修复歌手、专辑按钮跳转后页面空白的问题，改为与「更多」菜单一致的跳转方式。
+
+**歌手关联**
+
+- 修复关联歌手对话框中「显示名称」输入框的浮动标签与副标题重叠的问题。
+- 标题、副标题与输入框之间留出间距，输入框有内容时不再压住上方文字。
+
+</details>
 
 <details>
 <summary><strong>2.3.17</strong></summary>
