@@ -800,8 +800,48 @@ jobs:
           path: output/
           if-no-files-found: error
 
-      - name: Create GitHub Release
+      # 发布说明优先取仓库内 .github/release-notes/<tag>.md，缺失时回退到 GitHub 自动生成。
+      # 只读探测，文件不存在属于预期分支，不视为失败。
+      - name: Resolve release notes
+        id: release_notes
         if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "release tag is empty" }
+          $path = Join-Path $env:GITHUB_WORKSPACE ".github/release-notes/$tag.md"
+          if (Test-Path -LiteralPath $path -PathType Leaf) {
+            "has_notes=true" >> $env:GITHUB_OUTPUT
+            "notes_path=$path" >> $env:GITHUB_OUTPUT
+            Write-Host "Using release notes from $path"
+          }
+          else {
+            "has_notes=false" >> $env:GITHUB_OUTPUT
+            Write-Host "No release notes at $path; falling back to generated notes."
+          }
+
+      # body_path 与 generate_release_notes 互斥：同时设置会让自动内容追加到正文之后。
+      - name: Create GitHub Release (custom notes)
+        if: ${{ !inputs.dry_run && steps.release_notes.outputs.has_notes == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: ${{ steps.release_notes.outputs.notes_path }}
+          prerelease: ${{ inputs.prerelease || false }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe
+            output/pure_music_${{ steps.version.outputs.version }}_release_installer.exe.sha256
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip
+            output/pure_music_${{ steps.version.outputs.version }}_release_portable.zip.sha256
+
+      - name: Create GitHub Release (generated notes)
+        if: ${{ !inputs.dry_run && steps.release_notes.outputs.has_notes != 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
