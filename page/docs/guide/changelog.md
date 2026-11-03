@@ -5,9 +5,22 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.19**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.20**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.20</strong></summary>
+
+**播放队列**
+
+- 点歌时替换当前播放项，队列其余内容与顺序保持不变。
+- 随机播放模式不再因为点歌而打乱整个队列。
+- 点的歌曲已在队列中时，替换当前项并移除原位置，不会出现重复。
+- 队列为空时点歌只播放该曲目。
+- 播放全部、多选播放与演唱会开场继续载入整份列表。
+
+</details>
 
 <details>
 <summary><strong>2.3.19</strong></summary>
