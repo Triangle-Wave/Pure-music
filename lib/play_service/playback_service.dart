@@ -2102,6 +2102,65 @@ class PlaybackService extends ChangeNotifier {
     _rebuildGaplessPreparation();
   }
 
+  /// 点歌时只替换当前播放位置的曲目，队列其余内容与顺序保持不变。
+  @visibleForTesting
+  static ({List<Audio> queue, int index}) replaceCurrentForPlayback({
+    required List<Audio> queue,
+    required int index,
+    required Audio target,
+  }) {
+    if (queue.isEmpty) {
+      return (queue: List<Audio>.unmodifiable([target]), index: 0);
+    }
+    final replaceIndex = index.clamp(0, queue.length - 1).toInt();
+    if (queue[replaceIndex].path == target.path) {
+      return (queue: List<Audio>.unmodifiable(queue), index: replaceIndex);
+    }
+    final existingIndex = queue.indexWhere(
+      (audio) => audio.path == target.path,
+    );
+    final next = List<Audio>.from(queue);
+    next[replaceIndex] = target;
+    if (existingIndex >= 0) {
+      next.removeAt(existingIndex);
+      return (
+        queue: List<Audio>.unmodifiable(next),
+        index: existingIndex < replaceIndex ? replaceIndex - 1 : replaceIndex,
+      );
+    }
+    return (queue: List<Audio>.unmodifiable(next), index: replaceIndex);
+  }
+
+  /// 把点歌替换同步到原始顺序备份，保证关闭随机后恢复的顺序正确。
+  @visibleForTesting
+  static List<Audio> replaceBackupForPlayback({
+    required List<Audio> backup,
+    required Audio replaced,
+    required Audio target,
+  }) {
+    if (backup.isEmpty) {
+      return List<Audio>.unmodifiable([target]);
+    }
+    if (replaced.path == target.path) {
+      return List<Audio>.unmodifiable(backup);
+    }
+    final backupIndex = backup.indexWhere(
+      (audio) => audio.path == replaced.path,
+    );
+    if (backupIndex < 0) {
+      return List<Audio>.unmodifiable(backup);
+    }
+    final duplicateIndex = backup.indexWhere(
+      (audio) => audio.path == target.path,
+    );
+    final next = List<Audio>.from(backup);
+    next[backupIndex] = target;
+    if (duplicateIndex >= 0 && duplicateIndex != backupIndex) {
+      next.removeAt(duplicateIndex);
+    }
+    return List<Audio>.unmodifiable(next);
+  }
+
   @visibleForTesting
   static ({
     List<Audio> playlist,
@@ -2243,7 +2302,7 @@ class PlaybackService extends ChangeNotifier {
     _rebuildGaplessPreparation();
   }
 
-  /// 播放 playlist[audioIndex] 并设置播放列表为 playlist
+  /// 点歌：只替换当前正在播放的队列项，其余队列内容与顺序保持不变。
   void play(int audioIndex, List<Audio> playlist) {
     log.playback.debug(
       'legacy',
@@ -2256,28 +2315,70 @@ class PlaybackService extends ChangeNotifier {
     if (audioIndex < 0 || audioIndex >= playlist.length) return;
     _synchronizeGaplessTransition();
     final origin = _captureOrigin();
-    if (shuffle.value) {
-      final shuffled = List<Audio>.from(playlist);
-      final willPlay = shuffled.removeAt(audioIndex);
-      shuffled.shuffle();
-      shuffled.insert(0, willPlay);
-      _setPlaylistBackup(playlist);
-      final activePlaylist = _setPlaylist(shuffled);
-      unawaited(
-        _loadAndPlay(0, activePlaylist, reason: 'user.play', origin: origin),
-      );
-    } else {
-      _setPlaylistBackup(playlist);
-      final activePlaylist = _setPlaylist(playlist);
-      unawaited(
-        _loadAndPlay(
-          audioIndex,
-          activePlaylist,
-          reason: 'user.play',
-          origin: origin,
+    final target = playlist[audioIndex];
+    final queue = _playlist.value;
+    final replaceIndex = queue.isEmpty
+        ? -1
+        : (_playlistIndex ?? 0).clamp(0, queue.length - 1).toInt();
+    final replaced = replaceIndex >= 0 ? queue[replaceIndex] : null;
+    final result = replaceCurrentForPlayback(
+      queue: queue,
+      index: replaceIndex < 0 ? 0 : replaceIndex,
+      target: target,
+    );
+    if (replaced == null) {
+      _setPlaylistBackup(result.queue);
+    } else if (replaced.path != target.path) {
+      _setPlaylistBackup(
+        replaceBackupForPlayback(
+          backup: _playlistBackup,
+          replaced: replaced,
+          target: target,
         ),
       );
     }
+    final activePlaylist = _setPlaylist(result.queue);
+    _playlistIndex = result.index;
+    unawaited(
+      _loadAndPlay(
+        result.index,
+        activePlaylist,
+        reason: 'user.play',
+        origin: origin,
+      ),
+    );
+  }
+
+  /// 载入整份列表：随机模式把目标曲目置队首，顺序模式从 audioIndex 播放。
+  void playQueue(int audioIndex, List<Audio> playlist) {
+    log.playback.debug(
+      'legacy',
+      '[action] playQueue index=$audioIndex playlistLen=${playlist.length}',
+    );
+    AudioEchoLogRecorder.instance.mark(
+      'playQueue',
+      extra: {'index': audioIndex, 'playlistLen': playlist.length},
+    );
+    if (audioIndex < 0 || audioIndex >= playlist.length) return;
+    _synchronizeGaplessTransition();
+    final origin = _captureOrigin();
+    _setPlaylistBackup(playlist);
+    final queue = List<Audio>.from(playlist);
+    final isShuffle = shuffle.value;
+    if (isShuffle) {
+      final willPlay = queue.removeAt(audioIndex);
+      queue.shuffle();
+      queue.insert(0, willPlay);
+    }
+    final activePlaylist = _setPlaylist(queue);
+    unawaited(
+      _loadAndPlay(
+        isShuffle ? 0 : audioIndex,
+        activePlaylist,
+        reason: 'user.playQueue',
+        origin: origin,
+      ),
+    );
   }
 
   void shuffleAndPlay(List<Audio> audios) {

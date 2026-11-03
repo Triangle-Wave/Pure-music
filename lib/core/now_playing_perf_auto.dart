@@ -42,7 +42,7 @@ class NowPlayingPerfAuto {
       _openNowPlaying();
       await Future<void>.delayed(const Duration(milliseconds: 400));
       final playback = PlayService.instance.playbackService;
-      playback.play(0, playlist);
+      playback.playQueue(0, playlist);
       const gap = Duration(
         milliseconds: int.fromEnvironment(
           'PERF_AUTO_GAP_MS',

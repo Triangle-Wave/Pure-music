@@ -54,7 +54,7 @@ class PlayAll<T> extends StatelessWidget {
               final playbackService = PlayService.instance.playbackService;
               playbackService.useShuffle(false);
               playbackService.setPlayMode(PlayMode.forward);
-              playbackService.play(0, contentList as List<Audio>);
+              playbackService.playQueue(0, contentList as List<Audio>);
               showTextOnSnackBar('已列表循环', variant: ToastVariant.success);
             }
           : null,
@@ -547,7 +547,7 @@ class MultiSelectPlaySelectedAudios<T> extends StatelessWidget {
       PlayService.instance.playbackService.shuffleAndPlay(audios);
       showTextOnSnackBar('已随机播放', variant: ToastVariant.success);
     } else {
-      PlayService.instance.playbackService.play(0, audios);
+      PlayService.instance.playbackService.playQueue(0, audios);
       showTextOnSnackBar('已开始播放', variant: ToastVariant.success);
     }
     multiSelectController.useMultiSelectView(false);

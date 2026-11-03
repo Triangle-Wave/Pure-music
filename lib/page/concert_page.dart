@@ -548,7 +548,7 @@ class _ConcertPageState extends State<ConcertPage> {
     if (playbackService.shuffle.value) {
       playbackService.useShuffle(false);
     }
-    playbackService.play(0, result.audios);
+    playbackService.playQueue(0, result.audios);
     ConcertSession.instance.begin(
       name: _currentShowName(),
       paths: [for (final audio in result.audios) audio.path],
