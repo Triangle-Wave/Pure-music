@@ -27,6 +27,8 @@ const MAX_PERSISTED_LARGE_COVERS: i64 = 64;
 const COVER_PRUNE_READ_BATCH: i64 = 2;
 const COVER_PRUNE_WRITE_BATCH: i64 = 16;
 const COVER_ACCESS_REFRESH_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
+/// 每个源文件在多图缓存中保留的图片序号数量上限。
+const MAX_PERSISTED_PICTURES_PER_PATH: i64 = 8;
 const DATABASE_LAYOUT_VERSION: &str = "2";
 static INDEX_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INDEX_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -745,6 +747,20 @@ fn init_schema(conn: &Connection) -> Result<()> {
           PRIMARY KEY (path, width, height)
         );
 
+        CREATE TABLE IF NOT EXISTS cover_pictures (
+          path TEXT NOT NULL,
+          picture_index INTEGER NOT NULL,
+          width INTEGER NOT NULL,
+          height INTEGER NOT NULL,
+          source_modified INTEGER NOT NULL,
+          source_size INTEGER NOT NULL,
+          last_accessed INTEGER DEFAULT 0,
+          png BLOB NOT NULL,
+          PRIMARY KEY (path, picture_index, width, height)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cover_pictures_path ON cover_pictures(path);
+
         CREATE TABLE IF NOT EXISTS listen_paths (
           id INTEGER PRIMARY KEY,
           path TEXT NOT NULL UNIQUE
@@ -1026,6 +1042,152 @@ fn write_cover_thumbnail(
     Ok(())
 }
 
+/// 每个源文件只保留最近访问的 `max_pictures` 个图片序号，超出部分按批次删除。
+/// 同一序号的多个尺寸共享该序号下最新的访问时间。
+fn prune_cover_pictures_for_path(
+    conn: &Connection,
+    path: &str,
+    max_pictures: i64,
+    batch_size: i64,
+) -> Result<()> {
+    let deleted = conn.execute(
+        "DELETE FROM cover_pictures
+         WHERE path = ?1
+           AND picture_index IN (
+             SELECT picture_index FROM cover_pictures
+             WHERE path = ?1
+             GROUP BY picture_index
+             ORDER BY MAX(last_accessed) DESC, picture_index DESC
+             LIMIT ?2 OFFSET ?3
+           )",
+        params![path, batch_size, max_pictures],
+    )?;
+    if deleted > 0 {
+        conn.execute_batch("PRAGMA incremental_vacuum(32);")?;
+    }
+    Ok(())
+}
+
+/// 按尺寸档位限制多图缓存总量，档位口径与封面缩略图缓存一致。
+fn prune_cover_picture_tier(conn: &Connection, tier: CoverTier, batch_size: i64) -> Result<()> {
+    let (condition, max_entries) = match tier {
+        CoverTier::Small => ("width <= 128 AND height <= 128", MAX_PERSISTED_SMALL_COVERS),
+        CoverTier::Medium => (
+            "(width > 128 OR height > 128) AND width <= 320 AND height <= 320",
+            MAX_PERSISTED_MEDIUM_COVERS,
+        ),
+        CoverTier::Large => ("width > 320 OR height > 320", MAX_PERSISTED_LARGE_COVERS),
+    };
+    let deleted = conn.execute(
+        &format!(
+            "DELETE FROM cover_pictures WHERE rowid IN (
+               SELECT rowid FROM cover_pictures
+               WHERE {condition}
+               ORDER BY last_accessed DESC, rowid DESC
+               LIMIT ?1 OFFSET ?2
+             )"
+        ),
+        params![batch_size, max_entries],
+    )?;
+    if deleted > 0 {
+        conn.execute_batch("PRAGMA incremental_vacuum(32);")?;
+    }
+    Ok(())
+}
+
+fn read_cover_picture(
+    conn: &Connection,
+    path: &str,
+    picture_index: u32,
+    width: u32,
+    height: u32,
+    source_modified: i64,
+    source_size: i64,
+) -> Result<Option<Vec<u8>>> {
+    let result: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT png, last_accessed FROM cover_pictures
+             WHERE path = ?1 AND picture_index = ?2 AND width = ?3 AND height = ?4
+               AND source_modified = ?5 AND source_size = ?6",
+            params![
+                path,
+                picture_index as i64,
+                width as i64,
+                height as i64,
+                source_modified,
+                source_size
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((png, last_accessed)) = result else {
+        return Ok(None);
+    };
+    let accessed_at = cover_access_timestamp();
+    if accessed_at.saturating_sub(last_accessed) >= COVER_ACCESS_REFRESH_INTERVAL_MS {
+        conn.execute(
+            "UPDATE cover_pictures SET last_accessed = ?5
+             WHERE path = ?1 AND picture_index = ?2 AND width = ?3 AND height = ?4",
+            params![
+                path,
+                picture_index as i64,
+                width as i64,
+                height as i64,
+                accessed_at
+            ],
+        )?;
+        prune_cover_picture_tier(conn, cover_tier(width, height), COVER_PRUNE_READ_BATCH)?;
+        prune_cover_pictures_for_path(
+            conn,
+            path,
+            MAX_PERSISTED_PICTURES_PER_PATH,
+            COVER_PRUNE_READ_BATCH,
+        )?;
+    }
+    Ok(Some(png))
+}
+
+fn write_cover_picture(
+    conn: &Connection,
+    path: &str,
+    picture_index: u32,
+    width: u32,
+    height: u32,
+    source_modified: i64,
+    source_size: i64,
+    png: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO cover_pictures(
+           path, picture_index, width, height, source_modified, source_size,
+           last_accessed, png
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(path, picture_index, width, height) DO UPDATE SET
+           source_modified = excluded.source_modified,
+           source_size = excluded.source_size,
+           last_accessed = excluded.last_accessed,
+           png = excluded.png",
+        params![
+            path,
+            picture_index as i64,
+            width as i64,
+            height as i64,
+            source_modified,
+            source_size,
+            cover_access_timestamp(),
+            png
+        ],
+    )?;
+    prune_cover_pictures_for_path(
+        conn,
+        path,
+        MAX_PERSISTED_PICTURES_PER_PATH,
+        COVER_PRUNE_WRITE_BATCH,
+    )?;
+    prune_cover_picture_tier(conn, cover_tier(width, height), COVER_PRUNE_WRITE_BATCH)?;
+    Ok(())
+}
+
 type CoverConnections = OnceLock<Mutex<HashMap<PathBuf, Connection>>>;
 static COVER_CONNECTIONS: CoverConnections = OnceLock::new();
 
@@ -1085,6 +1247,85 @@ pub fn get_cached_cover(
     })
     .map_err(|e| e.to_string())?;
     Ok(Some(png))
+}
+
+/// 读取指定序号的内嵌图片缩略图，缓存未命中时解码并回写。
+///
+/// 缓存数据库不可用时仅记录告警：缓存属于可选加速层，解码结果本身仍然返回。
+pub fn get_cached_picture(
+    index_path: String,
+    path: String,
+    picture_index: u32,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (source_modified, source_size) = match cover_source_signature(Path::new(&path)) {
+        Ok(signature) => signature,
+        Err(err) => {
+            log::warn!(
+                target: "library",
+                "read cover picture source signature failed for {path}: {err}"
+            );
+            return None;
+        }
+    };
+    let index_dir = PathBuf::from(index_path);
+    match with_cover_connection(&index_dir, |conn| {
+        read_cover_picture(
+            conn,
+            &path,
+            picture_index,
+            width,
+            height,
+            source_modified,
+            source_size,
+        )
+    }) {
+        Ok(Ok(Some(png))) => return Some(png),
+        Ok(Ok(None)) => {}
+        Ok(Err(err)) => {
+            log::warn!(
+                target: "library",
+                "read cached cover picture failed for {path}: {err:#}"
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                target: "library",
+                "open cover picture cache failed for {path}: {err:#}"
+            );
+        }
+    }
+
+    let Some(png) = crate::api::tag_reader::pictures::get_picture_by_index(
+        path.clone(),
+        picture_index,
+        width,
+        height,
+    ) else {
+        return None;
+    };
+    if let Err(err) = with_cover_connection(&index_dir, |conn| {
+        write_cover_picture(
+            conn,
+            &path,
+            picture_index,
+            width,
+            height,
+            source_modified,
+            source_size,
+            &png,
+        )
+    }) {
+        log::warn!(
+            target: "library",
+            "write cover picture cache failed for {path}: {err:#}"
+        );
+    }
+    Some(png)
 }
 
 fn unique_play_count(candidates: &HashMap<String, Vec<i64>>, key: &str) -> Option<i64> {
@@ -1548,13 +1789,16 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
         "DELETE FROM cover_thumbnails WHERE path NOT IN (SELECT path FROM audios)",
         [],
     )?;
+    // 虚拟轨的缓存键是整轨源文件路径，源文件本身不在 audios 表中；
+    // 多图缓存不参与孤儿清理，避免删除仍在使用的内嵌图片缩略图。
+    let removed_pictures = 0_i64;
 
     tx.commit()?;
 
     conn.execute_batch("PRAGMA optimize;")?;
     log::info!(
         target: "library",
-        "[perf] sqlite index sync audios={} changed={} removed={} folders={} changed={} removed={} meta={} coversRemoved={} mediaIdsReused={} mediaIdsRefreshed={} elapsed={}ms",
+        "[perf] sqlite index sync audios={} changed={} removed={} folders={} changed={} removed={} meta={} coversRemoved={} picturesRemoved={} mediaIdsReused={} mediaIdsRefreshed={} elapsed={}ms",
         current_audio_exact_paths.len(),
         audio_changes,
         removed_audios,
@@ -1563,6 +1807,7 @@ fn write_index_value_to_sqlite(index_dir: &Path, index: &serde_json::Value) -> R
         removed_folders,
         meta_changes,
         removed_covers,
+        removed_pictures,
         reused_media_ids,
         refreshed_media_ids,
         stopwatch.elapsed().as_millis(),
@@ -2438,6 +2683,62 @@ mod tests {
             read_cover_thumbnail(&conn, "track.flac", 48, 48, 11, 20).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn cover_picture_cache_round_trip_and_prunes_per_path() {
+        let base = test_dir("cover_picture_cache_limit");
+        let conn = open_connection(&base).unwrap();
+        init_schema(&conn).unwrap();
+
+        write_cover_picture(&conn, "track.flac", 0, 48, 48, 10, 20, &[1, 2, 3]).unwrap();
+        assert_eq!(
+            read_cover_picture(&conn, "track.flac", 0, 48, 48, 10, 20).unwrap(),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            read_cover_picture(&conn, "track.flac", 0, 48, 48, 11, 20).unwrap(),
+            None
+        );
+
+        for index in 0..(MAX_PERSISTED_PICTURES_PER_PATH + 3) {
+            write_cover_picture(
+                &conn,
+                "track.flac",
+                index as u32,
+                48,
+                48,
+                10,
+                20,
+                &[index as u8],
+            )
+            .unwrap();
+        }
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT picture_index) FROM cover_pictures
+                 WHERE path = 'track.flac'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, MAX_PERSISTED_PICTURES_PER_PATH);
+        assert_eq!(
+            read_cover_picture(
+                &conn,
+                "track.flac",
+                (MAX_PERSISTED_PICTURES_PER_PATH + 2) as u32,
+                48,
+                48,
+                10,
+                20,
+            )
+            .unwrap(),
+            Some(vec![(MAX_PERSISTED_PICTURES_PER_PATH + 2) as u8])
+        );
+
+        drop(conn);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

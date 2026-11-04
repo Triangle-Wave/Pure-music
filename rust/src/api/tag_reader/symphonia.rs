@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::Path;
 
+use anyhow::{anyhow, Context, Result};
 use flutter_rust_bridge::frb;
-use symphonia::core::meta::{MetadataContainer, RawValue, StandardTag, Tag as SymphoniaTag};
+use symphonia::core::meta::{
+    MetadataContainer, RawValue, StandardTag, Tag as SymphoniaTag,
+};
 
 use super::{join_deduped, optional_nonempty, parse_alternative_number};
+use super::pictures::{embedded_from_parts, kind_from_symphonia, EmbeddedPicture, PictureKind};
 
 use symphonia::{
     core::{
@@ -280,6 +284,65 @@ pub(super) fn read_symphonia_metadata(path: &Path) -> Option<SymphoniaMetadata> 
         picture: tags.picture,
         items: tags.items,
     })
+}
+
+fn collect_symphonia_visuals(
+    container: &MetadataContainer,
+    pictures: &mut Vec<EmbeddedPicture>,
+) {
+    for visual in &container.visuals {
+        if visual.data.is_empty() {
+            continue;
+        }
+        pictures.push(embedded_from_parts(
+            visual.media_type.as_deref(),
+            None,
+            kind_from_symphonia(visual.usage),
+            visual.data.to_vec(),
+        ));
+    }
+}
+
+/// 读取 Symphonia 能识别的全部视觉与图片附件，供多图列表与按序号取图使用。
+pub(super) fn read_symphonia_pictures(path: &Path) -> Result<Vec<EmbeddedPicture>> {
+    let source = fs::File::open(path)
+        .with_context(|| format!("open symphonia source: {}", path.display()))?;
+    let media_source = MediaSourceStream::new(Box::new(source), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+        hint.with_extension(extension);
+    }
+    let mut format = get_probe()
+        .probe(
+            &hint,
+            media_source,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|err| anyhow!("probe symphonia format for {}: {err}", path.display()))?;
+
+    let mut pictures = Vec::new();
+    if let Some(revision) = format.metadata().skip_to_latest() {
+        collect_symphonia_visuals(&revision.media, &mut pictures);
+        for track in &revision.per_track {
+            collect_symphonia_visuals(&track.metadata, &mut pictures);
+        }
+    }
+    for attachment in format.attachments() {
+        let Attachment::File(file) = attachment else {
+            continue;
+        };
+        if !is_image_attachment(&file.name, file.media_type.as_deref()) {
+            continue;
+        }
+        pictures.push(embedded_from_parts(
+            file.media_type.as_deref(),
+            file.description.as_deref().or(Some(file.name.as_str())),
+            PictureKind::Other,
+            file.data.to_vec(),
+        ));
+    }
+    Ok(pictures)
 }
 
 #[cfg(test)]

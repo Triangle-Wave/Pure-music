@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/log/app_log.dart';
@@ -7,17 +8,20 @@ import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/library/album_artwork.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/audio_sort.dart';
 import 'package:pure_music/component/artist_tile.dart';
 import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/online_candidate_dialog.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
+import 'package:pure_music/page/album_artwork_viewer.dart';
 import 'package:pure_music/page/uni_detail_header_layout.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
 import 'package:pure_music/page/uni_page.dart';
 import 'package:pure_music/page/uni_page_components.dart';
 import 'package:pure_music/services/online_album/online_album_service.dart';
+import 'package:pure_music/widget/album_artwork_switcher.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
@@ -157,7 +161,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   OnlineAlbumCandidateCache? _candidateCache;
   OnlineAlbumInfo? _onlineInfo;
   OnlineQueryStatus? _onlineStatus;
-  List<OnlineAlbumArtwork> _artworks = const [];
+  List<AlbumArtwork> _localArtworks = const [];
+  List<AlbumArtwork> _onlineMain = const [];
+  List<AlbumArtwork> _artworks = const [];
+  List<AlbumArtwork> _onlineSupplement = const [];
+  String? _supplementKey;
+  bool _explicitOnline = false;
+  int _localRequestId = 0;
   int _selectedArtwork = -1;
   bool _onlineLoading = false;
   bool _onlineDone = false;
@@ -171,6 +181,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   void initState() {
     super.initState();
     _primaryPic = _localCover();
+    unawaited(_loadLocalArtworks());
     if (AppSettings.instance.onlineAlbumInfoEnabled) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_loadOnlineInfo());
@@ -187,11 +198,18 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlineInfo = null;
       _onlineStatus = null;
       _candidateCache = null;
+      _localArtworks = const [];
+      _onlineMain = const [];
       _artworks = const [];
+      _onlineSupplement = const [];
+      _supplementKey = null;
+      _explicitOnline = false;
+      _localRequestId++;
       _selectedArtwork = -1;
       _onlineDone = false;
       _onlinePanelClosed = false;
       _primaryPic = _localCover();
+      unawaited(_loadLocalArtworks());
       if (AppSettings.instance.onlineAlbumInfoEnabled) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) unawaited(_loadOnlineInfo());
@@ -207,6 +225,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         ? _artworks[_selectedArtwork].url
         : null;
     final requestId = ++_onlineRequestId;
+    if (force) _supplementKey = null;
     setState(() => _onlineLoading = true);
     if (force && previousUrl != null) {
       await _onlineAlbum.invalidateArtwork(previousUrl);
@@ -234,31 +253,184 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     );
   }
 
+  /// 读取本地图片并立即生效，不等待在线信息。
+  Future<void> _loadLocalArtworks() async {
+    final requestId = ++_localRequestId;
+    try {
+      final local = await widget.album.artworks;
+      if (!mounted || requestId != _localRequestId) return;
+      final previousKey = _selectedKey();
+      final rebuilt = _composeArtworks(local);
+      var selected = previousKey == null
+          ? -1
+          : rebuilt.indexWhere((artwork) => artwork.key == previousKey);
+      if (selected < 0) selected = _preferredFrontIndex(rebuilt);
+      final nextKey = selected >= 0 ? rebuilt[selected].key : null;
+      ImageProvider? cover;
+      if (nextKey != null && nextKey != previousKey) {
+        cover = await _resolveArtwork(rebuilt[selected]);
+        if (!mounted || requestId != _localRequestId) return;
+      }
+      setState(() {
+        _localArtworks = List<AlbumArtwork>.unmodifiable(local);
+        _rebuildArtworks();
+        final index = nextKey == null
+            ? _preferredFrontIndex(_artworks)
+            : _artworks.indexWhere((artwork) => artwork.key == nextKey);
+        final finalIndex = index >= 0
+            ? index
+            : _preferredFrontIndex(_artworks);
+        _selectedArtwork = finalIndex;
+        if (finalIndex < 0) return;
+        final finalKey = _artworks[finalIndex].key;
+        if (finalKey == previousKey) return;
+        _primaryPic = finalKey == nextKey
+            ? Future<ImageProvider?>.value(cover)
+            : _resolveArtwork(_artworks[finalIndex]);
+      });
+    } catch (error) {
+      log.library.warn(
+        'album_local_artworks_failed',
+        '本地专辑图片加载失败',
+        fields: {
+          'album': widget.album.identityPath,
+          'error': error.runtimeType.toString(),
+        },
+      );
+      if (!mounted || requestId != _localRequestId) return;
+      setState(() => _primaryPic = _localCover());
+    }
+  }
+
+  String? _selectedKey() {
+    return _selectedArtwork >= 0 && _selectedArtwork < _artworks.length
+        ? _artworks[_selectedArtwork].key
+        : null;
+  }
+
+  /// 合并三份来源；显式选择在线候选且在线提供封面时，在线封面替换本地封面。
+  List<AlbumArtwork> _composeArtworks(List<AlbumArtwork> local) {
+    final onlineHasFront =
+        _onlineMain.any(
+          (artwork) => artwork.role == AlbumArtworkRole.front,
+        ) ||
+        _onlineSupplement.any(
+          (artwork) => artwork.role == AlbumArtworkRole.front,
+        );
+    final base = _explicitOnline && onlineHasFront
+        ? local.where((artwork) => artwork.role != AlbumArtworkRole.front)
+        : local;
+    return mergeArtworks(<AlbumArtwork>[
+      ...base,
+      ..._onlineMain,
+      ..._onlineSupplement,
+    ]);
+  }
+
+  /// 用三份来源重建展示列表；每次只更新一份来源后调用。
+  void _rebuildArtworks() {
+    _artworks = _composeArtworks(_localArtworks);
+  }
+
+  /// 当前补充图片是否仍属于 [candidateId]；候选变化时旧补充图必须丢弃。
+  List<AlbumArtwork> _supplementFor(String? candidateId) {
+    return candidateId != null && candidateId == _supplementKey
+        ? _onlineSupplement
+        : const <AlbumArtwork>[];
+  }
+
+  /// 优先本地文件夹封面，其次任意封面，最后退回列表第 0 项。
+  int _preferredFrontIndex(List<AlbumArtwork> artworks) {
+    if (artworks.isEmpty) return -1;
+    var index = artworks.indexWhere(
+      (artwork) =>
+          artwork.role == AlbumArtworkRole.front &&
+          artwork.source == AlbumArtworkSource.folderFile,
+    );
+    if (index >= 0) return index;
+    index = artworks.indexWhere(
+      (artwork) => artwork.role == AlbumArtworkRole.front,
+    );
+    return index >= 0 ? index : 0;
+  }
+
+  bool _needsOnlineSupplements(List<AlbumArtwork> artworks) {
+    bool missing(AlbumArtworkRole role) {
+      return !artworks.any((artwork) => artwork.role == role);
+    }
+
+    return missing(AlbumArtworkRole.back) ||
+        missing(AlbumArtworkRole.disc) ||
+        missing(AlbumArtworkRole.booklet);
+  }
+
+  AlbumArtworkRole _roleOfOnline(String role) {
+    return switch (role.trim().toLowerCase()) {
+      'front' => AlbumArtworkRole.front,
+      'back' => AlbumArtworkRole.back,
+      'disc' => AlbumArtworkRole.disc,
+      'booklet' => AlbumArtworkRole.booklet,
+      _ => AlbumArtworkRole.other,
+    };
+  }
+
   Future<void> _applyCandidateCache(
     OnlineAlbumCandidateCache? cache, {
     String? previousUrl,
     int? requestId,
   }) async {
     final info = cache?.info;
-    final artworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
+    final onlineArtworks = info?.artworks ?? const <OnlineAlbumArtwork>[];
     // 显式选择候选时直接展示其封面；否则保持本地封面优先，本地没有
     // 封面时才使用在线图。
     final explicit = cache?.hasExplicitSelection ?? false;
-    var selected = previousUrl != null
-        ? artworks.indexWhere((artwork) => artwork.url == previousUrl)
-        : -1;
-    if (selected < 0 && explicit && artworks.isNotEmpty) {
-      selected = 0;
+    final candidate = cache?.activeCandidate;
+    final candidateId = candidate?.id.trim();
+    final supplement = _supplementFor(candidateId);
+
+    final mapped = <AlbumArtwork>[
+      for (final artwork in onlineArtworks)
+        AlbumArtwork(
+          role: _roleOfOnline(artwork.role),
+          source: AlbumArtworkSource.online,
+          label: artwork.label,
+          url: artwork.url,
+          largeUrl: artwork.largeUrl,
+        ),
+    ];
+    // 查询失败时保留上一轮已展示的在线图，避免界面闪回本地封面。
+    final previousOnline = cache == null ? _onlineMain : const <AlbumArtwork>[];
+    final merged = mergeArtworks(<AlbumArtwork>[
+      ..._localArtworks,
+      ...supplement,
+      ...previousOnline,
+      ...mapped,
+    ]);
+
+    final currentKey = _selectedKey();
+    var selected = -1;
+    if (previousUrl != null) {
+      selected = merged.indexWhere(
+        (artwork) =>
+            artwork.source == AlbumArtworkSource.online &&
+            artwork.url == previousUrl,
+      );
     }
-    if (selected < 0 && !explicit && artworks.isNotEmpty) {
-      final localCover = await _localCover();
-      if (!mounted || (requestId != null && requestId != _onlineRequestId)) {
-        return;
-      }
-      if (localCover == null) selected = 0;
+    if (selected < 0 && explicit) {
+      selected = merged.indexWhere(
+        (artwork) =>
+            artwork.source == AlbumArtworkSource.online &&
+            artwork.role == AlbumArtworkRole.front,
+      );
     }
+    if (selected < 0 && currentKey != null) {
+      selected = merged.indexWhere((artwork) => artwork.key == currentKey);
+    }
+    if (selected < 0) selected = _preferredFrontIndex(merged);
+    final selectedKey = selected >= 0 ? merged[selected].key : null;
+
     final cover = selected >= 0
-        ? await _resolveArtwork(artworks[selected])
+        ? await _resolveArtwork(merged[selected])
         : await _localCover();
     if (!mounted || (requestId != null && requestId != _onlineRequestId)) {
       return;
@@ -269,9 +441,91 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _candidateCache = cache;
       _onlineInfo = info;
       _onlineStatus = _onlineAlbum.queryStatusFor(widget.album);
-      _artworks = artworks;
-      _selectedArtwork = selected;
-      _primaryPic = Future<ImageProvider?>.value(cover);
+      _explicitOnline = explicit;
+      _onlineMain = cache == null ? _onlineMain : mapped;
+      if (candidateId == null || candidateId != _supplementKey) {
+        _onlineSupplement = const [];
+        _supplementKey = null;
+      }
+      _rebuildArtworks();
+
+      final index = selectedKey == null
+          ? -1
+          : _artworks.indexWhere((artwork) => artwork.key == selectedKey);
+      final finalIndex = index >= 0
+          ? index
+          : _preferredFrontIndex(_artworks);
+      _selectedArtwork = finalIndex;
+      if (finalIndex < 0) {
+        _primaryPic = Future<ImageProvider?>.value(cover);
+      } else if (_artworks[finalIndex].key == selectedKey) {
+        _primaryPic = Future<ImageProvider?>.value(cover);
+      } else {
+        _primaryPic = _resolveArtwork(_artworks[finalIndex]);
+      }
+    });
+
+    if (candidate != null && _needsOnlineSupplements(_artworks)) {
+      unawaited(_loadSupplements(candidate));
+    }
+  }
+
+  /// 补查在线封底、碟片与内页，结果只并入图片列表，不替换当前选中图。
+  Future<void> _loadSupplements(OnlineAlbumCandidate candidate) async {
+    final key = candidate.id.trim();
+    if (key.isEmpty || _supplementKey == key) return;
+    _supplementKey = key;
+
+    List<AlbumArtwork> mapped = const [];
+    try {
+      final extra = await _onlineAlbum.fetchSupplementArtworks(candidate);
+      mapped = <AlbumArtwork>[
+        for (final artwork in extra)
+          AlbumArtwork(
+            role: _roleOfOnline(artwork.role),
+            source: AlbumArtworkSource.online,
+            label: artwork.label,
+            url: artwork.url,
+            largeUrl: artwork.largeUrl,
+          ),
+      ];
+    } catch (error) {
+      log.library.warn(
+        'online_album_supplement_ui_failed',
+        '在线专辑补充图片加载失败',
+        fields: {
+          'candidate': candidate.source,
+          'error': error.runtimeType.toString(),
+        },
+      );
+      if (_supplementKey == key) _supplementKey = null;
+      return;
+    }
+    if (!mounted || _supplementKey != key) return;
+    if (mapped.isEmpty) {
+      // 成功但没有补充图时允许下次进入页面重试，避免网络短暂失败后永久缺失。
+      _supplementKey = null;
+      return;
+    }
+
+    final currentKey = _selectedKey();
+    final supplement = mergeArtworks(<AlbumArtwork>[
+      ..._onlineSupplement,
+      ...mapped,
+    ]);
+
+    setState(() {
+      _onlineSupplement = supplement;
+      _rebuildArtworks();
+      var index = currentKey == null
+          ? -1
+          : _artworks.indexWhere((artwork) => artwork.key == currentKey);
+      if (index < 0) index = _preferredFrontIndex(_artworks);
+      if (index < 0) return;
+      _selectedArtwork = index;
+      if (_artworks[index].key != currentKey) {
+        _primaryPic = _resolveArtwork(_artworks[index]);
+      }
     });
   }
 
@@ -349,19 +603,117 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     await _applyCandidateCache(cache, requestId: requestId);
   }
 
-  Future<ImageProvider?> _resolveArtwork(OnlineAlbumArtwork artwork) async {
+  /// 读取一张专辑图片作为主图；来源之间互不覆盖，失败统一回退本地封面。
+  Future<ImageProvider?> _resolveArtwork(AlbumArtwork artwork) async {
     try {
-      final provider = await _onlineAlbum.artwork(artwork.url);
-      if (provider != null) return provider;
-      return _localCover();
+      if (artwork.source == AlbumArtworkSource.online) {
+        final provider = await _onlineAlbum.artwork(artwork.url ?? '');
+        return provider ?? await _localCover();
+      }
+      final path = artwork.path;
+      if (path == null || path.isEmpty) return _localCover();
+      final provider = await CoverImageCache.instance.getArtwork(
+        path: path,
+        pictureIndex: artwork.pictureIndex,
+        modified: artwork.modified,
+        width: 600,
+        height: 600,
+      );
+      return provider ?? await _localCover();
     } catch (error) {
       log.library.warn(
-        'online_album_artwork_ui_failed',
-        '在线封面显示失败',
-        fields: {'error': error.runtimeType.toString()},
+        'album_artwork_ui_failed',
+        '专辑图片显示失败',
+        fields: {
+          'source': artwork.source.name,
+          'error': error.runtimeType.toString(),
+        },
       );
       return _localCover();
     }
+  }
+
+  Future<ImageProvider?> _thumbnailOf(AlbumArtwork artwork, int size) async {
+    try {
+      if (artwork.source == AlbumArtworkSource.online) {
+        return _onlineAlbum.artwork(artwork.url ?? '');
+      }
+      final path = artwork.path;
+      if (path == null || path.isEmpty) return null;
+      return CoverImageCache.instance.getArtwork(
+        path: path,
+        pictureIndex: artwork.pictureIndex,
+        modified: artwork.modified,
+        width: size,
+        height: size,
+      );
+    } catch (error) {
+      log.library.warn(
+        'album_artwork_thumbnail_failed',
+        '专辑缩略图加载失败',
+        fields: {
+          'source': artwork.source.name,
+          'error': error.runtimeType.toString(),
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 查看器大图：在线图优先用 largeUrl，本地图按目标尺寸解码。
+  Future<ImageProvider?> _loadArtworkAtSize(
+    AlbumArtwork artwork,
+    int width,
+    int height,
+  ) async {
+    try {
+      if (artwork.source == AlbumArtworkSource.online) {
+        final provider = await _onlineAlbum.artwork(
+          artwork.largeUrl ?? artwork.url ?? '',
+        );
+        return provider ?? await _localCover();
+      }
+      final path = artwork.path;
+      if (path == null || path.isEmpty) return _localCover();
+      // 查看器传入的是物理像素，缓存层会再乘一次设备像素比，这里先换算回逻辑像素。
+      final ratio = MediaQuery.devicePixelRatioOf(context);
+      final maxLogical = (2048 / ratio).ceil().clamp(1, 2048).toInt();
+      final logicalWidth = (width / ratio).round().clamp(1, maxLogical).toInt();
+      final logicalHeight = (height / ratio).round().clamp(1, maxLogical).toInt();
+      final provider = await CoverImageCache.instance.getArtwork(
+        path: path,
+        pictureIndex: artwork.pictureIndex,
+        modified: artwork.modified,
+        width: logicalWidth,
+        height: logicalHeight,
+      );
+      return provider ?? await _localCover();
+    } catch (error) {
+      log.library.warn(
+        'album_artwork_viewer_failed',
+        '专辑大图加载失败',
+        fields: {
+          'source': artwork.source.name,
+          'error': error.runtimeType.toString(),
+        },
+      );
+      return _localCover();
+    }
+  }
+
+  void _openArtworkViewer() {
+    if (_artworks.isEmpty) return;
+    final index = _selectedArtwork < 0
+        ? 0
+        : _selectedArtwork.clamp(0, _artworks.length - 1).toInt();
+    unawaited(
+      showAlbumArtworkViewer(
+        context,
+        artworks: _artworks,
+        initialIndex: index,
+        loader: _loadArtworkAtSize,
+      ),
+    );
   }
 
   /// 本地专辑封面读取失败时降级为空，避免 Future 错误进入界面。
@@ -430,12 +782,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       primaryPicFallback: widget.album.cachedDetailCover,
       headerTrailing: _headerTrailing,
       headerCoverOverlay: _artworks.isNotEmpty
-          ? _ArtworkSwitcher(
+          ? AlbumArtworkSwitcher(
               artworks: _artworks,
               selectedIndex: _selectedArtwork,
               onSelect: _selectArtwork,
+              thumbnailOf: _thumbnailOf,
             )
           : null,
+      onPrimaryPicTap: _artworks.isNotEmpty ? _openArtworkViewer : null,
     );
   }
 }
@@ -447,6 +801,7 @@ class _AlbumDetailScaffold extends StatelessWidget {
     this.primaryPicFallback,
     this.headerTrailing,
     this.headerCoverOverlay,
+    this.onPrimaryPicTap,
   });
 
   final Album album;
@@ -454,6 +809,7 @@ class _AlbumDetailScaffold extends StatelessWidget {
   final ImageProvider? primaryPicFallback;
   final Widget? headerTrailing;
   final Widget? headerCoverOverlay;
+  final VoidCallback? onPrimaryPicTap;
 
   @override
   Widget build(BuildContext context) {
@@ -481,6 +837,7 @@ class _AlbumDetailScaffold extends StatelessWidget {
       // 内容区下改放到标题下方，避免挤压标题、操作区与正文高度。
       headerTrailingSideMinWidth: 1100,
       headerCoverOverlay: headerCoverOverlay,
+      onPrimaryPicTap: onPrimaryPicTap,
       secondaryContent: secondaryContent,
       secondaryContentBuilder: (context, audio, i, ctl, view) =>
           _songTile(audio, i, secondaryContent, ctl, view, showDiscSections),
@@ -712,184 +1069,6 @@ class OnlineAlbumPanel extends StatelessWidget {
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
       constraints: const BoxConstraints.tightFor(width: 26, height: 26),
-    );
-  }
-}
-
-/// 封面切换器：左右按钮循环切换全部图片，缩略图直接选中。
-class _ArtworkSwitcher extends StatefulWidget {
-  const _ArtworkSwitcher({
-    required this.artworks,
-    required this.selectedIndex,
-    required this.onSelect,
-  });
-
-  final List<OnlineAlbumArtwork> artworks;
-  final int selectedIndex;
-  final ValueChanged<int> onSelect;
-
-  @override
-  State<_ArtworkSwitcher> createState() => _ArtworkSwitcherState();
-}
-
-class _ArtworkSwitcherState extends State<_ArtworkSwitcher> {
-  final Map<String, Future<ImageProvider?>> _thumbnails = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _primeThumbnails();
-  }
-
-  @override
-  void didUpdateWidget(covariant _ArtworkSwitcher oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _primeThumbnails();
-  }
-
-  void _primeThumbnails() {
-    for (final index in _visibleIndexes()) {
-      final url = widget.artworks[index].url;
-      if (_thumbnails.containsKey(url)) continue;
-      final future = OnlineAlbumService.instance.artwork(url);
-      _thumbnails[url] = future;
-      unawaited(
-        future.then<void>((provider) {
-          if (provider == null && identical(_thumbnails[url], future)) {
-            _thumbnails.remove(url);
-          }
-        }),
-      );
-    }
-  }
-
-  List<int> _visibleIndexes() {
-    final total = widget.artworks.length;
-    if (total <= 4) return List<int>.generate(total, (index) => index);
-    final selected = widget.selectedIndex.clamp(0, total - 1).toInt();
-    final start = (selected - 1).clamp(0, total - 4).toInt();
-    return List<int>.generate(4, (index) => start + index);
-  }
-
-  void _move(int delta) {
-    final total = widget.artworks.length;
-    if (total == 0) return;
-    // 未选中在线封面时，右箭头从第一张开始，左箭头从最后一张开始。
-    final current = widget.selectedIndex;
-    final start = current < 0 ? (delta > 0 ? -1 : 0) : current;
-    widget.onSelect((start + delta + total) % total);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final total = widget.artworks.length;
-    if (total == 0) return const SizedBox.shrink();
-    return Align(
-      alignment: Alignment.bottomCenter,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: scheme.surface.withValues(alpha: 0.86),
-            borderRadius: BorderRadius.circular(999),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.18),
-                blurRadius: 8,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (total > 1)
-                  _arrow(scheme, Symbols.chevron_left, () => _move(-1)),
-                for (final index in _visibleIndexes())
-                  _thumbnail(scheme, index),
-                if (total > 1)
-                  _arrow(scheme, Symbols.chevron_right, () => _move(1)),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _arrow(ColorScheme scheme, IconData icon, VoidCallback onTap) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: onTap,
-        child: SizedBox(
-          width: 20,
-          height: 22,
-          child: Icon(icon, size: 15, color: scheme.onSurfaceVariant),
-        ),
-      ),
-    );
-  }
-
-  Widget _thumbnail(ColorScheme scheme, int index) {
-    final artwork = widget.artworks[index];
-    final selected = index == widget.selectedIndex;
-    return Tooltip(
-      message: artwork.label,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: () => widget.onSelect(index),
-          child: Container(
-            width: 22,
-            height: 22,
-            margin: const EdgeInsets.symmetric(horizontal: 1),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(3),
-              border: Border.all(
-                color: selected ? scheme.primary : Colors.transparent,
-                width: 1.5,
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: FutureBuilder<ImageProvider?>(
-                future: _thumbnails[artwork.url],
-                builder: (context, snapshot) {
-                  final provider = snapshot.data;
-                  if (provider == null) {
-                    return Icon(
-                      Symbols.album,
-                      size: 13,
-                      color: scheme.onSurfaceVariant,
-                    );
-                  }
-                  final target = (22 * MediaQuery.devicePixelRatioOf(context))
-                      .round();
-                  return Image(
-                    image: ResizeImage(
-                      provider,
-                      width: target,
-                      height: target,
-                      allowUpscaling: false,
-                    ),
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                    errorBuilder: (_, _, _) => Icon(
-                      Symbols.album,
-                      size: 13,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

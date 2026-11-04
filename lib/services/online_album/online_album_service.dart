@@ -98,6 +98,12 @@ class OnlineAlbumService {
   final Map<String, OnlineAlbumCandidateCache> _albumMemory = {};
   final Map<String, OnlineQueryStatus> _queryStatuses = {};
   final Map<String, Future<ImageProvider?>> _artworkMemory = {};
+
+  /// 补充图片查询的进行中请求与内存结果，按候选 id 键控。
+  final Map<String, Future<List<OnlineAlbumArtwork>>> _pendingSupplementLookups =
+      {};
+  final Map<String, List<OnlineAlbumArtwork>> _supplementArtworks = {};
+  static const Duration _supplementTimeout = Duration(seconds: 8);
   Directory? _rootDir;
 
   /// 最近一次查询的状态；页面据此区分“无匹配”与“请求失败”。
@@ -226,6 +232,8 @@ class OnlineAlbumService {
     _pendingLookups.clear();
     _queryStatuses.clear();
     _artworkMemory.clear();
+    _pendingSupplementLookups.clear();
+    _supplementArtworks.clear();
     try {
       final roots = <Directory>[await _root(), ...await _legacyRoots()];
       for (final directoryRoot in roots) {
@@ -268,7 +276,10 @@ class OnlineAlbumService {
       );
       previous = null;
     }
-    if (!force && previous != null && previous.candidates.isNotEmpty) {
+    if (!force &&
+        previous != null &&
+        previous.candidates.isNotEmpty &&
+        !_needsSupplementRequery(previous)) {
       final hasMatch = previous.candidates.any(
         (candidate) => candidate.score >= minimumOnlineAlbumScore,
       );
@@ -296,6 +307,19 @@ class OnlineAlbumService {
         '在线专辑查询没有结果',
         fields: {'cacheKey': key, 'hasCache': previous != null},
       );
+      // 旧 schema 缓存升级到新版本，避免每次都因为缺少补充图片而重查。
+      if (previous != null &&
+          previous.schemaVersion <
+              OnlineAlbumCandidateCache.currentSchemaVersion) {
+        final upgraded = OnlineAlbumCandidateCache(
+          candidates: previous.candidates,
+          selectedCandidateId: previous.selectedCandidateId,
+          disabled: previous.disabled,
+          savedAt: previous.savedAt ?? _clock(),
+        );
+        await _writeCandidateCache(key, upgraded);
+        _albumMemory[key] = upgraded;
+      }
       return previous;
     }
     final hasMatch = fetched.any(
@@ -326,6 +350,19 @@ class OnlineAlbumService {
     await _writeCandidateCache(key, cache);
     _albumMemory[key] = cache;
     return cache;
+  }
+
+  /// 旧 schema 缓存缺少封底、碟片或内页时允许重新查询。
+  bool _needsSupplementRequery(OnlineAlbumCandidateCache cache) {
+    if (cache.schemaVersion >=
+        OnlineAlbumCandidateCache.currentSchemaVersion) {
+      return false;
+    }
+    final covers = cache.info?.covers;
+    if (covers == null) return false;
+    return covers.back == null &&
+        covers.discs.isEmpty &&
+        covers.booklets.isEmpty;
   }
 
   Future<OnlineAlbumCandidateCache?> _readCandidateCache(String key) async {
@@ -446,6 +483,7 @@ class OnlineAlbumService {
     cnCandidates.sort((a, b) => b.score.compareTo(a.score));
     final bestCn = cnCandidates.isEmpty ? null : cnCandidates.first;
     if (bestCn != null && bestCn.score >= minimumOnlineAlbumScore) {
+      _logArtworkCounts(source: bestCn.source, covers: bestCn.info.covers);
       return cnCandidates;
     }
 
@@ -633,7 +671,183 @@ class OnlineAlbumService {
       );
     }
     result.sort((a, b) => b.score.compareTo(a.score));
+    _logArtworkCounts(source: 'MusicBrainz', covers: covers);
     return result;
+  }
+
+  /// 补查在线专辑的封底、碟片与内页。
+  ///
+  /// 国内源候选只有封面，命中后由页面在后台调用本方法，按标题与艺术家重新
+  /// 搜索 MusicBrainz 并读取 Cover Art Archive。结果不写入主候选缓存，也不
+  /// 覆盖已有封面；相同候选的并发请求合并为一次查询，超时或失败返回空列表。
+  Future<List<OnlineAlbumArtwork>> fetchSupplementArtworks(
+    OnlineAlbumCandidate candidate,
+  ) async {
+    if (!AppSettings.instance.onlineAlbumInfoEnabled) {
+      return const <OnlineAlbumArtwork>[];
+    }
+    final key = candidate.id.trim();
+    if (key.isEmpty) return const <OnlineAlbumArtwork>[];
+    final pending = _pendingSupplementLookups[key];
+    if (pending != null) return pending;
+    final memory = _supplementArtworks[key];
+    if (memory != null) return memory;
+
+    final future = _loadSupplementArtworks(candidate);
+    _pendingSupplementLookups[key] = future;
+    unawaited(
+      future.whenComplete(() {
+        if (identical(_pendingSupplementLookups[key], future)) {
+          _pendingSupplementLookups.remove(key);
+        }
+      }),
+    );
+    return future;
+  }
+
+  Future<List<OnlineAlbumArtwork>> _loadSupplementArtworks(
+    OnlineAlbumCandidate candidate,
+  ) async {
+    try {
+      final covers = await _supplementCovers(
+        candidate,
+      ).timeout(_supplementTimeout);
+      if (covers == null || covers.isEmpty) {
+        return const <OnlineAlbumArtwork>[];
+      }
+      final artworks = _supplementArtworksFromCovers(covers);
+      if (artworks.isEmpty) return const <OnlineAlbumArtwork>[];
+      _supplementArtworks[candidate.id.trim()] = artworks;
+      _logArtworkCounts(source: 'Cover Art Archive', covers: covers);
+      return artworks;
+    } on TimeoutException catch (_) {
+      log.library.warn(
+        'online_album_supplement_timeout',
+        '在线专辑补充图片查询超时',
+        fields: {'source': candidate.source},
+      );
+      return const <OnlineAlbumArtwork>[];
+    } catch (error) {
+      log.library.warn(
+        'online_album_supplement_failed',
+        '在线专辑补充图片查询失败',
+        fields: {
+          'source': candidate.source,
+          'error': error.runtimeType.toString(),
+        },
+      );
+      return const <OnlineAlbumArtwork>[];
+    }
+  }
+
+  Future<CoverArtSet?> _supplementCovers(
+    OnlineAlbumCandidate candidate,
+  ) async {
+    final info = candidate.info;
+    final releaseGroupId = info.releaseGroupId.trim();
+    if (candidate.id.startsWith('mb:')) {
+      if (releaseGroupId.isEmpty) return null;
+      return _coverArt.fetch(releaseGroupId: releaseGroupId);
+    }
+    // 国内源候选的 releaseGroupId 是本地生成的伪标识，按标题与艺术家重新
+    // 搜索 MusicBrainz，只接受达到匹配阈值的最高分结果。
+    final title = info.title.trim();
+    if (title.isEmpty) return null;
+    final artist = (info.artist ?? candidate.artist).trim();
+    final groups = await _musicBrainz.searchReleaseGroups(
+      release: title,
+      artist: artist,
+    );
+    if (groups.isEmpty) return null;
+    final trackCount = info.trackCount ?? candidate.trackCount ?? 0;
+    MbReleaseGroup? best;
+    var bestScore = double.negativeInfinity;
+    for (final group in groups.take(8)) {
+      final score = scoreReleaseGroupCandidate(
+        albumTitle: title,
+        artist: artist,
+        trackCount: trackCount,
+        yearHint: info.year,
+        group: group,
+      );
+      if (score > bestScore) {
+        bestScore = score;
+        best = group;
+      }
+    }
+    if (best == null || bestScore < minimumOnlineAlbumScore) return null;
+    List<MbRelease> releases = const <MbRelease>[];
+    try {
+      releases = await _musicBrainz.browseReleases(best.id);
+    } on MusicBrainzException catch (error) {
+      log.library.debug(
+        'online_album_supplement_release_failed',
+        '补充图片的发行版查询失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    final release = pickBestRelease(releases, trackCount);
+    return _coverArt.fetch(
+      releaseGroupId: best.id,
+      releaseId: release?.id,
+    );
+  }
+
+  /// 从补充查询结果中挑出封底、碟片与内页，封面由原有候选保留。
+  List<OnlineAlbumArtwork> _supplementArtworksFromCovers(CoverArtSet covers) {
+    final result = <OnlineAlbumArtwork>[];
+    final back = covers.back;
+    if (back != null) {
+      result.add(
+        OnlineAlbumArtwork(
+          url: back.url,
+          largeUrl: back.largeUrl,
+          role: 'back',
+          label: '封底',
+        ),
+      );
+    }
+    final discs = covers.discs;
+    for (var i = 0; i < discs.length; i++) {
+      result.add(
+        OnlineAlbumArtwork(
+          url: discs[i].url,
+          largeUrl: discs[i].largeUrl,
+          role: 'disc',
+          label: discs.length == 1 ? '碟片' : '碟片 ${i + 1}',
+        ),
+      );
+    }
+    for (var i = 0; i < covers.booklets.length; i++) {
+      result.add(
+        OnlineAlbumArtwork(
+          url: covers.booklets[i].url,
+          largeUrl: covers.booklets[i].largeUrl,
+          role: 'booklet',
+          label: '内页 ${i + 1}',
+        ),
+      );
+    }
+    return List.unmodifiable(result);
+  }
+
+  void _logArtworkCounts({
+    required String source,
+    required CoverArtSet? covers,
+    String? cacheKey,
+  }) {
+    log.library.info(
+      'online_album_artwork_counts',
+      '在线专辑图片数量',
+      fields: {
+        'source': source,
+        'cacheKey': cacheKey ?? '',
+        'front': covers?.front == null ? 0 : 1,
+        'back': covers?.back == null ? 0 : 1,
+        'disc': covers?.discs.length ?? 0,
+        'booklet': covers?.booklets.length ?? 0,
+      },
+    );
   }
 
   OnlineAlbumCandidate _buildMusicBrainzCandidate({
@@ -669,14 +883,15 @@ class OnlineAlbumService {
       releaseDate: releaseDate,
       trackCount: resolvedTrackCount,
     );
+    final fallbackFrontUrl =
+        '$coverArtArchiveBaseUrl/release-group/'
+        '${Uri.encodeComponent(group.id)}';
     final coversForCandidate =
         covers ??
         CoverArtSet(
           front: CoverArtImage(
-            url:
-                '$coverArtArchiveBaseUrl/release-group/'
-                '${Uri.encodeComponent(group.id)}/front-500',
-            largeUrl: null,
+            url: '$fallbackFrontUrl/front-500',
+            largeUrl: '$fallbackFrontUrl/front-1200',
             front: true,
             back: false,
             types: const ['front'],

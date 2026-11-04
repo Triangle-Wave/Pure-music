@@ -14,9 +14,9 @@ const int coverDiskCacheMaxBytes = 256 << 20;
 /// 封面二级磁盘缓存。
 ///
 /// 目录为缓存根下的 `covers/`（默认 `<数据根>/cache/covers/`）：本地图片按
-/// “源路径 + 修改时间 + 目标像素尺寸”生成 PNG 缩略图，在线图片按 URL 哈希
-/// 保存下载结果。文件名只含 SHA-1 摘要与内容扩展名，不把原始路径或 URL
-/// 写进目录。旧位置的文件可继续作为只读回退命中。
+/// “源路径 + 修改时间 + 目标像素尺寸 + 图片序号”生成 PNG 缩略图，文件夹图片
+/// 的序号固定为 -1；在线图片按 URL 哈希保存下载结果。文件名只含 SHA-1 摘要与
+/// 内容扩展名，不把原始路径或 URL 写进目录。旧位置的文件可继续作为只读回退命中。
 ///
 /// 所有磁盘错误都降级为未命中，调用方继续使用内存缓存与网络链路；缓存文件
 /// 损坏时直接删除，下一次请求重新生成或下载。
@@ -160,11 +160,14 @@ class CoverDiskCache {
     required int width,
     required int height,
     int? modified,
+    int? pictureIndex,
   }) {
     final normalized = path.normalize(sourcePath).toLowerCase();
     final stamp = modified ?? 0;
     final size = '${_bucket(width)}x${_bucket(height)}';
-    final raw = 'local|$normalized|$stamp|$size';
+    // 图片序号区分同一文件的不同内嵌图；文件夹图片固定为 -1。
+    final index = pictureIndex ?? -1;
+    final raw = 'local|$normalized|$stamp|$size|#$index';
     return sha1.convert(utf8.encode(raw)).toString();
   }
 
@@ -178,11 +181,14 @@ class CoverDiskCache {
   }
 
   /// 同步查询本地缩略图，供列表首帧直接使用 `FileImage`。
+  ///
+  /// [pictureIndex] 非空时为内嵌图片序号，文件夹图片固定为 -1。
   File? cachedLocalThumbnailFile({
     required String sourcePath,
     required int width,
     required int height,
     int? modified,
+    int? pictureIndex,
   }) {
     final directory = _directory;
     if (directory == null) return null;
@@ -191,6 +197,7 @@ class CoverDiskCache {
       width: width,
       height: height,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
     final known = _localFiles[key];
     if (known != null && _isUsableSync(known)) return known;
@@ -217,12 +224,14 @@ class CoverDiskCache {
     required int width,
     required int height,
     int? modified,
+    int? pictureIndex,
   }) async {
     final file = cachedLocalThumbnailFile(
       sourcePath: sourcePath,
       width: width,
       height: height,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
     if (file == null) return null;
     try {
@@ -242,6 +251,7 @@ class CoverDiskCache {
       width: width,
       height: height,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
     _localFiles.remove(key);
     return null;
@@ -254,6 +264,7 @@ class CoverDiskCache {
     required int height,
     required Uint8List bytes,
     int? modified,
+    int? pictureIndex,
   }) async {
     if (!_hasPngSignature(bytes)) return null;
     final directory = await _readyRoot();
@@ -263,6 +274,7 @@ class CoverDiskCache {
       width: width,
       height: height,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
     final file = File(path.join(directory.path, 'l_$key.png'));
     try {

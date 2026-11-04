@@ -13,6 +13,8 @@ import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/workload_policy.dart';
 import 'package:pure_music/core/page_sort.dart';
 import 'package:pure_music/native/rust/api/library_db.dart' as library_db;
+import 'package:pure_music/native/rust/api/tag_reader.dart';
+import 'package:pure_music/library/album_artwork.dart';
 import 'package:pure_music/library/audio_sort.dart';
 import 'package:pure_music/library/cue_segment_path.dart';
 import 'package:pure_music/library/track_override.dart';
@@ -85,6 +87,82 @@ const List<String> folderCoverSubdirectoryNames = <String>['jacket', 'scans'];
 
 /// 已解析的目录封面：图片路径与修改时间（秒）。
 typedef FolderCoverFile = ({String path, int modified});
+
+/// 多图候选基名（不含扩展名），按角色分组。
+const List<String> folderArtworkFrontBaseNames = <String>[
+  'cover',
+  'folder',
+  'front',
+];
+const List<String> folderArtworkBackBaseNames = <String>[
+  'back',
+  'backcover',
+  'rear',
+];
+const List<String> folderArtworkDiscBaseNames = <String>[
+  'disc',
+  'cd',
+  'media',
+  'tray',
+];
+const List<String> folderArtworkBookletBaseNames = <String>[
+  'booklet',
+  'inlay',
+  'leaflet',
+  'page',
+  'scan',
+  'inside',
+];
+
+/// 全部多图候选文件名，按封面、封底、碟片、内页顺序展开扩展名。
+final List<String> folderArtworkFileNames = List<String>.unmodifiable(
+  <String>[
+    for (final base in <String>[
+      ...folderArtworkFrontBaseNames,
+      ...folderArtworkBackBaseNames,
+      ...folderArtworkDiscBaseNames,
+      ...folderArtworkBookletBaseNames,
+    ])
+      for (final extension in folderCoverImageExtensions) '$base.$extension',
+  ],
+);
+
+/// 候选名在排序中的位置；不在通用候选名中的文件排在后面。
+final Map<String, int> folderArtworkFileNameRanks =
+    Map<String, int>.unmodifiable(<String, int>{
+      for (var index = 0; index < folderArtworkFileNames.length; index++)
+        folderArtworkFileNames[index]: index,
+    });
+
+/// 按文件名启发式判断图片角色：封底、碟片、内页、封面，其余归为其他。
+///
+/// 比较时忽略扩展名、大小写与结尾的序号，`backcover01.jpg`、
+/// `CD 2.png`、`scan-03.webp` 都能识别。
+AlbumArtworkRole albumArtworkRoleForFile(String filePath) {
+  final name = p.basenameWithoutExtension(filePath).toLowerCase().trim();
+  if (name.isEmpty) return AlbumArtworkRole.other;
+  final stem = name.replaceAll(RegExp(r'[\s_\-.]*\d+$'), '');
+  if (_matchesArtworkBaseName(stem, folderArtworkBackBaseNames)) {
+    return AlbumArtworkRole.back;
+  }
+  if (_matchesArtworkBaseName(stem, folderArtworkDiscBaseNames)) {
+    return AlbumArtworkRole.disc;
+  }
+  if (_matchesArtworkBaseName(stem, folderArtworkBookletBaseNames)) {
+    return AlbumArtworkRole.booklet;
+  }
+  if (_matchesArtworkBaseName(stem, folderArtworkFrontBaseNames)) {
+    return AlbumArtworkRole.front;
+  }
+  return AlbumArtworkRole.other;
+}
+
+bool _matchesArtworkBaseName(String stem, List<String> baseNames) {
+  for (final baseName in baseNames) {
+    if (stem == baseName || stem.startsWith(baseName)) return true;
+  }
+  return false;
+}
 
 bool _isFolderCoverImageName(String lowerName) {
   final extension = p.extension(lowerName);
@@ -161,6 +239,19 @@ class _FolderCoverDirectory {
 
   final Map<String, File> files;
   final Map<String, Map<String, File>> subdirectoryFiles;
+}
+
+/// 目录多图候选的缓存条目：文件清单、目录修改时间与解析时刻。
+class _FolderArtworkEntry {
+  const _FolderArtworkEntry({
+    required this.files,
+    required this.directoryStamp,
+    required this.resolvedAt,
+  });
+
+  final List<FolderCoverFile> files;
+  final int directoryStamp;
+  final DateTime resolvedAt;
 }
 
 /// 枚举目录项；失败时记录日志并返回空清单，由调用方降级为无目录封面。
@@ -246,6 +337,26 @@ Future<List<FolderCoverFile>> _statFolderCoverCandidates(
     }
   }
   return result;
+}
+
+/// 多图候选排序：先按角色，再按通用候选名，最后按文件名。
+int _compareFolderArtworkFiles(File a, File b) {
+  final roleA = albumArtworkRoleForFile(a.path);
+  final roleB = albumArtworkRoleForFile(b.path);
+  final byRole = roleA.order.compareTo(roleB.order);
+  if (byRole != 0) return byRole;
+
+  final nameA = p.basename(a.path).toLowerCase();
+  final nameB = p.basename(b.path).toLowerCase();
+  final rankA = folderArtworkFileNameRanks[nameA];
+  final rankB = folderArtworkFileNameRanks[nameB];
+  if (rankA != null || rankB != null) {
+    if (rankA == null) return 1;
+    if (rankB == null) return -1;
+    final byRank = rankA.compareTo(rankB);
+    if (byRank != 0) return byRank;
+  }
+  return nameA.compareTo(nameB);
 }
 
 /// 同步解析目录封面，供不能 await 的缓存路径使用。
@@ -777,6 +888,15 @@ class AudioLibrary {
       <String, Future<_FolderCoverDirectory>>{};
   final Map<String, Future<List<FolderCoverFile>>> _folderCoverPending =
       <String, Future<List<FolderCoverFile>>>{};
+
+  /// 目录多图候选缓存：按目录 mtime 与短 TTL 失效，避免每次进详情页重扫。
+  final LinkedHashMap<String, _FolderArtworkEntry> _folderArtworkFiles =
+      LinkedHashMap<String, _FolderArtworkEntry>();
+  final Map<String, Future<List<FolderCoverFile>>> _folderArtworkPending =
+      <String, Future<List<FolderCoverFile>>>{};
+
+  /// 目录 mtime 不变时也用这个间隔复核一次，覆盖文件内容被替换的情况。
+  static const Duration _folderArtworkCacheTtl = Duration(seconds: 60);
   int _folderCoverLookupGeneration = 0;
 
   /// 目录枚举次数，供测试确认同目录只枚举一次。
@@ -1208,6 +1328,8 @@ class AudioLibrary {
     _folderCoverCandidates.clear();
     _folderCoverDirectories.clear();
     _folderCoverPending.clear();
+    _folderArtworkFiles.clear();
+    _folderArtworkPending.clear();
     final generation = _collectionGeneration;
     for (final artist in artistCollection.values) {
       artist.works.clear();
@@ -2749,6 +2871,137 @@ class AudioLibrary {
     }
   }
 
+  /// 返回音频所在目录的全部图片候选，按封面、封底、碟片、内页、其他排序。
+  ///
+  /// 根目录中的图片与 `jacket` / `scans` 子目录中的图片都参与枚举，结果按
+  /// 目录缓存：目录修改时间变化或缓存超过 [_folderArtworkCacheTtl] 时重扫。
+  /// 目录不可读、stat 失败或路径为空时返回空列表，不向界面抛出异常。
+  Future<List<FolderCoverFile>> folderArtworkFiles(Audio audio) async {
+    final filePath = audio.filePath;
+    if (filePath.isEmpty) {
+      log.app.debug(
+        'legacy',
+        '[cover] skipped folder artwork lookup for an empty audio path',
+      );
+      return const <FolderCoverFile>[];
+    }
+    final String directory;
+    try {
+      directory = File(filePath).parent.path;
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] folder artwork directory resolution failed for $filePath: '
+        '$error',
+        stackTrace: trace,
+      );
+      return const <FolderCoverFile>[];
+    }
+
+    final key = _audioPathLookupKey(directory);
+    final stamp = await _folderArtworkDirectoryStamp(directory);
+    final cached = _folderArtworkFiles.remove(key);
+    if (cached != null) {
+      _folderArtworkFiles[key] = cached;
+      final fresh =
+          cached.directoryStamp == stamp &&
+          DateTime.now().difference(cached.resolvedAt) <
+              _folderArtworkCacheTtl;
+      if (fresh) return cached.files;
+      _folderArtworkFiles.remove(key);
+    }
+
+    final pending = _folderArtworkPending[key];
+    if (pending != null) return pending;
+
+    final generation = _folderCoverLookupGeneration;
+    final future = _resolveFolderArtworkFilesUncached(
+      directory,
+      forceRefresh: true,
+    );
+    _folderArtworkPending[key] = future;
+    try {
+      final resolved = await future;
+      if (generation == _folderCoverLookupGeneration) {
+        _folderArtworkFiles.remove(key);
+        _folderArtworkFiles[key] = _FolderArtworkEntry(
+          files: resolved,
+          directoryStamp: stamp,
+          resolvedAt: DateTime.now(),
+        );
+        while (_folderArtworkFiles.length > _maxFolderCoverLookups) {
+          _folderArtworkFiles.remove(_folderArtworkFiles.keys.first);
+        }
+      }
+      return resolved;
+    } finally {
+      if (identical(_folderArtworkPending[key], future)) {
+        _folderArtworkPending.remove(key);
+      }
+    }
+  }
+
+  Future<int> _folderArtworkDirectoryStamp(String directory) async {
+    try {
+      final stat = await Directory(directory).stat();
+      if (stat.type == FileSystemEntityType.notFound) return 0;
+      return stat.modified.millisecondsSinceEpoch ~/ 1000;
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] failed to stat folder artwork directory $directory: $error',
+        stackTrace: trace,
+      );
+      return 0;
+    }
+  }
+
+  Future<List<FolderCoverFile>> _resolveFolderArtworkFilesUncached(
+    String directory, {
+    bool forceRefresh = false,
+  }) async {
+    final listing = await _folderCoverDirectory(
+      directory,
+      forceRefresh: forceRefresh,
+    );
+    final candidates = <File>[];
+    final seen = <String>{};
+
+    void add(File file) {
+      if (seen.add(file.path.toLowerCase())) candidates.add(file);
+    }
+
+    for (final file in listing.files.values) {
+      final name = p.basename(file.path).toLowerCase();
+      if (_isFolderCoverImageName(name)) add(file);
+    }
+    for (final directoryName in folderCoverSubdirectoryNames) {
+      final subdirectory = listing.subdirectoryFiles[directoryName];
+      if (subdirectory == null) continue;
+      for (final file in subdirectory.values) add(file);
+    }
+
+    candidates.sort(_compareFolderArtworkFiles);
+    final result = <FolderCoverFile>[];
+    for (final file in candidates) {
+      try {
+        final stat = await file.stat();
+        if (stat.type == FileSystemEntityType.notFound) continue;
+        result.add((
+          path: file.path,
+          modified: stat.modified.millisecondsSinceEpoch ~/ 1000,
+        ));
+      } catch (error, trace) {
+        log.app.debug(
+          'legacy',
+          '[cover] failed to stat folder artwork ${file.path}: $error',
+          stackTrace: trace,
+        );
+      }
+    }
+    return List<FolderCoverFile>.unmodifiable(result);
+  }
+
   Future<List<FolderCoverFile>> _resolveFolderCoverCandidatesUncached(
     String directory,
     String? sourcePath,
@@ -2758,8 +3011,17 @@ class AudioLibrary {
   }
 
   /// 按目录共享目录项清单；并发请求复用同一个 future，串行请求复用已完成结果。
-  Future<_FolderCoverDirectory> _folderCoverDirectory(String directory) {
+  ///
+  /// [forceRefresh] 为真时丢弃已有清单并重新枚举，供多图扫描按目录 mtime
+  /// 与 TTL 发现新增或删除的图片。
+  Future<_FolderCoverDirectory> _folderCoverDirectory(
+    String directory, {
+    bool forceRefresh = false,
+  }) {
     final key = _audioPathLookupKey(directory);
+    if (forceRefresh) {
+      _folderCoverDirectories.remove(key);
+    }
     final existing = _folderCoverDirectories.remove(key);
     if (existing != null) {
       _folderCoverDirectories[key] = existing;
@@ -2822,6 +3084,8 @@ class AudioLibrary {
     _folderCoverCandidates.clear();
     _folderCoverDirectories.clear();
     _folderCoverPending.clear();
+    _folderArtworkFiles.clear();
+    _folderArtworkPending.clear();
     folderCoverDirectoryScanCount = 0;
     _invalidateAggregatedRootFolders();
     _audioByPath.clear();
@@ -3991,6 +4255,9 @@ class Album {
   int _collectionGeneration = 0;
   int _libraryIndex = -1;
 
+  /// 多图聚合结果的缓存时长。
+  static const Duration _artworksCacheTtl = Duration(seconds: 60);
+
   /// 参与的艺术家
   Map<String, Artist> artistsMap = {};
 
@@ -4001,6 +4268,13 @@ class Album {
   WeakReference<ImageProvider>? _coverCache;
   String? _coverCachePath;
   final Map<int, _CollectionThumbnail> _thumbnailCovers = {};
+
+  /// 多图列表与内嵌图列表的缓存键与结果。
+  List<AlbumArtwork>? _artworksCache;
+  String? _artworksCacheKey;
+  DateTime? _artworksCacheAt;
+  List<AlbumArtwork>? _embeddedArtworksCache;
+  String? _embeddedArtworksCacheKey;
 
   /// 封面与图片缓存使用的真实文件路径；虚拟轨指向整轨源文件。
   String? get primaryPath {
@@ -4056,6 +4330,101 @@ class Album {
       _coverCachePath = path;
     }
     return data;
+  }
+
+  /// 专辑全部图片：本地文件夹图片与内嵌图片合并，按角色排序并去重。
+  ///
+  /// 虚拟轨（CUE / SACD）用 [Audio.filePath] 指向整轨源文件，不读合成路径。
+  /// 文件夹枚举与内嵌图片读取失败都降级为空列表，不向界面抛出异常。
+  /// 结果缓存 60 秒，目录中新增或替换图片后无需重启即可刷新。
+  Future<List<AlbumArtwork>> get artworks async {
+    final audio = works.isEmpty ? null : works.first;
+    if (audio == null) return const <AlbumArtwork>[];
+    final cacheKey = '${audio.filePath}|${audio.modified}|${works.length}';
+    final cached = _artworksCache;
+    final cachedAt = _artworksCacheAt;
+    if (cached != null &&
+        cachedAt != null &&
+        _artworksCacheKey == cacheKey &&
+        DateTime.now().difference(cachedAt) < _artworksCacheTtl) {
+      return cached;
+    }
+
+    final folderFiles = await AudioLibrary.instance.folderArtworkFiles(audio);
+    final embedded = await embeddedArtworks;
+    final merged = mergeArtworks(<AlbumArtwork>[
+      for (final file in folderFiles) _albumArtworkFromFolderFile(file),
+      ...embedded,
+    ]);
+    _artworksCacheKey = cacheKey;
+    _artworksCacheAt = DateTime.now();
+    _artworksCache = merged;
+    return merged;
+  }
+
+  /// 仅内嵌图片，供页面在本地文件夹图片之外单独使用。
+  ///
+  /// 一次读取 `works.first.filePath` 的图片元数据；FFI 失败时返回空列表。
+  Future<List<AlbumArtwork>> get embeddedArtworks async {
+    final audio = works.isEmpty ? null : works.first;
+    if (audio == null) return const <AlbumArtwork>[];
+    final filePath = audio.filePath;
+    if (filePath.isEmpty) return const <AlbumArtwork>[];
+    final modified = audio.modified;
+    final cacheKey = '$filePath|$modified';
+    final cached = _embeddedArtworksCache;
+    if (cached != null && _embeddedArtworksCacheKey == cacheKey) return cached;
+
+    List<PictureInfo> pictures;
+    try {
+      pictures = await listPictures(path: filePath);
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] embedded picture listing failed for $filePath: $error',
+        stackTrace: trace,
+      );
+      return const <AlbumArtwork>[];
+    }
+    final result = <AlbumArtwork>[];
+    for (final picture in pictures) {
+      final role = _albumArtworkRoleFromPictureKind(picture.kind);
+      result.add(
+        AlbumArtwork(
+          role: role,
+          source: AlbumArtworkSource.embedded,
+          label: role.label,
+          path: filePath,
+          pictureIndex: picture.index,
+          modified: modified,
+        ),
+      );
+    }
+    final resolved = List<AlbumArtwork>.unmodifiable(result);
+    _embeddedArtworksCacheKey = cacheKey;
+    _embeddedArtworksCache = resolved;
+    return resolved;
+  }
+
+  AlbumArtwork _albumArtworkFromFolderFile(FolderCoverFile file) {
+    final role = albumArtworkRoleForFile(file.path);
+    return AlbumArtwork(
+      role: role,
+      source: AlbumArtworkSource.folderFile,
+      label: role.label,
+      path: file.path,
+      modified: file.modified,
+    );
+  }
+
+  AlbumArtworkRole _albumArtworkRoleFromPictureKind(PictureKind kind) {
+    return switch (kind) {
+      PictureKind.front => AlbumArtworkRole.front,
+      PictureKind.back => AlbumArtworkRole.back,
+      PictureKind.disc => AlbumArtworkRole.disc,
+      PictureKind.booklet => AlbumArtworkRole.booklet,
+      PictureKind.other => AlbumArtworkRole.other,
+    };
   }
 
   void _retainThumbnail(int size, String path, ImageProvider provider) {

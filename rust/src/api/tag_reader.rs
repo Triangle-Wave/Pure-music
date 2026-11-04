@@ -20,7 +20,7 @@ use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::{Accessor, AudioFile, ItemKey, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::{ItemValue, Tag, TagItem, TagType};
-use ratag::tag::{Basic as RatagBasic, Picture as RatagPicture};
+use ratag::tag::Basic as RatagBasic;
 use windows::{
     core::Interface,
     core::HSTRING,
@@ -69,6 +69,8 @@ pub use index_state::IndexPhase;
 
 mod symphonia;
 use symphonia::read_symphonia_metadata;
+
+pub mod pictures;
 
 mod midi;
 #[cfg(test)]
@@ -437,35 +439,6 @@ fn read_dsf_extra_metadata(path: &str, extension: String, file_size: u64) -> Aud
         replaygain_album_gain: None,
         replaygain_album_peak: None,
     }
-}
-
-fn read_dsf_picture(path: &Path) -> Option<Vec<u8>> {
-    let file = DsfFile::open(path).ok()?;
-    let picture = file
-        .id3_tag()
-        .as_ref()?
-        .pictures()
-        .next()
-        .map(|picture| picture.data.clone());
-    picture
-}
-
-fn read_dff_picture(path: &Path) -> Option<Vec<u8>> {
-    read_dff_metadata(path)?.picture
-}
-
-fn read_asf_picture(path: &Path) -> Option<Vec<u8>> {
-    let pictures = RatagPicture::read_cover(path).ok()?;
-    let picture = pictures.picture()?;
-    (!picture.is_uri).then(|| picture.data.clone())
-}
-
-fn read_id3_picture(path: &Path) -> Option<Vec<u8>> {
-    id3::Tag::read_from_path(path)
-        .ok()?
-        .pictures()
-        .next()
-        .map(|picture| picture.data.clone())
 }
 
 /// for Flutter
@@ -1272,46 +1245,20 @@ fn _get_picture_by_windows(path: &str) -> Result<Vec<u8>, windows::core::Error> 
     Ok(buffer)
 }
 
-fn read_picture_by_alternative(path: &Path) -> Option<Vec<u8>> {
-    if is_dsf_path(path) {
-        return read_dsf_picture(path);
-    }
-    if is_dff_path(path) {
-        return read_dff_picture(path);
-    }
-    if is_asf_path(path) {
-        return read_asf_picture(path);
-    }
-    if is_generic_id3_path(path) {
-        return read_id3_picture(path);
-    }
-    if is_symphonia_path(path) {
-        if let Some(picture) = read_symphonia_metadata(path).and_then(|metadata| metadata.picture) {
-            return Some(picture);
+/// 读取文件的首选内嵌图片：优先第一张封面，无封面时取第一张图片。
+///
+/// 标签读取失败时不回退到 Windows 缩略图，由调用方决定是否继续降级。
+fn preferred_picture_bytes(path: &str) -> Option<Vec<u8>> {
+    match pictures::load_pictures(Path::new(path)) {
+        Ok(pictures) => pictures::preferred_picture(&pictures).map(|picture| picture.data.clone()),
+        Err(err) => {
+            log::warn!(
+                target: "tag",
+                "read embedded pictures failed for {path}: {err:#}"
+            );
+            None
         }
     }
-    read_id3_picture(path)
-}
-
-fn _get_picture_by_lofty(path: &str) -> Option<Vec<u8>> {
-    let options = ParseOptions::new()
-        .parsing_mode(ParsingMode::Relaxed)
-        .read_tags(true)
-        .read_cover_art(true)
-        .read_properties(false);
-
-    let tagged_file = match Probe::open(path).and_then(|p| p.options(options).read()) {
-        Ok(f) => f,
-        Err(_) => return read_picture_by_alternative(Path::new(path)),
-    };
-
-    let picture = tagged_file
-        .primary_tag()
-        .or_else(|| tagged_file.first_tag())
-        .and_then(|tag| tag.pictures().first())
-        .map(|picture| picture.data().to_vec());
-
-    picture.or_else(|| read_picture_by_alternative(Path::new(path)))
 }
 
 pub(crate) fn get_embedded_picture_from_path(
@@ -1319,39 +1266,81 @@ pub(crate) fn get_embedded_picture_from_path(
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    let picture = _get_picture_by_lofty(path)?;
-    let loaded = image::load_from_memory(&picture).ok()?;
-    let ratio = loaded.width() as f32 / loaded.height() as f32;
-    let (result_width, result_height) = if ratio > 1.0 {
-        (width, (width as f32 / ratio).round() as u32)
-    } else {
-        ((height as f32 * ratio).round() as u32, height)
+    let pictures = match pictures::load_pictures(Path::new(path)) {
+        Ok(pictures) => pictures,
+        Err(err) => {
+            log::warn!(
+                target: "tag",
+                "read embedded pictures failed for {path}: {err:#}"
+            );
+            return None;
+        }
     };
-    let resized = imageops::resize(
-        &loaded,
-        result_width.max(1),
-        result_height.max(1),
-        imageops::FilterType::Triangle,
-    );
-    let mut output = Cursor::new(Vec::new());
-    resized
-        .write_to(&mut output, image::ImageFormat::Png)
-        .ok()?;
-    Some(output.into_inner())
+    let picture = pictures::preferred_picture(&pictures)?;
+    match pictures::resize_picture_to_png(&picture.data, width, height) {
+        Ok(png) => Some(png),
+        Err(err) => {
+            log::warn!(
+                target: "tag",
+                "resize embedded picture for {path} failed: {err:#}"
+            );
+            None
+        }
+    }
 }
 
 const PICTURE_CACHE_CAPACITY: usize = 96;
 type PictureCache = OnceLock<Mutex<VecDeque<(String, Vec<u8>)>>>;
 static PICTURE_CACHE: PictureCache = OnceLock::new();
 
-fn _picture_cache_key(path: &str, width: u32, height: u32) -> String {
+/// 单图封面入口在缓存键中使用的固定序号，与 `get_picture_by_index` 的真实
+/// 序号（从 0 开始）保持互不冲突。
+const LEGACY_PICTURE_INDEX: i64 = -1;
+
+/// 缓存键：路径 + 文件修改时间 + 图片序号 + 目标尺寸。
+pub(super) fn picture_cache_key(
+    path: &str,
+    picture_index: i64,
+    width: u32,
+    height: u32,
+) -> String {
     let modified_secs = fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("{path}|{modified_secs}|{width}x{height}")
+    format!("{path}|{modified_secs}|{picture_index}|{width}x{height}")
+}
+
+/// 读取缓存命中项并提升为最近使用；键不存在或锁损坏时返回 `None`。
+pub(super) fn picture_cache_lookup(key: &str) -> Option<Vec<u8>> {
+    let mut cache = PICTURE_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .ok()?;
+    let position = cache.iter().position(|(entry_key, _)| entry_key == key)?;
+    let (entry_key, value) = cache.remove(position)?;
+    let result = value.clone();
+    cache.push_front((entry_key, value));
+    Some(result)
+}
+
+/// 写入缓存并提升为最近使用；超过容量时淘汰最久未使用的条目。
+pub(super) fn picture_cache_store(key: String, value: Vec<u8>) {
+    let Ok(mut cache) = PICTURE_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+    else {
+        return;
+    };
+    if let Some(position) = cache.iter().position(|(entry_key, _)| entry_key == &key) {
+        cache.remove(position);
+    }
+    cache.push_front((key, value));
+    while cache.len() > PICTURE_CACHE_CAPACITY {
+        cache.pop_back();
+    }
 }
 
 fn evict_picture_cache_for_path(path: &str) {
@@ -1373,7 +1362,7 @@ pub fn get_picture_and_colors(
     height: u32,
     num_colors: i32,
 ) -> (Option<Vec<u8>>, Vec<u32>) {
-    let pic = match _get_picture_by_lofty(&path) {
+    let pic = match preferred_picture_bytes(&path) {
         Some(p) => p,
         None => match _get_picture_by_windows(&path) {
             Ok(val) => val,
@@ -1426,23 +1415,13 @@ pub fn get_picture_and_colors(
 /// for Flutter  
 /// 如果无法通过 Lofty 获取则通过 Windows 获取
 pub fn get_picture_from_path(path: String, width: u32, height: u32) -> Option<Vec<u8>> {
-    let cache_key = _picture_cache_key(&path, width, height);
-    if let Ok(cache_lock) = PICTURE_CACHE
-        .get_or_init(|| Mutex::new(VecDeque::new()))
-        .lock()
-    {
-        if let Some(pos) = cache_lock.iter().position(|(k, _)| k == &cache_key) {
-            let mut cache = cache_lock;
-            if let Some((k, v)) = cache.remove(pos) {
-                let val = v.clone();
-                cache.push_front((k, v));
-                return Some(val);
-            }
-        }
+    let cache_key = picture_cache_key(&path, LEGACY_PICTURE_INDEX, width, height);
+    if let Some(cached) = picture_cache_lookup(&cache_key) {
+        return Some(cached);
     }
 
     let pic_option =
-        _get_picture_by_lofty(&path).or_else(|| match _get_picture_by_windows(&path) {
+        preferred_picture_bytes(&path).or_else(|| match _get_picture_by_windows(&path) {
             Ok(val) => Some(val),
             Err(err) => {
                 log::warn!(target: "tag", "fail to get pic: {}", err);
@@ -1472,18 +1451,7 @@ pub fn get_picture_from_path(path: String, width: u32, height: u32) -> Option<Ve
             let rgb = image::DynamicImage::ImageRgba8(resized_img).to_rgb8();
             if rgb.write_to(&mut output, image::ImageFormat::Jpeg).is_ok() {
                 let out = output.into_inner();
-                if let Ok(mut cache) = PICTURE_CACHE
-                    .get_or_init(|| Mutex::new(VecDeque::new()))
-                    .lock()
-                {
-                    if let Some(pos) = cache.iter().position(|(k, _)| k == &cache_key) {
-                        cache.remove(pos);
-                    }
-                    cache.push_front((cache_key, out.clone()));
-                    while cache.len() > PICTURE_CACHE_CAPACITY {
-                        cache.pop_back();
-                    }
-                }
+                picture_cache_store(cache_key, out.clone());
                 return Some(out);
             }
             // 已经能解码时不要把原图大图送回界面

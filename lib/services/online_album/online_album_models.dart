@@ -9,11 +9,15 @@ class OnlineAlbumArtwork {
     required this.url,
     required this.role,
     required this.label,
+    this.largeUrl,
   });
 
   final String url;
 
-  /// `front`、`back` 或 `booklet`。
+  /// 大图地址；接口未提供时为 null。
+  final String? largeUrl;
+
+  /// `front`、`back`、`disc` 或 `booklet`。
   final String role;
   final String label;
 }
@@ -59,19 +63,41 @@ class OnlineAlbumInfo {
     final front = covers.front;
     if (front != null) {
       result.add(
-        OnlineAlbumArtwork(url: front.url, role: 'front', label: '封面'),
+        OnlineAlbumArtwork(
+          url: front.url,
+          largeUrl: front.largeUrl,
+          role: 'front',
+          label: '封面',
+        ),
       );
     }
     final back = covers.back;
     if (back != null) {
       result.add(
-        OnlineAlbumArtwork(url: back.url, role: 'back', label: '封底'),
+        OnlineAlbumArtwork(
+          url: back.url,
+          largeUrl: back.largeUrl,
+          role: 'back',
+          label: '封底',
+        ),
+      );
+    }
+    final discs = covers.discs;
+    for (var i = 0; i < discs.length; i++) {
+      result.add(
+        OnlineAlbumArtwork(
+          url: discs[i].url,
+          largeUrl: discs[i].largeUrl,
+          role: 'disc',
+          label: discs.length == 1 ? '碟片' : '碟片 ${i + 1}',
+        ),
       );
     }
     for (var i = 0; i < covers.booklets.length; i++) {
       result.add(
         OnlineAlbumArtwork(
           url: covers.booklets[i].url,
+          largeUrl: covers.booklets[i].largeUrl,
           role: 'booklet',
           label: '内页 ${i + 1}',
         ),
@@ -184,17 +210,27 @@ class OnlineAlbumCandidate {
 /// [selectedCandidateId] 为空表示自动使用最佳候选；[disabled] 表示用户选择
 /// “不使用（显示空白）”，此时不发请求也不展示在线信息。
 class OnlineAlbumCandidateCache {
+  /// 写入时使用的 schema 版本；版本 3 加入封底、碟片与内页快照。
+  static const int currentSchemaVersion = 3;
+
+  /// 可接受的最低 schema 版本。
+  static const int minimumSchemaVersion = 2;
+
   const OnlineAlbumCandidateCache({
     required this.candidates,
     this.selectedCandidateId,
     this.disabled = false,
     this.savedAt,
+    this.schemaVersion = currentSchemaVersion,
   });
 
   final List<OnlineAlbumCandidate> candidates;
   final String? selectedCandidateId;
   final bool disabled;
   final DateTime? savedAt;
+
+  /// 读取来源的 schema 版本；新写入统一为 [currentSchemaVersion]。
+  final int schemaVersion;
 
   OnlineAlbumCandidate? get bestCandidate {
     OnlineAlbumCandidate? best;
@@ -232,11 +268,12 @@ class OnlineAlbumCandidateCache {
       selectedCandidateId: candidateId,
       disabled: disabled,
       savedAt: savedAt,
+      schemaVersion: schemaVersion,
     );
   }
 
   Map<String, Object?> toJson() => {
-    'schema': 2,
+    'schema': currentSchemaVersion,
     'savedAt': savedAt?.toIso8601String(),
     'selectedCandidateId': selectedCandidateId,
     'disabled': disabled,
@@ -245,6 +282,11 @@ class OnlineAlbumCandidateCache {
 
   static OnlineAlbumCandidateCache? fromJson(Object? data) {
     if (data is! Map<dynamic, dynamic>) return null;
+    final rawSchema = data['schema'];
+    final schema = rawSchema is int
+        ? rawSchema
+        : (rawSchema is num ? rawSchema.toInt() : 0);
+    if (schema < minimumSchemaVersion) return null;
     final rawCandidates = data['candidates'];
     if (rawCandidates is! List<dynamic>) return null;
     final candidates = <OnlineAlbumCandidate>[];
@@ -258,6 +300,7 @@ class OnlineAlbumCandidateCache {
       selectedCandidateId: textOrNull(data['selectedCandidateId']),
       disabled: data['disabled'] == true,
       savedAt: dateOrNull(data['savedAt']),
+      schemaVersion: schema,
     );
   }
 }

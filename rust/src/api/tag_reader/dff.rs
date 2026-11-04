@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use id3::TagLike;
 use ndsd_read::{dff_reader::DFFReader, DSDFormat, DSDReader};
 
@@ -10,6 +11,7 @@ use super::{
     optional_nonempty,
     read_id3_from_bytes,
 };
+use super::pictures::{embedded_from_id3, embedded_from_parts, EmbeddedPicture, PictureKind};
 
 #[derive(Clone)]
 pub(super) struct DffMetadata {
@@ -141,6 +143,36 @@ pub(super) fn read_dff_metadata(path: &Path) -> Option<DffMetadata> {
         picture,
         items,
     })
+}
+
+/// 读取 DFF 文件中的全部内嵌图片：优先 ID3 标签中的图片，再补充 DSD 元数据
+/// 记录的封面。调用方负责去重与数量上限。
+pub(super) fn read_dff_pictures(path: &Path) -> Result<Vec<EmbeddedPicture>> {
+    let path_string = path.to_string_lossy();
+    let mut reader = DFFReader::new(&path_string)
+        .with_context(|| format!("open DFF reader: {path_string}"))?;
+    let mut format = DSDFormat::default();
+    reader
+        .open(&mut format)
+        .with_context(|| format!("parse DFF header: {path_string}"))?;
+
+    let metadata = reader.get_metadata();
+    let mut pictures = Vec::new();
+    if let Some(tag) = metadata
+        .and_then(|metadata| metadata.id3_raw.as_deref())
+        .and_then(read_id3_from_bytes)
+    {
+        pictures.extend(tag.pictures().map(embedded_from_id3));
+    }
+    if let Some(picture) = metadata.and_then(|metadata| metadata.picture.clone()) {
+        pictures.push(embedded_from_parts(
+            None,
+            None,
+            PictureKind::Other,
+            picture,
+        ));
+    }
+    Ok(pictures)
 }
 
 #[cfg(test)]

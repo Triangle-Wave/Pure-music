@@ -230,7 +230,8 @@ jobs:
             )
             'lib/native/rust/api/tag_reader.dart' = @(
               "export 'tag_reader/extra_metadata.dart';",
-              "export 'tag_reader/index_state.dart';"
+              "export 'tag_reader/index_state.dart';",
+              "export 'tag_reader/pictures.dart';"
             )
           }
           foreach ($target in $targets.GetEnumerator()) {

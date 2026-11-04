@@ -511,6 +511,7 @@ class _StableCoverKey {
     required this.height,
     required this.pixelRatio,
     required this.generation,
+    required this.pictureIndex,
   });
 
   final String path;
@@ -519,6 +520,9 @@ class _StableCoverKey {
   final double pixelRatio;
   final int generation;
 
+  /// 内嵌图片序号；`-1` 表示文件夹图片或音频首选封面。
+  final int pictureIndex;
+
   @override
   bool operator ==(Object other) =>
       other is _StableCoverKey &&
@@ -526,10 +530,12 @@ class _StableCoverKey {
       other.width == width &&
       other.height == height &&
       other.pixelRatio == pixelRatio &&
-      other.generation == generation;
+      other.generation == generation &&
+      other.pictureIndex == pictureIndex;
 
   @override
-  int get hashCode => Object.hash(path, width, height, pixelRatio, generation);
+  int get hashCode =>
+      Object.hash(path, width, height, pixelRatio, generation, pictureIndex);
 }
 
 @immutable
@@ -540,6 +546,7 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
     required this.height,
     required this.pixelRatio,
     required this.generation,
+    this.pictureIndex = -1,
     this.initialBytes,
   });
 
@@ -548,6 +555,7 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
   final int height;
   final double pixelRatio;
   final int generation;
+  final int pictureIndex;
   final Uint8List? initialBytes;
 
   int get byteLength => initialBytes?.length ?? 0;
@@ -557,6 +565,7 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
     height: height,
     pixelRatio: pixelRatio,
     generation: generation,
+    pictureIndex: pictureIndex,
   );
 
   @override
@@ -571,7 +580,9 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
     return MultiFrameImageStreamCompleter(
       codec: _loadAsync(key, decode),
       scale: 1,
-      debugLabel: 'CoverImage(${key.path}, ${key.width}x${key.height})',
+      debugLabel:
+          'CoverImage(${key.path}, ${key.width}x${key.height}, '
+          '#${key.pictureIndex})',
     );
   }
 
@@ -586,6 +597,7 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
           width: key.width,
           height: key.height,
           pixelRatio: key.pixelRatio,
+          pictureIndex: key.pictureIndex < 0 ? null : key.pictureIndex,
         );
     if (bytes == null) {
       throw StateError('Cover image is unavailable: ${key.path}');
@@ -628,7 +640,7 @@ class CoverImageCache {
   );
   int _generation = 0;
   int _stableImageGeneration = 0;
-  final Set<(int, int, double)> _stableImageConfigurations = {};
+  final Set<(int, int, double, int)> _stableImageConfigurations = {};
   int _hitCount = 0;
   int _missCount = 0;
   String? _indexPath;
@@ -645,10 +657,17 @@ class CoverImageCache {
     return _large;
   }
 
-  String _coverKey(String path, int width, int height, {int? modified}) {
+  String _coverKey(
+    String path,
+    int width,
+    int height, {
+    int? modified,
+    int? pictureIndex,
+  }) {
     final size = '${width}x$height';
-    if (modified == null) return '$path|$size';
-    return '$path|$modified|$size';
+    final index = pictureIndex ?? -1;
+    if (modified == null) return '$path|$size|#$index';
+    return '$path|$modified|$size|#$index';
   }
 
   Future<ImageProvider?> get({
@@ -713,19 +732,93 @@ class CoverImageCache {
     );
   }
 
+  /// 读取一张专辑图片：文件夹图片或指定序号的内嵌图片。
+  ///
+  /// [pictureIndex] 为空时等同 [get]，按图片文件或音频首选封面读取；非空时
+  /// 读取 [path] 中该序号的内嵌图片，内存键与本地缩略图键都带序号维度，
+  /// 文件夹图（`#-1`）与不同内嵌图互不覆盖。
+  Future<ImageProvider?> getArtwork({
+    required String path,
+    int? pictureIndex,
+    required int width,
+    required int height,
+    int? modified,
+  }) async {
+    if (pictureIndex == null || pictureIndex < 0) {
+      return get(
+        path: path,
+        width: width,
+        height: height,
+        modified: modified,
+      );
+    }
+    final key = _coverKey(
+      path,
+      width,
+      height,
+      modified: modified,
+      pictureIndex: pictureIndex,
+    );
+    final tier = _tierFor(width, height);
+    final cached = _getCached(
+      key,
+      tier,
+      path: path,
+      width: width,
+      height: height,
+      pictureIndex: pictureIndex,
+    );
+    if (cached != null) return cached;
+
+    final pending = _pending[key];
+    if (pending != null) return pending;
+
+    _missCount++;
+    final generation = _generation;
+    final future = _fetch(
+      path,
+      width,
+      height,
+      modified: modified,
+      pictureIndex: pictureIndex,
+    );
+    _pending[key] = future;
+    try {
+      final result = await future;
+      if (result != null &&
+          generation == _generation &&
+          identical(_pending[key], future)) {
+        tier.set(key, result);
+        _trackBytes(key, tier, result);
+      }
+      return result;
+    } finally {
+      if (identical(_pending[key], future)) {
+        final removed = _pending.remove(key);
+        if (removed != null) unawaited(removed);
+      }
+    }
+  }
+
   ImageProvider? _getCached(
     String key,
     _LruMap<String, ImageProvider> tier, {
     required String path,
     required int width,
     required int height,
+    int pictureIndex = -1,
   }) {
     final cached = tier.get(key);
     if (cached != null) {
       _hitCount++;
       return cached;
     }
-    final stable = _stableImage(path: path, width: width, height: height);
+    final stable = _stableImage(
+      path: path,
+      width: width,
+      height: height,
+      pictureIndex: pictureIndex,
+    );
     final status = PaintingBinding.instance.imageCache.statusForKey(
       stable.cacheKey,
     );
@@ -760,18 +853,21 @@ class CoverImageCache {
     int width,
     int height, {
     int? modified,
+    int? pictureIndex,
   }) async {
     final bytes = await loadBytes(
       path: path,
       width: width,
       height: height,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
     if (bytes == null) return null;
     return _stableImage(
       path: path,
       width: width,
       height: height,
+      pictureIndex: pictureIndex ?? -1,
       initialBytes: bytes,
     );
   }
@@ -780,17 +876,19 @@ class CoverImageCache {
     required String path,
     required int width,
     required int height,
+    int pictureIndex = -1,
     Uint8List? initialBytes,
   }) {
     final pixelRatio =
         ui.PlatformDispatcher.instance.views.first.devicePixelRatio;
-    _stableImageConfigurations.add((width, height, pixelRatio));
+    _stableImageConfigurations.add((width, height, pixelRatio, pictureIndex));
     return _StableCoverImage(
       path: path,
       width: width,
       height: height,
       pixelRatio: pixelRatio,
       generation: _stableImageGeneration,
+      pictureIndex: pictureIndex,
       initialBytes: initialBytes,
     );
   }
@@ -821,6 +919,7 @@ class CoverImageCache {
     required int height,
     bool lowPriority = false,
     int? modified,
+    int? pictureIndex,
   }) async {
     final pixelRatio =
         ui.PlatformDispatcher.instance.views.first.devicePixelRatio;
@@ -831,6 +930,7 @@ class CoverImageCache {
       pixelRatio: pixelRatio,
       lowPriority: lowPriority,
       modified: modified,
+      pictureIndex: pictureIndex,
     );
   }
 
@@ -847,14 +947,18 @@ class CoverImageCache {
     required double pixelRatio,
     bool lowPriority = false,
     int? modified,
+    int? pictureIndex,
   }) async {
     final physicalWidth = (width * pixelRatio).round();
     final physicalHeight = (height * pixelRatio).round();
+    final resolvedPictureIndex =
+        pictureIndex != null && pictureIndex >= 0 ? pictureIndex : null;
     final key = _coverKey(
       path,
       physicalWidth,
       physicalHeight,
       modified: modified,
+      pictureIndex: resolvedPictureIndex,
     );
     final cached = _decodedBytes.get(key);
     if (cached != null) return cached;
@@ -870,6 +974,7 @@ class CoverImageCache {
         physicalWidth: physicalWidth,
         physicalHeight: physicalHeight,
         modified: modified,
+        pictureIndex: resolvedPictureIndex,
       ),
       lowPriority: lowPriority,
     );
@@ -895,14 +1000,25 @@ class CoverImageCache {
   /// 音频文件：小封面（≤96 物理像素）直接 FFI 读内嵌图，不走 SQLite 持久化层；
   /// 大封面走持久化缓存，命中时避免重复读音频文件。
   /// 同目录封面图片：直接读取图片文件并解码缩放，失败时再走同一兜底链路。
+  /// 指定 [pictureIndex] 时读取内嵌图片，磁盘缩略图不参与，按索引库配置决定
+  /// 是否复用 SQLite 图片缓存。
   Future<Uint8List?> _loadBytesUncached({
     required String path,
     required int physicalWidth,
     required int physicalHeight,
     int? modified,
+    int? pictureIndex,
   }) async {
     developer.Timeline.startSync('cover.decode');
     try {
+      if (pictureIndex != null) {
+        return _loadEmbeddedPictureAt(
+          path: path,
+          pictureIndex: pictureIndex,
+          physicalWidth: physicalWidth,
+          physicalHeight: physicalHeight,
+        );
+      }
       if (_isImageCoverPath(path)) {
         final stamp = await _resolveImageModified(path, modified);
         final diskCache = CoverDiskCache.instance;
@@ -957,6 +1073,59 @@ class CoverImageCache {
       );
     } finally {
       developer.Timeline.finishSync();
+    }
+  }
+
+  /// 读取指定序号的内嵌图片。
+  ///
+  /// 索引路径由 [configure] 提供时，大图复用 SQLite 图片缩略图表；未配置索引
+  /// 路径、小图或缓存不可用时直接走 FFI 进程内缓存。
+  Future<Uint8List?> _loadEmbeddedPictureAt({
+    required String path,
+    required int pictureIndex,
+    required int physicalWidth,
+    required int physicalHeight,
+  }) async {
+    final indexPath = _indexPath;
+    final maxPhysical = max(physicalWidth, physicalHeight);
+    if (indexPath != null && maxPhysical > 96) {
+      try {
+        // 该入口在缓存未命中时自行回退到 FFI 解码并回写，返回值即最终结果。
+        final cached = await library_db.getCachedPicture(
+          indexPath: indexPath,
+          path: path,
+          pictureIndex: pictureIndex,
+          width: physicalWidth,
+          height: physicalHeight,
+        );
+        return cached;
+      } catch (error, trace) {
+        if (!_databaseWarningLogged) {
+          _databaseWarningLogged = true;
+          log.app.warn(
+            'legacy',
+            '[cache] persistent picture cache unavailable: $error',
+            stackTrace: trace,
+          );
+        }
+      }
+    }
+    try {
+      final bytes = await getPictureByIndex(
+        path: path,
+        index: pictureIndex,
+        width: physicalWidth,
+        height: physicalHeight,
+      );
+      return bytes;
+    } catch (error, trace) {
+      log.app.debug(
+        'legacy',
+        '[cover] embedded picture #$pictureIndex load failed for $path: '
+        '$error',
+        stackTrace: trace,
+      );
+      return null;
     }
   }
 
@@ -1304,6 +1473,7 @@ class CoverImageCache {
           width: configuration.$1,
           height: configuration.$2,
           pixelRatio: configuration.$3,
+          pictureIndex: configuration.$4,
           generation: _stableImageGeneration,
         ).evict(),
       );

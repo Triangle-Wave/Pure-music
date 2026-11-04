@@ -81,6 +81,7 @@ class CoverArtSet {
     this.front,
     this.back,
     this.booklets = const [],
+    this.discs = const [],
   });
 
   static const CoverArtSet empty = CoverArtSet();
@@ -88,17 +89,20 @@ class CoverArtSet {
   final CoverArtImage? front;
   final CoverArtImage? back;
   final List<CoverArtImage> booklets;
+  final List<CoverArtImage> discs;
 
-  bool get isEmpty => front == null && back == null && booklets.isEmpty;
+  bool get isEmpty =>
+      front == null && back == null && booklets.isEmpty && discs.isEmpty;
 
   Map<String, Object?> toJson() => {
     'front': front?.toJson(),
     'back': back?.toJson(),
     'booklets': booklets.map((image) => image.toJson()).toList(),
+    'discs': discs.map((image) => image.toJson()).toList(),
   };
 
   /// 兼容两种结构：Cover Art Archive 接口的 `{images: [...]}`，以及
-  /// [toJson] 写出的 `{front, back, booklets}` 快照。
+  /// [toJson] 写出的 `{front, back, booklets, discs}` 快照。
   static CoverArtSet fromJson(Object? data) {
     if (data is! Map<dynamic, dynamic>) return CoverArtSet.empty;
     final rawImages = data['images'];
@@ -110,6 +114,7 @@ class CoverArtSet {
     CoverArtImage? front;
     CoverArtImage? back;
     final booklets = <CoverArtImage>[];
+    final discs = <CoverArtImage>[];
     for (final raw in rawImages) {
       final image = CoverArtImage.fromJson(raw);
       if (image == null) continue;
@@ -121,12 +126,17 @@ class CoverArtSet {
         back = image;
         continue;
       }
-      if (image.types.contains('booklet')) booklets.add(image);
+      if (_isDiscArtwork(image.types)) {
+        discs.add(image);
+        continue;
+      }
+      if (_isBookletArtwork(image.types)) booklets.add(image);
     }
     return CoverArtSet(
       front: front,
       back: back,
       booklets: List.unmodifiable(booklets),
+      discs: List.unmodifiable(discs),
     );
   }
 
@@ -141,35 +151,62 @@ class CoverArtSet {
         if (image != null) booklets.add(image);
       }
     }
-    if (front == null && back == null && booklets.isEmpty) {
+    final discs = <CoverArtImage>[];
+    final rawDiscs = data['discs'];
+    if (rawDiscs is List<dynamic>) {
+      for (final raw in rawDiscs) {
+        final image = CoverArtImage.fromJson(raw);
+        if (image != null) discs.add(image);
+      }
+    }
+    if (front == null && back == null && booklets.isEmpty && discs.isEmpty) {
       return CoverArtSet.empty;
     }
     return CoverArtSet(
       front: front,
       back: back,
       booklets: List.unmodifiable(booklets),
+      discs: List.unmodifiable(discs),
     );
   }
 
   /// 合并 release-group 与 release 两处结果，优先保留前者的正反面。
   static CoverArtSet merge(CoverArtSet first, CoverArtSet second) {
     final booklets = <CoverArtImage>[];
-    final seen = <String>{};
+    final bookletUrls = <String>{};
     for (final image in [...first.booklets, ...second.booklets]) {
-      if (seen.add(image.url)) booklets.add(image);
+      if (bookletUrls.add(image.url)) booklets.add(image);
+    }
+    final discs = <CoverArtImage>[];
+    final discUrls = <String>{};
+    for (final image in [...first.discs, ...second.discs]) {
+      if (discUrls.add(image.url)) discs.add(image);
     }
     return CoverArtSet(
       front: first.front ?? second.front,
       back: first.back ?? second.back,
       booklets: List.unmodifiable(booklets),
+      discs: List.unmodifiable(discs),
     );
+  }
+
+  static bool _isDiscArtwork(List<String> types) {
+    return types.contains('media') ||
+        types.contains('disc') ||
+        types.contains('tray');
+  }
+
+  static bool _isBookletArtwork(List<String> types) {
+    return types.contains('booklet') ||
+        types.contains('leaflet') ||
+        types.contains('liner');
   }
 }
 
 /// Cover Art Archive 客户端。
 ///
-/// 同时查询 release 与 release-group，并合并两处的正反面与内页；404 视为
-/// 没有封面而不是错误，网络失败记录不含 URL 的告警并返回空结果。
+/// 同时查询 release 与 release-group，并合并两处的正反面、碟片与内页；404
+/// 视为没有封面而不是错误，网络失败记录不含 URL 的告警并返回空结果。
 class CoverArtClient {
   CoverArtClient({Dio? dio}) : _dio = dio;
 
