@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 export 'library_db/play_counts.dart';
 
-// These functions are ignored because they are not marked as `pub`: `atomic_write_with_replace`, `audio_identity`, `backfill_audio_identities`, `cover_access_timestamp`, `cover_source_signature`, `cover_tier_exceeds_limit`, `cover_tier`, `ensure_database_layout`, `ensure_index_source_current`, `file_source_signature`, `has_database_layout_marker`, `index_source_signature`, `index_temp_file`, `init_schema`, `legacy_audio_column_exists`, `legacy_sqlite_path`, `load_stored_audio_stats`, `metadata_match_key`, `migrating_sqlite_path`, `normalize_identity_part`, `open_connection`, `open_raw_connection`, `optional_audio_text`, `parse_index_folders`, `parse_optional_bit_depth`, `path_lookup_key`, `prune_cover_thumbnail_tier`, `read_cover_thumbnail`, `read_current_index_snapshot`, `read_mixed_virtual_folders`, `rebuild_database_from_legacy`, `remove_database_file`, `remove_database_files`, `replace_file_atomically`, `sanitize_stored_bit_depth`, `should_rebuild_database`, `sqlite_path`, `sqlite_sidecar_path`, `stable_file_id_for_path`, `stable_file_id`, `stored_index_source_signature`, `unique_play_count`, `with_cover_connection`, `with_index_write_lock`, `write_cover_thumbnail`, `write_index_json`, `write_index_snapshot_with`, `write_index_snapshot`, `write_index_value_to_sqlite`
+// These functions are ignored because they are not marked as `pub`: `atomic_write_with_replace`, `audio_identity`, `backfill_audio_identities`, `cover_access_timestamp`, `cover_source_signature`, `cover_tier_exceeds_limit`, `cover_tier`, `ensure_database_layout`, `ensure_index_source_current`, `file_source_signature`, `has_database_layout_marker`, `index_source_signature`, `index_temp_file`, `init_schema`, `legacy_audio_column_exists`, `legacy_sqlite_path`, `load_stored_audio_stats`, `metadata_match_key`, `migrating_sqlite_path`, `normalize_identity_part`, `open_connection`, `open_raw_connection`, `optional_audio_text`, `parse_index_folders`, `parse_optional_bit_depth`, `path_lookup_key`, `prune_cover_picture_tier`, `prune_cover_pictures_for_path`, `prune_cover_thumbnail_tier`, `read_cover_picture`, `read_cover_thumbnail`, `read_current_index_snapshot`, `read_mixed_virtual_folders`, `rebuild_database_from_legacy`, `remove_database_file`, `remove_database_files`, `replace_file_atomically`, `sanitize_stored_bit_depth`, `should_rebuild_database`, `sqlite_path`, `sqlite_sidecar_path`, `stable_file_id_for_path`, `stable_file_id`, `stored_index_source_signature`, `unique_play_count`, `with_cover_connection`, `with_index_write_lock`, `write_cover_picture`, `write_cover_thumbnail`, `write_index_json`, `write_index_snapshot_with`, `write_index_snapshot`, `write_index_value_to_sqlite`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AudioIdentity`, `CoverTier`, `IndexFolderSnapshot`, `IndexSnapshot`, `ParsedAudioEntry`, `ParsedFolder`, `StoredAudioStats`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -21,6 +21,23 @@ Future<Uint8List?> getCachedCover({
 }) => RustLib.instance.api.crateApiLibraryDbGetCachedCover(
   indexPath: indexPath,
   path: path,
+  width: width,
+  height: height,
+);
+
+/// 读取指定序号的内嵌图片缩略图，缓存未命中时解码并回写。
+///
+/// 缓存数据库不可用时仅记录告警：缓存属于可选加速层，解码结果本身仍然返回。
+Future<Uint8List?> getCachedPicture({
+  required String indexPath,
+  required String path,
+  required int pictureIndex,
+  required int width,
+  required int height,
+}) => RustLib.instance.api.crateApiLibraryDbGetCachedPicture(
+  indexPath: indexPath,
+  path: path,
+  pictureIndex: pictureIndex,
   width: width,
   height: height,
 );

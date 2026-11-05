@@ -19,6 +19,7 @@ import 'api/system_theme.dart';
 import 'api/tag_reader.dart';
 import 'api/tag_reader/extra_metadata.dart';
 import 'api/tag_reader/index_state.dart';
+import 'api/tag_reader/pictures.dart';
 import 'api/utils.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -185,6 +186,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<InstalledFont> dco_decode_list_installed_font(dynamic raw);
 
   @protected
+  List<PictureInfo> dco_decode_list_picture_info(dynamic raw);
+
+  @protected
   List<PlayCountEntry> dco_decode_list_play_count_entry(dynamic raw);
 
   @protected
@@ -237,6 +241,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  PictureInfo dco_decode_picture_info(dynamic raw);
+
+  @protected
+  PictureKind dco_decode_picture_kind(dynamic raw);
 
   @protected
   PlayCountEntry dco_decode_play_count_entry(dynamic raw);
@@ -453,6 +463,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PictureInfo> sse_decode_list_picture_info(SseDeserializer deserializer);
+
+  @protected
   List<PlayCountEntry> sse_decode_list_play_count_entry(
     SseDeserializer deserializer,
   );
@@ -517,6 +530,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  PictureInfo sse_decode_picture_info(SseDeserializer deserializer);
+
+  @protected
+  PictureKind sse_decode_picture_kind(SseDeserializer deserializer);
 
   @protected
   PlayCountEntry sse_decode_play_count_entry(SseDeserializer deserializer);
@@ -783,6 +802,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_picture_info(
+    List<PictureInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_play_count_entry(
     List<PlayCountEntry> self,
     SseSerializer serializer,
@@ -868,6 +893,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_picture_info(PictureInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_picture_kind(PictureKind self, SseSerializer serializer);
 
   @protected
   void sse_encode_play_count_entry(

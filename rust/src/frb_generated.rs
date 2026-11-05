@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -340762001;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -64363956;
 
 // Section: executor
 
@@ -1354,6 +1354,50 @@ fn wire__crate__api__library_db__get_cached_cover_impl(
         },
     )
 }
+fn wire__crate__api__library_db__get_cached_picture_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_cached_picture",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_index_path = <String>::sse_decode(&mut deserializer);
+            let api_path = <String>::sse_decode(&mut deserializer);
+            let api_picture_index = <u32>::sse_decode(&mut deserializer);
+            let api_width = <u32>::sse_decode(&mut deserializer);
+            let api_height = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::library_db::get_cached_picture(
+                            api_index_path,
+                            api_path,
+                            api_picture_index,
+                            api_width,
+                            api_height,
+                        ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__installed_font__get_installed_fonts_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1457,6 +1501,46 @@ fn wire__crate__api__tag_reader__get_picture_and_colors_impl(
                             api_height,
                             api_num_colors,
                         ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__tag_reader__pictures__get_picture_by_index_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_picture_by_index",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_path = <String>::sse_decode(&mut deserializer);
+            let api_index = <u32>::sse_decode(&mut deserializer);
+            let api_width = <u32>::sse_decode(&mut deserializer);
+            let api_height = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(
+                        crate::api::tag_reader::pictures::get_picture_by_index(
+                            api_path, api_index, api_width, api_height,
+                        ),
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -1837,6 +1921,41 @@ fn wire__crate__api__utils__launch_in_browser_impl(
                 transform_result_sse::<_, ()>((move || {
                     let output_ok =
                         Result::<_, ()>::Ok(crate::api::utils::launch_in_browser(api_uri))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__tag_reader__pictures__list_pictures_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_pictures",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_path = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(
+                        crate::api::tag_reader::pictures::list_pictures(api_path),
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -3094,6 +3213,20 @@ impl SseDecode for Vec<crate::api::installed_font::InstalledFont> {
     }
 }
 
+impl SseDecode for Vec<crate::api::tag_reader::pictures::PictureInfo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::tag_reader::pictures::PictureInfo>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::library_db::PlayCountEntry> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3301,6 +3434,38 @@ impl SseDecode for Option<Vec<u8>> {
         } else {
             return None;
         }
+    }
+}
+
+impl SseDecode for crate::api::tag_reader::pictures::PictureInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_index = <u32>::sse_decode(deserializer);
+        let mut var_kind =
+            <crate::api::tag_reader::pictures::PictureKind>::sse_decode(deserializer);
+        let mut var_mimeType = <String>::sse_decode(deserializer);
+        let mut var_description = <Option<String>>::sse_decode(deserializer);
+        return crate::api::tag_reader::pictures::PictureInfo {
+            index: var_index,
+            kind: var_kind,
+            mime_type: var_mimeType,
+            description: var_description,
+        };
+    }
+}
+
+impl SseDecode for crate::api::tag_reader::pictures::PictureKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::tag_reader::pictures::PictureKind::Front,
+            1 => crate::api::tag_reader::pictures::PictureKind::Back,
+            2 => crate::api::tag_reader::pictures::PictureKind::Disc,
+            3 => crate::api::tag_reader::pictures::PictureKind::Booklet,
+            4 => crate::api::tag_reader::pictures::PictureKind::Other,
+            _ => unreachable!("Invalid variant for PictureKind: {}", inner),
+        };
     }
 }
 
@@ -3648,137 +3813,152 @@ fn pde_ffi_dispatcher_primary_impl(
         31 => {
             wire__crate__api__library_db__get_cached_cover_impl(port, ptr, rust_vec_len, data_len)
         }
-        32 => wire__crate__api__installed_font__get_installed_fonts_impl(
+        32 => {
+            wire__crate__api__library_db__get_cached_picture_impl(port, ptr, rust_vec_len, data_len)
+        }
+        33 => wire__crate__api__installed_font__get_installed_fonts_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__api__tag_reader__get_lyric_from_path_impl(
+        34 => wire__crate__api__tag_reader__get_lyric_from_path_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__api__tag_reader__get_picture_and_colors_impl(
+        35 => wire__crate__api__tag_reader__get_picture_and_colors_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        35 => wire__crate__api__tag_reader__get_picture_from_path_impl(
+        36 => wire__crate__api__tag_reader__pictures__get_picture_by_index_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__api__library_db__play_counts__get_play_count_impl(
+        37 => wire__crate__api__tag_reader__get_picture_from_path_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        37 => wire__crate__api__library_db__play_counts__get_play_history_stats_impl(
+        38 => wire__crate__api__library_db__play_counts__get_play_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        38 => wire__crate__api__library_db__play_counts__get_top_played_impl(
+        39 => wire__crate__api__library_db__play_counts__get_play_history_stats_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        39 => wire__crate__api__library_db__play_counts__import_play_counts_impl(
+        40 => wire__crate__api__library_db__play_counts__get_top_played_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        40 => wire__crate__api__library_db__play_counts__import_play_history_impl(
+        41 => wire__crate__api__library_db__play_counts__import_play_counts_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        41 => wire__crate__api__library_db__play_counts__increment_play_count_impl(
+        42 => wire__crate__api__library_db__play_counts__import_play_history_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__api__logger__init_rust_logger_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__smart_transition__init_smart_transition_events_impl(
+        43 => wire__crate__api__library_db__play_counts__increment_play_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__utils__launch_in_browser_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__library_db__migrate_index_json_to_sqlite_impl(
+        44 => wire__crate__api__logger__init_rust_logger_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__smart_transition__init_smart_transition_events_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__api__ne__ne_lyric_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__ne__ne_search_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__utils__pick_single_folder_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__smart_sort__plan_smart_sort_json_impl(
+        46 => wire__crate__api__utils__launch_in_browser_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__tag_reader__pictures__list_pictures_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__smart_transition__plan_smart_transition_json_impl(
+        48 => wire__crate__api__library_db__migrate_index_json_to_sqlite_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__tag_reader__read_audio_extra_metadata_impl(
+        50 => wire__crate__api__ne__ne_lyric_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__ne__ne_search_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__utils__pick_single_folder_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__smart_sort__plan_smart_sort_json_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => {
+        54 => wire__crate__api__smart_transition__plan_smart_transition_json_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        55 => wire__crate__api__tag_reader__read_audio_extra_metadata_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        56 => {
             wire__crate__api__library_db__read_hidden_audios_impl(port, ptr, rust_vec_len, data_len)
         }
-        54 => wire__crate__api__library_db__read_index_from_sqlite_impl(
+        57 => wire__crate__api__library_db__read_index_from_sqlite_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => {
+        58 => {
             wire__crate__api__library_db__set_audios_hidden_impl(port, ptr, rust_vec_len, data_len)
         }
-        56 => wire__crate__api__network_proxy__set_network_proxy_impl(
+        59 => wire__crate__api__network_proxy__set_network_proxy_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => {
+        60 => {
             wire__crate__api__app_env__set_process_temp_dir_impl(port, ptr, rust_vec_len, data_len)
         }
-        58 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__system_theme__system_theme_default_impl(
+        61 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__system_theme__system_theme_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
-        65 => {
+        67 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
+        68 => {
             wire__crate__api__tag_reader__write_audio_cover_impl(port, ptr, rust_vec_len, data_len)
         }
-        66 => {
+        69 => {
             wire__crate__api__tag_reader__write_audio_tags_impl(port, ptr, rust_vec_len, data_len)
         }
-        67 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
+        70 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
             port,
             ptr,
             rust_vec_len,
@@ -3827,27 +4007,27 @@ fn pde_ffi_dispatcher_sync_impl(
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__api__smart_transition__native_smart_transition_snapshot_json_impl(
+        49 => wire__crate__api__smart_transition__native_smart_transition_snapshot_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
+        62 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
+        63 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
+        64 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
+        66 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
             ptr,
             rust_vec_len,
             data_len,
@@ -4156,6 +4336,53 @@ impl flutter_rust_bridge::IntoDart for crate::api::ne::LyricUser {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ne::LyricUser {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::ne::LyricUser> for crate::api::ne::LyricUser {
     fn into_into_dart(self) -> crate::api::ne::LyricUser {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::tag_reader::pictures::PictureInfo {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.index.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.mime_type.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::tag_reader::pictures::PictureInfo
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::tag_reader::pictures::PictureInfo>
+    for crate::api::tag_reader::pictures::PictureInfo
+{
+    fn into_into_dart(self) -> crate::api::tag_reader::pictures::PictureInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::tag_reader::pictures::PictureKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Front => 0.into_dart(),
+            Self::Back => 1.into_dart(),
+            Self::Disc => 2.into_dart(),
+            Self::Booklet => 3.into_dart(),
+            Self::Other => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::tag_reader::pictures::PictureKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::tag_reader::pictures::PictureKind>
+    for crate::api::tag_reader::pictures::PictureKind
+{
+    fn into_into_dart(self) -> crate::api::tag_reader::pictures::PictureKind {
         self
     }
 }
@@ -4680,6 +4907,16 @@ impl SseEncode for Vec<crate::api::installed_font::InstalledFont> {
     }
 }
 
+impl SseEncode for Vec<crate::api::tag_reader::pictures::PictureInfo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::tag_reader::pictures::PictureInfo>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::library_db::PlayCountEntry> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -4845,6 +5082,35 @@ impl SseEncode for Option<Vec<u8>> {
         if let Some(value) = self {
             <Vec<u8>>::sse_encode(value, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::tag_reader::pictures::PictureInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.index, serializer);
+        <crate::api::tag_reader::pictures::PictureKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.mime_type, serializer);
+        <Option<String>>::sse_encode(self.description, serializer);
+    }
+}
+
+impl SseEncode for crate::api::tag_reader::pictures::PictureKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::tag_reader::pictures::PictureKind::Front => 0,
+                crate::api::tag_reader::pictures::PictureKind::Back => 1,
+                crate::api::tag_reader::pictures::PictureKind::Disc => 2,
+                crate::api::tag_reader::pictures::PictureKind::Booklet => 3,
+                crate::api::tag_reader::pictures::PictureKind::Other => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
