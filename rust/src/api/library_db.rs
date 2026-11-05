@@ -1284,18 +1284,12 @@ pub fn get_cached_picture(
             source_size,
         )
     }) {
-        Ok(Ok(Some(png))) => return Some(png),
-        Ok(Ok(None)) => {}
-        Ok(Err(err)) => {
-            log::warn!(
-                target: "library",
-                "read cached cover picture failed for {path}: {err:#}"
-            );
-        }
+        Ok(Some(png)) => return Some(png),
+        Ok(None) => {}
         Err(err) => {
             log::warn!(
                 target: "library",
-                "open cover picture cache failed for {path}: {err:#}"
+                "read cached cover picture failed for {path}: {err:#}"
             );
         }
     }

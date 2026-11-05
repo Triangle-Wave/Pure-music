@@ -164,13 +164,15 @@ pub(super) fn read_dff_pictures(path: &Path) -> Result<Vec<EmbeddedPicture>> {
     {
         pictures.extend(tag.pictures().map(embedded_from_id3));
     }
-    if let Some(picture) = metadata.and_then(|metadata| metadata.picture.clone()) {
-        pictures.push(embedded_from_parts(
-            None,
-            None,
-            PictureKind::Other,
-            picture,
-        ));
+    if let Some(metadata) = metadata {
+        pictures.extend(metadata.cover_art.iter().map(|picture| {
+            embedded_from_parts(
+                Some(picture.mime_type.as_str()),
+                Some(picture.description.as_str()),
+                PictureKind::Other,
+                picture.data.clone(),
+            )
+        }));
     }
     Ok(pictures)
 }
