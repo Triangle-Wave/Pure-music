@@ -5,9 +5,29 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.20**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.21**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.21</strong></summary>
+
+**专辑图片**
+
+- 专辑详情页展示封面、封底、碟片、内页等多图，缩略图条循环切换全部候选。
+- 点击主图进入全屏查看器，支持缩放、拖拽、左右切换与键盘方向键。
+- 文件夹图识别 cover/front、back/rear、disc/tray、booklet/scans 等命名。
+- 内嵌图读取 FLAC、MP3、M4A、DSF、DFF 中的全部图片与角色。
+- 在线 Cover Art Archive 提供封底、碟片与内页，国内源命中后后台补充。
+- 主图按 600×600 读取，查看器按屏幕分辨率取 2048 以内。
+
+**行为**
+
+- 主图优先封面；无封面时取列表第一张。
+- 同角色多来源按文件夹图、内嵌图、在线图取一张；内页与其他保留多张。
+- 显式选择在线候选时，在线封面替换本地封面；其余角色仍按来源优先级合并。
+
+</details>
 
 <details>
 <summary><strong>2.3.20</strong></summary>
