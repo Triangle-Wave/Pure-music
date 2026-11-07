@@ -32,6 +32,9 @@ class MemoryMonitorService {
   DateTime? _lastTier1CleanupAt;
   DateTime? _lastTier2CleanupAt;
   DateTime? _lastTier3CleanupAt;
+  DateTime? _lastPlayingTier1CleanupAt;
+  DateTime? _lastPlayingTier2CleanupAt;
+  DateTime? _lastPlayingTier3CleanupAt;
 
   static ffi.DynamicLibrary? _kernel32;
   static _SetProcessWorkingSetSizeDart? _setProcessWorkingSetSize;
@@ -142,6 +145,52 @@ class MemoryMonitorService {
     final playingFilePath = nowPlaying?.filePath;
     final now = DateTime.now();
     if (_isPlaying()) {
+      // 180/240/280MB 衡量的是播放时持续增长的可回收缓存增量：播放中界面
+      // 持续复用图片、文字和图形缓存，不能按非播放态的 RSS 周期清空
+      // imageCache，只在 RSS 越过对应档位时回收过期封面、裁剪歌词对象池。
+      const playingTier1Threshold = 180;
+      const playingTier2Threshold = 240;
+      const playingTier3Threshold = 280;
+      final playingRssMB = (ProcessInfo.currentRss / (1024 * 1024)).round();
+      if (playingRssMB > playingTier3Threshold &&
+          _cleanupDue(
+            now,
+            _lastPlayingTier3CleanupAt,
+            const Duration(minutes: 5),
+          )) {
+        _lastPlayingTier3CleanupAt = now;
+        AudioLibrary.instance.evictStaleCoverBytes();
+        AudioLibrary.instance.trimCollectionThumbnailRetention(64);
+        CoverImageCache.instance.trimMemory(keepPath: playingFilePath);
+        LyricsLinePainter.trimPool();
+        // 播放中只在最高档换出工作集页：低档换出可能把音频缓冲换出，
+        // 造成卡顿/爆音；仅在内存压力确实偏高时才承受这一代价。
+        _trimWorkingSet();
+        log.memory.warn(
+          'legacy',
+          '[mem] playing RSS ${playingRssMB}MB > $playingTier3Threshold, trim working set',
+        );
+      } else if (playingRssMB > playingTier2Threshold &&
+          _cleanupDue(
+            now,
+            _lastPlayingTier2CleanupAt,
+            const Duration(minutes: 10),
+          )) {
+        _lastPlayingTier2CleanupAt = now;
+        AudioLibrary.instance.evictStaleCoverBytes();
+        CoverImageCache.instance.trimMemory(keepPath: playingFilePath);
+        LyricsLinePainter.trimPool();
+      } else if (playingRssMB > playingTier1Threshold &&
+          _cleanupDue(
+            now,
+            _lastPlayingTier1CleanupAt,
+            const Duration(minutes: 2),
+          )) {
+        _lastPlayingTier1CleanupAt = now;
+        AudioLibrary.instance.trimCollectionThumbnailRetention(128);
+        LyricsLinePainter.trimPool();
+        AudioLibrary.instance.evictStaleCoverBytes();
+      }
       if (Platform.environment['CP_MEMORY_LOG'] == '1') {
         CoverImageCache.instance.logStats();
       }
@@ -238,6 +287,7 @@ class MemoryMonitorService {
     AudioLibrary.instance.trimCollectionThumbnailRetention(96);
     CoverImageCache.instance.trimMemory(keepPath: playingPath);
     CoverImageCache.instance.trimSmall(keepEntries: 64);
+    LyricsLinePainter.trimPool();
   }
 
   /// 托盘驻留清理：释放大图/位图等大头，但保留 48px 小图与当前曲目，

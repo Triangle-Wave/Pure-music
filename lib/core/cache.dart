@@ -32,7 +32,7 @@ class AlbumColorCache {
 
   bool _initialized = false;
   int _generation = 0;
-  static const int _maxEntries = 200;
+  static const int _maxEntries = 96;
   final Map<String, Map<String, Object?>> _entries = {};
   final Map<String, Future<AlbumColor?>> _inFlight = {};
   Timer? _flushTimer;
@@ -602,7 +602,45 @@ class _StableCoverImage extends ImageProvider<_StableCoverKey> {
     if (bytes == null) {
       throw StateError('Cover image is unavailable: ${key.path}');
     }
-    return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    // key 存的是逻辑尺寸，解码要用物理像素，否则高分屏上封面会糊。
+    final targetWidth = (key.width * key.pixelRatio).round();
+    final targetHeight = (key.height * key.pixelRatio).round();
+    if (targetWidth <= 0 || targetHeight <= 0) {
+      return decode(buffer);
+    }
+    try {
+      // 按请求的物理尺寸解码，避免大封面按原图解码后再整张上传纹理。
+      return await ui.instantiateImageCodecWithSize(
+        buffer,
+        getTargetSize: (intrinsicWidth, intrinsicHeight) {
+          if (intrinsicWidth <= targetWidth &&
+              intrinsicHeight <= targetHeight) {
+            return ui.TargetImageSize(
+              width: intrinsicWidth,
+              height: intrinsicHeight,
+            );
+          }
+          final scale = min(
+            targetWidth / intrinsicWidth,
+            targetHeight / intrinsicHeight,
+          );
+          return ui.TargetImageSize(
+            width: max(1, (intrinsicWidth * scale).round()),
+            height: max(1, (intrinsicHeight * scale).round()),
+          );
+        },
+      );
+    } catch (error, stackTrace) {
+      // 目标尺寸解码不可用时退回整张解码，封面仍可显示。
+      // 重新构造 buffer，避免 sized 解码已消费原 buffer 后复用出错。
+      log.app.warn(
+        'legacy',
+        '[cache] sized cover decode failed, fallback to full decode: $error',
+        stackTrace: stackTrace,
+      );
+      return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+    }
   }
 }
 

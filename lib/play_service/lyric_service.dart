@@ -343,6 +343,8 @@ class _LyricCache {
 }
 
 final _LyricCache _lyricCache = _LyricCache();
+final Expando<bool> _profanityProcessedLyrics = Expando();
+final Expando<int> _metadataSignatureByLyric = Expando();
 
 /// 只通知 lyric 变更
 class OffsetTagSaveResult {
@@ -1019,26 +1021,39 @@ class LyricService extends ChangeNotifier {
 
   void _setCurrLyric(Lyric lyric) {
     // 先还原歌词中被 * 屏蔽的脏话词，避免星号/连字符干扰元数据检测
-    applyProfanityUncensor(lyric);
+    if (_profanityProcessedLyrics[lyric] != true) {
+      applyProfanityUncensor(lyric);
+      _profanityProcessedLyrics[lyric] = true;
+    }
     final keepMetadata = AppSettings.instance.keepLyricMetadata;
-    if (lyric is Ttml && _activeLyricSourceType == LyricSourceType.amll) {
-      blankAmllTtmlCreatorLines(lyric.lines);
-    } else {
-      final nowPlaying = _getNowPlaying();
-      final artists = nowPlaying == null
-          ? const <String>[]
-          : <String>{...nowPlaying.splitedArtists, nowPlaying.artist}
-                .where((artist) => artist.trim().isNotEmpty)
-                .toList(growable: false);
-      final options = StripOptions(
-        matchTitle: nowPlaying?.title,
-        matchArtists: artists,
-      );
-      if (keepMetadata) {
-        markMetadataLines(lyric.lines, options);
+    final nowPlaying = _getNowPlaying();
+    final artists = nowPlaying == null
+        ? const <String>[]
+        : <String>{...nowPlaying.splitedArtists, nowPlaying.artist}
+              .where((artist) => artist.trim().isNotEmpty)
+              .toList(growable: false);
+    final metadataSignature = Object.hashAll([
+      _activeLyricPath,
+      _activeLyricSourceType,
+      keepMetadata,
+      nowPlaying?.title,
+      ...artists,
+    ]);
+    if (_metadataSignatureByLyric[lyric] != metadataSignature) {
+      if (lyric is Ttml && _activeLyricSourceType == LyricSourceType.amll) {
+        blankAmllTtmlCreatorLines(lyric.lines);
       } else {
-        blankMetadataLines(lyric.lines, options);
+        final options = StripOptions(
+          matchTitle: nowPlaying?.title,
+          matchArtists: artists,
+        );
+        if (keepMetadata) {
+          markMetadataLines(lyric.lines, options);
+        } else {
+          blankMetadataLines(lyric.lines, options);
+        }
       }
+      _metadataSignatureByLyric[lyric] = metadataSignature;
     }
 
     if (AppSettings.instance.autoRomanizeLyric) {

@@ -11,6 +11,15 @@ bool windowRenderShouldEnableFrames({
 bool shouldAcceptLyricUiUpdate({required bool windowFramesEnabled}) =>
     windowFramesEnabled;
 
+/// 窗口被挡住太久时连歌词、封面、进度这些 ticker 一起停；
+/// 最小化/托盘由 framesEnabled 负责，调整窗口大小由 resizing 负责，
+/// 被遮挡闲时由 backgroundIdle 负责。
+bool windowTickersEnabled({
+  required bool resizing,
+  required bool framesEnabled,
+  required bool backgroundIdle,
+}) => !resizing && framesEnabled && !backgroundIdle;
+
 /// 恢复窗口的回调排队期间窗口可能再次最小化，只有仍属于同一次恢复
 /// 才允许把窗口状态改回非最小化。
 bool windowRestoreStillCurrent({
@@ -34,12 +43,17 @@ class WindowRenderGate with WidgetsBindingObserver {
 
   final void Function(bool enabled) _applyFramesEnabled;
   final ValueNotifier<bool> framesEnabled = ValueNotifier(true);
+  final ValueNotifier<bool> backgroundIdle = ValueNotifier(false);
 
   bool _trayHidden = false;
   bool _windowMinimized = false;
   bool _schedulerFramesEnabled = true;
   bool _pauseScheduled = false;
   bool _attached = false;
+  bool _windowFocused = true;
+  Timer? _backgroundIdleTimer;
+
+  static const _backgroundIdleDelay = Duration(seconds: 30);
 
   bool get shouldRender => windowRenderShouldEnableFrames(
     trayHidden: _trayHidden,
@@ -55,6 +69,10 @@ class WindowRenderGate with WidgetsBindingObserver {
   void detach() {
     if (!_attached) return;
     _attached = false;
+    _backgroundIdleTimer?.cancel();
+    _backgroundIdleTimer = null;
+    _windowFocused = true;
+    if (backgroundIdle.value) backgroundIdle.value = false;
     WidgetsBinding.instance.removeObserver(this);
   }
 
@@ -62,12 +80,14 @@ class WindowRenderGate with WidgetsBindingObserver {
   void setTrayHidden(bool hidden) {
     if (_trayHidden == hidden) return;
     _trayHidden = hidden;
+    _syncBackgroundIdle();
     _sync();
   }
 
   void setWindowMinimized(bool minimized) {
     if (_windowMinimized == minimized) return;
     _windowMinimized = minimized;
+    _syncBackgroundIdle();
     _sync();
   }
 
@@ -77,6 +97,7 @@ class WindowRenderGate with WidgetsBindingObserver {
     if (!changed) return;
     _trayHidden = false;
     _windowMinimized = false;
+    _syncBackgroundIdle();
     _sync();
   }
 
@@ -84,15 +105,47 @@ class WindowRenderGate with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
-      case AppLifecycleState.inactive:
+        _setWindowFocused(true);
         // 藏进托盘后不能把系统焦点当成「窗口回来了」
-        if (_trayHidden) return;
-        enterForeground();
+        if (!_trayHidden) enterForeground();
+        break;
+      case AppLifecycleState.inactive:
+        _setWindowFocused(false);
+        // 藏进托盘后不能把系统焦点当成「窗口回来了」
+        if (!_trayHidden) enterForeground();
+        break;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
+        _setWindowFocused(false);
         break;
     }
+  }
+
+  void _setWindowFocused(bool focused) {
+    if (_windowFocused == focused) return;
+    _windowFocused = focused;
+    _syncBackgroundIdle();
+  }
+
+  /// 窗口失焦且仍停留在桌面（未最小化、未藏托盘）超过 30 秒后进入闲时档，
+  /// 连歌词、封面、进度这些 ticker 一起停；回到前台或窗口被隐藏时立即复位。
+  /// 该门闩由 inactive 生命周期驱动，被遮挡但仍可见时不会触发。
+  void _syncBackgroundIdle() {
+    final shouldCount =
+        !_windowFocused && !_trayHidden && !_windowMinimized;
+    if (!shouldCount) {
+      _backgroundIdleTimer?.cancel();
+      _backgroundIdleTimer = null;
+      if (backgroundIdle.value) backgroundIdle.value = false;
+      return;
+    }
+    if (_backgroundIdleTimer != null || backgroundIdle.value) return;
+    _backgroundIdleTimer = Timer(_backgroundIdleDelay, () {
+      _backgroundIdleTimer = null;
+      if (_windowFocused || _trayHidden || _windowMinimized) return;
+      backgroundIdle.value = true;
+    });
   }
 
   void _sync() {

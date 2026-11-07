@@ -422,6 +422,10 @@ class BassPlayer {
   Timer? _fadeOutTimer;
   int? _fadeOutHandle;
   bool _fadeOutRemoveFromMixer = false;
+  /// 非无缝模式的混音器不接管源，淡出结束后要自己释放。
+  final List<int> _fadeOutSources = <int>[];
+  /// detach 前主链路持有的句柄快照，兜底释放时跳过，避免误伤被复用的句柄。
+  final Set<int> _fadeOutActiveHandles = <int>{};
 
   /// 自动切歌过渡（淡入淡出/交叉淡化）状态
   Timer? _transitionTimer;
@@ -729,11 +733,18 @@ class BassPlayer {
   /// update every 33ms
   Stream<double> get positionStream => _positionStreamController.stream;
 
-  Stream<Float32List> get spectrumStream => _spectrumStreamController.stream;
+  /// 广播流的 stream getter 每次访问都返回新对象；这里缓存同一实例，
+  /// 播放页重建时 identical 判断才成立，不会反复断开重订阅导致律动重置抖动。
+  late final Stream<Float32List> _spectrumStream =
+      _spectrumStreamController.stream;
+
+  Stream<Float32List> get spectrumStream => _spectrumStream;
 
   /// 播放页频谱条用的细分段频谱（与 [spectrumStream] 同源同节奏，互不影响）。
-  Stream<Float32List> get spectrumDisplayStream =>
+  late final Stream<Float32List> _spectrumDisplayStream =
       _spectrumDisplayStreamController.stream;
+
+  Stream<Float32List> get spectrumDisplayStream => _spectrumDisplayStream;
 
   Stream<PlayerState> get playerStateStream =>
       _playerStateStreamController.stream;
@@ -1790,6 +1801,9 @@ class BassPlayer {
     _fadeOutTimer = null;
     _fadeOutHandle = null;
     _fadeOutRemoveFromMixer = false;
+    // BASS_Free 使全部原生句柄失效，丢弃待释放清单与快照即可。
+    _fadeOutSources.clear();
+    _fadeOutActiveHandles.clear();
     _transitionGeneration++;
     _transitionTimer?.cancel();
     _transitionTimer = null;
@@ -2513,6 +2527,9 @@ class BassPlayer {
     final fadeOutRemove = _fadeOutRemoveFromMixer;
     _fadeOutHandle = null;
     _fadeOutRemoveFromMixer = false;
+    // 随后的 _bassInit 经 BASS_Free 使全部原生句柄失效，丢弃待释放清单与快照。
+    _fadeOutSources.clear();
+    _fadeOutActiveHandles.clear();
     if (fadeOut != null) {
       if (fadeOutRemove) _bassMix?.channelRemove(fadeOut);
       _bass.BASS_ChannelStop(fadeOut);
@@ -3483,10 +3500,41 @@ class BassPlayer {
     _publishAudioFiles();
   }
 
-  int? _detachGaplessMixer() {
+  ({
+    int mixer,
+    List<int> sources,
+    bool mixerOwnsSources,
+    Set<int> activeHandles,
+  })? _detachGaplessMixer({
+    int? previousSource,
+    Set<int> retainedHandles = const <int>{},
+  }) {
     final mixer = _mixerStream;
     if (mixer == null) return null;
+    // 字段置空前取快照：AUTOFREE 归属与「由其它释放路径持有的句柄」
+    // 都只能依赖这一刻的值，置空后无法再判断。
+    final mixerOwnsSources = _mixerUsesQueue;
+    final activeHandles = <int>{
+      mixer,
+      if (_fadeOutHandle != null) _fadeOutHandle!,
+      ...retainedHandles,
+    };
     final detachedQueuedStream = _queuedStreamAttached ? null : _queuedStream;
+    // seamless 下源以 AUTOFREE 挂在混音器上，free 混音器时自动释放；
+    // 只有非 AUTOFREE 的源才需要调用方兜底释放。
+    final ownedSources = <int>[];
+    if (!mixerOwnsSources) {
+      // 旧源以调用方传入的 detach 前快照为准；_fstream 在切换路径上可能
+      // 已指向新建解码流，缺省时回退读取。
+      final current = previousSource ?? _fstream;
+      if (current != null && current != mixer) ownedSources.add(current);
+      final attachedQueued = _queuedStreamAttached ? _queuedStream : null;
+      if (attachedQueued != null &&
+          attachedQueued != mixer &&
+          !ownedSources.contains(attachedQueued)) {
+        ownedSources.add(attachedQueued);
+      }
+    }
     _mixerGeneration++;
     _unreportedGaplessTransition = null;
     _handledCompletionClearTimer?.cancel();
@@ -3513,16 +3561,80 @@ class BassPlayer {
     if (detachedQueuedStream != null) {
       _bass.BASS_StreamFree(detachedQueuedStream);
     }
-    return mixer;
+    return (
+      mixer: mixer,
+      sources: ownedSources,
+      mixerOwnsSources: mixerOwnsSources,
+      activeHandles: activeHandles,
+    );
   }
 
-  void _dropGaplessMixer() {
+  /// 释放已经脱离混音器、又没带 AUTOFREE 的源。
+  /// [activeHandles] 是 detach 前主链路持有句柄的显式快照，含仍需继续使用、
+  /// 不得在此释放的解码流与输出句柄；protected 以该快照为可靠来源。
+  /// detach 会把 _fstream/_mixerStream/_queuedStream 置空，置空后的字段不作为
+  /// 跳过依据；仅未 detach 的释放路径（如淡出清理）里，当前存活句柄才作为补充
+  /// 保护，避免误停/误释放仍在使用的流。
+  void _freeOwnedSources(
+    List<int> sources, {
+    Set<int> activeHandles = const <int>{},
+  }) {
+    final protected = <int>{
+      ...activeHandles,
+      if (_fstream != null) _fstream!,
+      if (_mixerStream != null) _mixerStream!,
+      if (_queuedStream != null) _queuedStream!,
+      if (_fadeOutHandle != null) _fadeOutHandle!,
+    };
+    final seen = <int>{};
+    for (final source in sources) {
+      if (!seen.add(source)) continue;
+      if (protected.contains(source)) continue;
+      _bass.BASS_ChannelStop(source);
+      _bass.BASS_StreamFree(source);
+    }
+  }
+
+  /// 兜底释放已脱离混音器的非 AUTOFREE 源；FFI 异常记录上下文并跳过剩余源，
+  /// 避免单个失效句柄让整条清理链中断。
+  void _safeFreeOwnedSources(
+    List<int> sources, {
+    Set<int> activeHandles = const <int>{},
+  }) {
+    for (final source in sources) {
+      try {
+        _freeOwnedSources(<int>[source], activeHandles: activeHandles);
+      } catch (error, stackTrace) {
+        log.bass.warn(
+          'legacy',
+          '[bass] freeing detached source $source failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
+  void _dropGaplessMixer({
+    int? previousSource,
+    Set<int> retainedHandles = const <int>{},
+  }) {
     _removeAudioEffects();
     _removeEQ();
-    final mixer = _detachGaplessMixer();
-    if (mixer == null) return;
-    _bass.BASS_ChannelStop(mixer);
-    _bass.BASS_StreamFree(mixer);
+    final detached = _detachGaplessMixer(
+      previousSource: previousSource,
+      retainedHandles: retainedHandles,
+    );
+    if (detached == null) return;
+    _bass.BASS_ChannelStop(detached.mixer);
+    // AUTOFREE 源随混音器一并释放，仅兜底释放非 AUTOFREE 源。
+    _bass.BASS_StreamFree(detached.mixer);
+    if (!detached.mixerOwnsSources) {
+      _safeFreeOwnedSources(
+        detached.sources,
+        activeHandles: detached.activeHandles,
+      );
+    }
   }
 
   GaplessTransition? clearGaplessSource() {
@@ -4041,7 +4153,12 @@ class BassPlayer {
         _removeEQ();
         _removeAudioEffects();
         if (_mixerStream != null) {
-          _dropGaplessMixer();
+          // 旧源按 detach 前的快照释放；decodeHandle 已绑定 WASAPI 输出，
+          // 作为仍存活的句柄纳入保护，避免被兜底释放误停/误释放。
+          _dropGaplessMixer(
+            previousSource: oldSource,
+            retainedHandles: <int>{decodeHandle},
+          );
         } else {
           _bass.BASS_ChannelStop(oldHandle);
           _bass.BASS_StreamFree(oldHandle);
@@ -4375,6 +4492,8 @@ class BassPlayer {
     bool delayCleanup = false,
     bool removeFromMixer = false,
     int? transitionGeneration,
+    List<int> alsoFree = const <int>[],
+    Set<int> activeHandles = const <int>{},
   }) {
     final sliding = _bass.BASS_ChannelSlideAttribute(
       handle,
@@ -4393,24 +4512,42 @@ class BassPlayer {
     if (_fadeOutHandle != null && _fadeOutHandle != handle) {
       final previous = _fadeOutHandle!;
       final previousRemove = _fadeOutRemoveFromMixer;
+      final previousSources = List<int>.of(_fadeOutSources);
+      final previousActive = Set<int>.of(_fadeOutActiveHandles);
       _fadeOutHandle = null;
       _fadeOutRemoveFromMixer = false;
+      _fadeOutSources.clear();
+      _fadeOutActiveHandles.clear();
       _discardFadedSource(previous, removeFromMixer: previousRemove);
+      _safeFreeOwnedSources(previousSources, activeHandles: previousActive);
     }
     _fadeOutHandle = handle;
     _fadeOutRemoveFromMixer = removeFromMixer;
+    // AUTOFREE 源由混音器释放，这里只登记非 AUTOFREE 源；
+    // activeHandles 里的句柄已由其它释放路径处理，不作为源重复释放。
+    _fadeOutSources
+      ..clear()
+      ..addAll(alsoFree.where((source) => !activeHandles.contains(source)));
+    _fadeOutActiveHandles
+      ..clear()
+      ..addAll(activeHandles);
 
     _fadeOutTimer = Timer(Duration(milliseconds: durationMs + 20), () {
       if (_fadeOutHandle != handle) return;
       _fadeOutHandle = null;
       _fadeOutRemoveFromMixer = false;
       _fadeOutTimer = null;
+      final sources = List<int>.of(_fadeOutSources);
+      final active = Set<int>.of(_fadeOutActiveHandles);
+      _fadeOutSources.clear();
+      _fadeOutActiveHandles.clear();
       _discardFadedSource(
         handle,
         removeFromMixer: removeFromMixer,
         completeTransition: true,
         transitionGeneration: transitionGeneration,
       );
+      _safeFreeOwnedSources(sources, activeHandles: active);
     });
   }
 
@@ -4503,13 +4640,22 @@ class BassPlayer {
         _bass.BASS_ChannelStop(oldHandle);
         _bass.BASS_StreamFree(oldHandle);
       } else {
-        final output = _mixerStream == null
-            ? oldHandle
-            : _detachGaplessMixer()!;
+        final detached = _mixerStream == null ? null : _detachGaplessMixer();
+        final output = detached?.mixer ?? oldHandle;
         // 手动切歌防爆音：固定短淡出（300ms），新歌立即淡入。
         // 旧文件还要等淡出结束才松开。
         _lingeringPath = _fPath;
-        _fadeOutOldStream(output, durationMs: 300, delayCleanup: true);
+        _fadeOutOldStream(
+          output,
+          durationMs: 300,
+          delayCleanup: true,
+          // AUTOFREE 源由混音器释放，淡出结束不二次释放；
+          // 仅非 AUTOFREE 源随淡出兜底释放。
+          alsoFree: detached == null || detached.mixerOwnsSources
+              ? const <int>[]
+              : detached.sources,
+          activeHandles: detached?.activeHandles ?? const <int>{},
+        );
       }
       _fstream = null;
       _cachedLengthSeconds = null;
@@ -5294,6 +5440,14 @@ class BassPlayer {
       _fadeOutHandle = null;
       _fadeOutRemoveFromMixer = false;
     }
+    // freeFStream 不伴随 BASS_Free，非 AUTOFREE 源不会随混音器失效，
+    // 这里逐个兜底释放；activeHandles 快照避免重复释放已处理的句柄。
+    _safeFreeOwnedSources(
+      List<int>.of(_fadeOutSources),
+      activeHandles: Set<int>.of(_fadeOutActiveHandles),
+    );
+    _fadeOutSources.clear();
+    _fadeOutActiveHandles.clear();
     _cancelTransition();
     final smartPreparation = _smartPreparation;
     if (smartPreparation != null && !_smartIncomingNativeOwned) {
@@ -5372,6 +5526,9 @@ class BassPlayer {
       _fadeOutHandle = null;
       _fadeOutRemoveFromMixer = false;
     }
+    // 末尾的 BASS_Free 使全部原生句柄失效，丢弃待释放清单与快照。
+    _fadeOutSources.clear();
+    _fadeOutActiveHandles.clear();
     _positionUpdaterVersion++;
     _positionUpdater?.cancel();
     _positionUpdater = null;

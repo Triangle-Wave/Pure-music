@@ -49,15 +49,31 @@ class _SpectrumBarState extends State<SpectrumBar>
   double _t = 1.0;
   bool _reduceMotion = false;
   bool _windowFramesEnabled = true;
+  bool _backgroundIdle = false;
 
   @override
   void initState() {
     super.initState();
     _playback = context.read<PlaybackService>();
     _windowFramesEnabled = WindowRenderGate.instance.framesEnabled.value;
+    _backgroundIdle = WindowRenderGate.instance.backgroundIdle.value;
     WindowRenderGate.instance.framesEnabled.addListener(_onWindowFramesChanged);
+    WindowRenderGate.instance.backgroundIdle.addListener(
+      _onBackgroundIdleChanged,
+    );
     _syncSpectrumSubscription();
     _playback.playerStateNotifier.addListener(_onPlayerStateChanged);
+  }
+
+  void _onBackgroundIdleChanged() {
+    if (!mounted) return;
+    _backgroundIdle = WindowRenderGate.instance.backgroundIdle.value;
+    _syncSpectrumSubscription();
+    if (_backgroundIdle) {
+      _ticker?.stop();
+      _lastTick = Duration.zero;
+      _clearFrameToBaseline();
+    }
   }
 
   void _onWindowFramesChanged() {
@@ -75,7 +91,8 @@ class _SpectrumBarState extends State<SpectrumBar>
   }
 
   void _syncSpectrumSubscription() {
-    final shouldListen = _windowFramesEnabled && !_reduceMotion;
+    final shouldListen =
+        _windowFramesEnabled && !_backgroundIdle && !_reduceMotion;
     if (shouldListen) {
       _subscription ??= _playback.spectrumDisplayStream.listen(_onData);
       return;
@@ -104,6 +121,9 @@ class _SpectrumBarState extends State<SpectrumBar>
     WindowRenderGate.instance.framesEnabled.removeListener(
       _onWindowFramesChanged,
     );
+    WindowRenderGate.instance.backgroundIdle.removeListener(
+      _onBackgroundIdleChanged,
+    );
     _playback.playerStateNotifier.removeListener(_onPlayerStateChanged);
     _subscription?.cancel();
     _ticker?.dispose();
@@ -112,7 +132,12 @@ class _SpectrumBarState extends State<SpectrumBar>
   }
 
   void _onData(Float32List data) {
-    if (!mounted || !_windowFramesEnabled || data.isEmpty) return;
+    if (!mounted ||
+        !_windowFramesEnabled ||
+        _backgroundIdle ||
+        data.isEmpty) {
+      return;
+    }
     if (_frame.values.length != data.length) {
       _frame.values = Float32List(data.length);
       _from = Float32List(data.length);
@@ -247,6 +272,10 @@ class _SpectrumBarsPainter extends CustomPainter {
   static const _minBar = 3.5;
   static const _visualGain = 1.25;
   static const _visualCurve = 0.9;
+  static final List<double> _curveTable = List<double>.generate(
+    1001,
+    (i) => math.pow(i / 1000, _visualCurve).toDouble(),
+  );
   static const _minAlpha = 0.3;
   static const _maxAlpha = 0.68;
 
@@ -265,11 +294,13 @@ class _SpectrumBarsPainter extends CustomPainter {
     if (maxHeight <= _minBar) return;
     final radius = Radius.circular(barWidth > 4.0 ? 2.0 : barWidth / 2);
     final inset = (slot - barWidth) / 2;
+    // rawValue^0.9 查表：0.001 精度内曲线无肉眼差，省每柱一次 pow。
     for (var i = 0; i < count; i++) {
       final rawValue = values[i].clamp(0.0, 1.0).toDouble();
-      final value = (math.pow(rawValue, _visualCurve).toDouble() * _visualGain)
-          .clamp(0.0, 1.0)
-          .toDouble();
+      final value =
+          (_curveTable[(rawValue * 1000).round()] * _visualGain)
+              .clamp(0.0, 1.0)
+              .toDouble();
       final barHeight = _minBar + (maxHeight - _minBar) * value;
       _barPaint.color = color.withValues(
         alpha: _minAlpha + (_maxAlpha - _minAlpha) * value,

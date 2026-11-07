@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/gestures.dart';
+import 'package:pure_music/core/window_render_gate.dart';
 import 'package:pure_music/native/bass/bass_player.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:flutter/material.dart';
@@ -124,9 +125,22 @@ class _RectangleProgressIndicatorState
     playbackService.playerStateNotifier.addListener(_syncTimer);
     playbackService.nowPlayingNotifier.addListener(_onNowPlayingChanged);
     playbackService.positionSyncNotifier.addListener(_onPositionSync);
+    WindowRenderGate.instance.framesEnabled.addListener(_onWindowFramesChanged);
+    WindowRenderGate.instance.backgroundIdle.addListener(_onWindowFramesChanged);
     _syncNativeProgress();
     _syncTimer();
   }
+
+  void _onWindowFramesChanged() {
+    if (!mounted) return;
+    _syncTimer();
+  }
+
+  bool get _windowTickersRunning => windowTickersEnabled(
+    resizing: false,
+    framesEnabled: WindowRenderGate.instance.framesEnabled.value,
+    backgroundIdle: WindowRenderGate.instance.backgroundIdle.value,
+  );
 
   void _syncNativeProgress() {
     // 拖拽中冻结本地同步值，避免结束后进度跳回 seek 前的位置。
@@ -156,7 +170,7 @@ class _RectangleProgressIndicatorState
     _syncNativeProgress();
     final isPlaying =
         playbackService.playerStateNotifier.value == PlayerState.playing;
-    if (!isPlaying) {
+    if (!isPlaying || !_windowTickersRunning) {
       _progressTimer?.cancel();
       _progressTimer = null;
       return;
@@ -324,6 +338,12 @@ class _RectangleProgressIndicatorState
     playbackService.playerStateNotifier.removeListener(_syncTimer);
     playbackService.nowPlayingNotifier.removeListener(_onNowPlayingChanged);
     playbackService.positionSyncNotifier.removeListener(_onPositionSync);
+    WindowRenderGate.instance.framesEnabled.removeListener(
+      _onWindowFramesChanged,
+    );
+    WindowRenderGate.instance.backgroundIdle.removeListener(
+      _onWindowFramesChanged,
+    );
     _progressTimer?.cancel();
     progress.dispose();
     super.dispose();

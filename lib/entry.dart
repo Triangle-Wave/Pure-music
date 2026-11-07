@@ -306,9 +306,12 @@ class _EntryState extends State<Entry>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _attachRouteLog();
-      AudioEchoLogRecorder.instance.start(
-        full: Platform.environment['CP_ECHO_RECORD'] == '1',
-      );
+      // 后台回声日志每 5 秒快照会触发显卡驱动 GPU 读回并泄漏
+      // Timer/Semaphore 句柄；默认不启动，排查时用 CP_ECHO_RECORD=1
+      // 或设置页手动开启。
+      if (Platform.environment['CP_ECHO_RECORD'] == '1') {
+        AudioEchoLogRecorder.instance.start(full: true);
+      }
       // 任务栏缩略图自定义封面（主窗口已创建完成）
       TaskbarThumbnailService.instance.init();
       // 预编译播放页背景 shader，避免首次进入时卡顿。
@@ -779,9 +782,20 @@ class _EntryState extends State<Entry>
       builder: (context, resizing, child) => ValueListenableBuilder<bool>(
         valueListenable: WindowRenderGate.instance.framesEnabled,
         child: child,
-        builder: (context, windowFramesEnabled, child) => TickerMode(
-          enabled: !resizing && windowFramesEnabled,
-          child: child ?? const SizedBox.shrink(),
+        builder: (context, windowFramesEnabled, child) =>
+            ValueListenableBuilder<bool>(
+          valueListenable: WindowRenderGate.instance.backgroundIdle,
+          child: child,
+          builder: (context, backgroundIdle, child) => TickerMode(
+            // 被挡住 30 秒后歌词逐字、封面旋转、进度这些 ticker 一起停，
+            // 回前台由 backgroundIdle 复位重新拉起，避免看不见时整页满帧重画。
+            enabled: windowTickersEnabled(
+              resizing: resizing,
+              framesEnabled: windowFramesEnabled,
+              backgroundIdle: backgroundIdle,
+            ),
+            child: child ?? const SizedBox.shrink(),
+          ),
         ),
       ),
     );

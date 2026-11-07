@@ -31,6 +31,7 @@ import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/system_volume_service.dart';
 import 'package:pure_music/core/ticker_timing.dart';
 import 'package:pure_music/core/utils.dart';
+import 'package:pure_music/core/window_render_gate.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/playlist.dart';
 import 'package:pure_music/component/responsive_builder.dart';
@@ -397,6 +398,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
       nowPlayingBackgroundModeNotifier,
       nowPlayingDynamicFlowingLightNotifier,
       nowPlayingAudioReactiveFlowNotifier,
+      WindowRenderGate.instance.framesEnabled,
     ]);
     playbackService.nowPlayingNotifier.addListener(updateCover);
     nowPlayingViewMode.addListener(_onViewModeChanged);
@@ -455,9 +457,11 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         fit: StackFit.expand,
         children: [
           ColoredBox(color: _neutralBackgroundColor(brightness)),
-          ListenableBuilder(
-            listenable: _backgroundListenable,
-            builder: (context, _) => _flowBackground(brightness),
+          RepaintBoundary(
+            child: ListenableBuilder(
+              listenable: _backgroundListenable,
+              builder: (context, _) => _flowBackground(brightness),
+            ),
           ),
         ],
       ),

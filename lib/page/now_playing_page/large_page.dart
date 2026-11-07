@@ -40,9 +40,13 @@ class _NowPlayingLargePage extends StatelessWidget {
     return Row(
       children: [
         Expanded(
-          child: Transform.translate(
-            offset: const Offset(0, _normalLandscapeBottomAreaHeight / 2),
-            child: Center(child: _NowPlayingInfo(coverSizeOverride: coverSize)),
+          child: RepaintBoundary(
+            child: Transform.translate(
+              offset: const Offset(0, _normalLandscapeBottomAreaHeight / 2),
+              child: Center(
+                child: _NowPlayingInfo(coverSizeOverride: coverSize),
+              ),
+            ),
           ),
         ),
         Expanded(child: _rightPane(currentLineAlignment)),
@@ -59,11 +63,13 @@ class _NowPlayingLargePage extends StatelessWidget {
         switchOutCurve: MotionCurve.standard,
         child: switch (value) {
           NowPlayingViewMode.withPlaylist => const CurrentPlaylistView(),
-          _ => Padding(
-            padding: const EdgeInsets.only(right: 8.0),
-            child: VerticalLyricView(
-              enableEdgeSpacer: true,
-              currentLineAlignment: currentLineAlignment,
+          _ => RepaintBoundary(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8.0),
+              child: VerticalLyricView(
+                enableEdgeSpacer: true,
+                currentLineAlignment: currentLineAlignment,
+              ),
             ),
           ),
         },
@@ -77,10 +83,12 @@ class _NowPlayingLargePage extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _NowPlayingSlider(
-          mode: MediaQuery.of(context).orientation == Orientation.portrait
-              ? NowPlayingMode.portrait
-              : NowPlayingMode.landscape,
+        RepaintBoundary(
+          child: _NowPlayingSlider(
+            mode: MediaQuery.of(context).orientation == Orientation.portrait
+                ? NowPlayingMode.portrait
+                : NowPlayingMode.landscape,
+          ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),

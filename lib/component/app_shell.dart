@@ -3,6 +3,7 @@
 import 'dart:io';
 import 'dart:ui';
 
+import 'package:pure_music/core/now_playing_overlay_state.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/component/mini_now_playing.dart';
@@ -141,10 +142,20 @@ class _AppBackgroundState extends State<_AppBackground> {
     final maskAlpha = isDark
         ? 0.25 + 0.2 * _imageLuminance
         : 0.25 + 0.2 * (1 - _imageLuminance);
-    if (settings.appWindowTransparent) {
-      return _transparentShell(settings);
-    }
-    return _imageShell(settings, maskColor, maskAlpha);
+    return ValueListenableBuilder<bool>(
+      valueListenable: nowPlayingOverlayShown,
+      builder: (context, overlayShown, _) {
+        if (settings.appWindowTransparent) {
+          return _transparentShell(settings);
+        }
+        return _imageShell(
+          settings,
+          maskColor,
+          maskAlpha,
+          overlayShown ? null : widget.imagePath,
+        );
+      },
+    );
   }
 
   Widget _transparentShell(AppSettings settings) {
@@ -171,8 +182,12 @@ class _AppBackgroundState extends State<_AppBackground> {
     );
   }
 
-  Widget _imageShell(AppSettings settings, Color maskColor, double maskAlpha) {
-    final imagePath = widget.imagePath;
+  Widget _imageShell(
+    AppSettings settings,
+    Color maskColor,
+    double maskAlpha,
+    String? imagePath,
+  ) {
     final blur = settings.appBackgroundImageBlur;
     return Stack(
       fit: StackFit.expand,
