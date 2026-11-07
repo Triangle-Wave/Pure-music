@@ -51,6 +51,8 @@ class WindowRenderGate with WidgetsBindingObserver {
   bool _pauseScheduled = false;
   bool _attached = false;
   bool _windowFocused = true;
+  /// 窗口可见性：resumed、inactive 可见，hidden、paused、detached 不可见。
+  bool _appVisible = true;
   Timer? _backgroundIdleTimer;
 
   static const _backgroundIdleDelay = Duration(seconds: 30);
@@ -72,6 +74,7 @@ class WindowRenderGate with WidgetsBindingObserver {
     _backgroundIdleTimer?.cancel();
     _backgroundIdleTimer = null;
     _windowFocused = true;
+    _appVisible = true;
     if (backgroundIdle.value) backgroundIdle.value = false;
     WidgetsBinding.instance.removeObserver(this);
   }
@@ -105,35 +108,35 @@ class WindowRenderGate with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
-        _setWindowFocused(true);
+        _setLifecycle(focused: true, visible: true);
         // 藏进托盘后不能把系统焦点当成「窗口回来了」
         if (!_trayHidden) enterForeground();
         break;
       case AppLifecycleState.inactive:
-        _setWindowFocused(false);
+        _setLifecycle(focused: false, visible: true);
         // 藏进托盘后不能把系统焦点当成「窗口回来了」
         if (!_trayHidden) enterForeground();
         break;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
-        _setWindowFocused(false);
+        _setLifecycle(focused: false, visible: false);
         break;
     }
   }
 
-  void _setWindowFocused(bool focused) {
-    if (_windowFocused == focused) return;
+  void _setLifecycle({required bool focused, required bool visible}) {
     _windowFocused = focused;
+    _appVisible = visible;
     _syncBackgroundIdle();
   }
 
-  /// 窗口失焦且仍停留在桌面（未最小化、未藏托盘）超过 30 秒后进入闲时档，
-  /// 连歌词、封面、进度这些 ticker 一起停；回到前台或窗口被隐藏时立即复位。
-  /// 该门闩由 inactive 生命周期驱动，被遮挡但仍可见时不会触发。
+  /// 窗口可见且失焦（未最小化、未藏托盘）超过 30 秒后进入闲时档，
+  /// 连歌词、封面、进度这些 ticker 一起停；回到前台或窗口不可见时立即复位。
+  /// 该门闩由 inactive 生命周期驱动。
   void _syncBackgroundIdle() {
     final shouldCount =
-        !_windowFocused && !_trayHidden && !_windowMinimized;
+        _appVisible && !_windowFocused && !_trayHidden && !_windowMinimized;
     if (!shouldCount) {
       _backgroundIdleTimer?.cancel();
       _backgroundIdleTimer = null;
@@ -143,7 +146,9 @@ class WindowRenderGate with WidgetsBindingObserver {
     if (_backgroundIdleTimer != null || backgroundIdle.value) return;
     _backgroundIdleTimer = Timer(_backgroundIdleDelay, () {
       _backgroundIdleTimer = null;
-      if (_windowFocused || _trayHidden || _windowMinimized) return;
+      if (!_appVisible || _windowFocused || _trayHidden || _windowMinimized) {
+        return;
+      }
       backgroundIdle.value = true;
     });
   }
