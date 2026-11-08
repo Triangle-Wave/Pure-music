@@ -195,7 +195,26 @@ jobs:
 
           $zip = Join-Path $env:RUNNER_TEMP "portable.zip"
           $extract = Join-Path $env:RUNNER_TEMP "portable"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+          $maxAttempts = 6
+          $delays = @(5, 10, 15, 20, 25)
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+              $downloaded = $true
+              break
+            }
+            catch {
+              $message = $_.Exception.Message
+              if ($attempt -eq $maxAttempts) {
+                throw "portable.zip download failed after ${maxAttempts} attempts: $message"
+              }
+              $wait = $delays[$attempt - 1]
+              Write-Warning "portable.zip download attempt $attempt/$maxAttempts failed: $message; retrying in $wait s"
+              Start-Sleep -Seconds $wait
+            }
+          }
+          if (-not $downloaded) { throw "portable.zip download did not complete" }
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 
           $src = Get-ChildItem $extract -Recurse -Directory -Filter "desktop_lyric" | Select-Object -First 1
