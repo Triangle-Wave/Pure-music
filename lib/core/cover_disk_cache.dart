@@ -18,7 +18,7 @@ const int coverDiskCacheMaxBytes = 256 << 20;
 /// 文件夹图片的序号固定为 -1；在线图片按 URL 哈希保存下载结果。文件名只含
 /// SHA-1 摘要与内容扩展名，不把原始路径或 URL 写进目录。
 ///
-/// 本地缩略图键含解码版本，当前版本为 `local-v2`；旧版本键下的文件不再命中，
+/// 本地缩略图键含解码版本，当前版本为 `local-v3`；旧版本键下的文件不再命中，
 /// 由现有容量淘汰清理。旧位置的缓存目录中键与本版本相同的文件仍按只读回退命中。
 ///
 /// 所有磁盘错误都降级为未命中，调用方继续使用内存缓存与网络链路；缓存文件
@@ -53,7 +53,7 @@ class CoverDiskCache {
 
   /// 本地缩略图的解码策略版本。解码方式变化时递增，旧键下的缩略图自然失效，
   /// 成为由容量淘汰清理的孤立文件。
-  static const String _localKeyVersion = 'local-v2';
+  static const String _localKeyVersion = 'local-v3';
 
   Directory? _directory;
   Directory? _legacyDirectory;
