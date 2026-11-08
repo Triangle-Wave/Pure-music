@@ -61,9 +61,7 @@ class _NowPlayingSmallPageState extends State<_NowPlayingSmallPage> {
         break;
     }
     setState(() => views = desView);
-    nowPlayingViewMode.value = viewMode;
-    AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode = viewMode;
-    unawaited(AppPreference.instance.save());
+    switchNowPlayingView(viewMode);
   }
 
   @override
@@ -103,7 +101,7 @@ class _NowPlayingSmallPageState extends State<_NowPlayingSmallPage> {
   }
 
   Widget _centerView() {
-    return AnimatedSwitcher(
+    final content = AnimatedSwitcher(
       duration: MotionDuration.base,
       switchInCurve: MotionCurve.standard,
       switchOutCurve: MotionCurve.standard,
@@ -127,6 +125,13 @@ class _NowPlayingSmallPageState extends State<_NowPlayingSmallPage> {
         ),
         NowPlayingViewMode.withPlaylist => const CurrentPlaylistView(),
       },
+    );
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: views[1] == NowPlayingViewMode.withPlaylist
+          ? () => changeView(NowPlayingViewMode.withLyric)
+          : null,
+      child: content,
     );
   }
 }

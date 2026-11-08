@@ -222,12 +222,16 @@ class OnlineAlbumCandidateCache {
     this.disabled = false,
     this.savedAt,
     this.schemaVersion = currentSchemaVersion,
+    this.searchQuery,
   });
 
   final List<OnlineAlbumCandidate> candidates;
   final String? selectedCandidateId;
   final bool disabled;
   final DateTime? savedAt;
+
+  /// 用户最近一次在候选对话框里使用的搜索词；为空表示按专辑名搜索。
+  final String? searchQuery;
 
   /// 读取来源的 schema 版本；新写入统一为 [currentSchemaVersion]。
   final int schemaVersion;
@@ -269,6 +273,7 @@ class OnlineAlbumCandidateCache {
       disabled: disabled,
       savedAt: savedAt,
       schemaVersion: schemaVersion,
+      searchQuery: searchQuery,
     );
   }
 
@@ -277,6 +282,7 @@ class OnlineAlbumCandidateCache {
     'savedAt': savedAt?.toIso8601String(),
     'selectedCandidateId': selectedCandidateId,
     'disabled': disabled,
+    'searchQuery': searchQuery,
     'candidates': candidates.map((candidate) => candidate.toJson()).toList(),
   };
 
@@ -301,6 +307,7 @@ class OnlineAlbumCandidateCache {
       disabled: data['disabled'] == true,
       savedAt: dateOrNull(data['savedAt']),
       schemaVersion: schema,
+      searchQuery: textOrNull(data['searchQuery']),
     );
   }
 }
@@ -356,12 +363,16 @@ class OnlineArtistCandidateCache {
     this.selectedCandidateId,
     this.disabled = false,
     this.savedAt,
+    this.searchQuery,
   });
 
   final List<OnlineArtistCandidate> candidates;
   final String? selectedCandidateId;
   final bool disabled;
   final DateTime? savedAt;
+
+  /// 用户最近一次在候选对话框里使用的搜索词；为空表示按艺术家名搜索。
+  final String? searchQuery;
 
   OnlineArtistCandidate? get bestCandidate {
     OnlineArtistCandidate? best;
@@ -402,6 +413,7 @@ class OnlineArtistCandidateCache {
       selectedCandidateId: candidateId,
       disabled: disabled,
       savedAt: savedAt,
+      searchQuery: searchQuery,
     );
   }
 
@@ -410,6 +422,7 @@ class OnlineArtistCandidateCache {
     'savedAt': savedAt?.toIso8601String(),
     'selectedCandidateId': selectedCandidateId,
     'disabled': disabled,
+    'searchQuery': searchQuery,
     'candidates': candidates.map((candidate) => candidate.toJson()).toList(),
   };
 
@@ -428,6 +441,7 @@ class OnlineArtistCandidateCache {
       selectedCandidateId: textOrNull(data['selectedCandidateId']),
       disabled: data['disabled'] == true,
       savedAt: dateOrNull(data['savedAt']),
+      searchQuery: textOrNull(data['searchQuery']),
     );
   }
 }

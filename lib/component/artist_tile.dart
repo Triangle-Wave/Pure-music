@@ -43,6 +43,9 @@ class ArtistTile extends StatefulWidget {
 class _ArtistTileState extends State<ArtistTile> {
   int _onlineRevision = 0;
 
+  /// 打开候选对话框时的候选缓存，用于识别服务层是否返回了新的结果。
+  OnlineArtistCandidateCache? _dialogCache;
+
   String get _currentCoverIdentity =>
       '${widget.artist.primaryPath}|48|$_onlineRevision|'
       '${OnlineArtistImageService.instance.selectionRevision}|'
@@ -142,27 +145,22 @@ class _ArtistTileState extends State<ArtistTile> {
       );
     }
     if (!mounted) return;
-    final options = <OnlineCandidateOption>[
-      for (final candidate
-          in cache?.candidates ?? const <OnlineArtistCandidate>[])
-        OnlineCandidateOption(
-          id: candidate.id,
-          source: candidate.source,
-          title: candidate.name,
-          subtitle: candidate.albumCount == null
-              ? null
-              : '${candidate.albumCount} 张专辑',
-          imageUrl: candidate.imageUrl,
-          score: candidate.score * 100,
-        ),
-    ];
+    _dialogCache = cache;
+    final savedQuery = cache?.searchQuery?.trim();
+    final initialQuery = savedQuery != null && savedQuery.isNotEmpty
+        ? savedQuery
+        : widget.artist.name;
     final choice = await showOnlineCandidateDialog(
       context,
       title: '选择艺术家头像',
-      options: options,
+      options: _onlineOptions(cache),
       selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
       disabled: cache?.disabled ?? false,
       artworkLoader: service.artwork,
+      initialQuery: initialQuery,
+      defaultQuery: widget.artist.name.trim(),
+      searchHint: '歌手名或关键词',
+      search: _searchOnlineCandidates,
     );
     if (choice == null || !mounted) return;
     try {
@@ -189,6 +187,64 @@ class _ArtistTileState extends State<ArtistTile> {
     }
     if (!mounted) return;
     setState(() => _onlineRevision++);
+  }
+
+  List<OnlineCandidateOption> _onlineOptions(
+    OnlineArtistCandidateCache? cache,
+  ) {
+    return <OnlineCandidateOption>[
+      for (final candidate
+          in cache?.candidates ?? const <OnlineArtistCandidate>[])
+        OnlineCandidateOption(
+          id: candidate.id,
+          source: candidate.source,
+          title: candidate.name,
+          subtitle: candidate.albumCount == null
+              ? null
+              : '${candidate.albumCount} 张专辑',
+          imageUrl: candidate.imageUrl,
+          score: candidate.score * 100,
+        ),
+    ];
+  }
+
+  /// 按用户提交的词重新搜索；默认词走服务的默认查询分支。
+  ///
+  /// 服务端拒绝该词（无结果或失败）时返回空列表，让对话框保留原候选并给出
+  /// 提示。
+  Future<List<OnlineCandidateOption>> _searchOnlineCandidates(
+    String query,
+  ) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const <OnlineCandidateOption>[];
+    final isDefaultQuery = trimmed == widget.artist.name.trim();
+    final service = OnlineArtistImageService.instance;
+    try {
+      final cache = await service.loadCandidates(
+        widget.artist.name,
+        query: isDefaultQuery ? null : trimmed,
+        force: true,
+      );
+      final previous = _dialogCache;
+      final accepted = isDefaultQuery
+          ? cache != null &&
+                service.queryStatusFor(widget.artist.name) !=
+                    OnlineQueryStatus.failed &&
+                !identical(cache, previous) &&
+                (previous == null || cache.savedAt != previous.savedAt)
+          : cache?.searchQuery?.trim() == trimmed;
+      if (!accepted || cache == null) return const <OnlineCandidateOption>[];
+      // 搜索成功后同步基准缓存，下一次搜索才能按服务层返回的新结果判定。
+      _dialogCache = cache;
+      return _onlineOptions(cache);
+    } catch (error) {
+      log.library.warn(
+        'artist_tile_online_search_failed',
+        '艺术家在线头像搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return const <OnlineCandidateOption>[];
+    }
   }
 
   Widget _tileSurface(

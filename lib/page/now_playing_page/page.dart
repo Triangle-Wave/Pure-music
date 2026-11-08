@@ -27,6 +27,7 @@ import 'package:pure_music/core/hotkey_binding.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/immersive.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/system_volume_service.dart';
 import 'package:pure_music/core/ticker_timing.dart';
@@ -68,6 +69,39 @@ part 'immersive_page.dart';
 final nowPlayingViewMode = ValueNotifier(
   AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode,
 );
+
+/// 切换播放页视图：更新全局模式并写入偏好，写盘失败只记录日志。
+void switchNowPlayingView(NowPlayingViewMode mode) {
+  if (nowPlayingViewMode.value == mode) return;
+  nowPlayingViewMode.value = mode;
+  AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode = mode;
+  unawaited(_saveNowPlayingViewMode(mode));
+}
+
+/// 播放列表展示时，点击列表以外的区域回到歌词。
+void exitPlaylistToLyric() {
+  if (nowPlayingViewMode.value != NowPlayingViewMode.withPlaylist) return;
+  switchNowPlayingView(NowPlayingViewMode.withLyric);
+}
+
+Future<void> _saveNowPlayingViewMode(NowPlayingViewMode mode) async {
+  try {
+    final saved = await AppPreference.instance.save();
+    if (!saved) {
+      log.app.debug(
+        'now_playing_view_mode_persist_failed',
+        '播放页视图偏好写盘未成功',
+        fields: {'mode': mode.name},
+      );
+    }
+  } catch (error) {
+    log.app.debug(
+      'now_playing_view_mode_persist_failed',
+      '保存播放页视图偏好失败',
+      fields: {'mode': mode.name, 'error': error.runtimeType.toString()},
+    );
+  }
+}
 
 /// 普通播放页切到紧凑布局的宽度上限：右下角控件组加入歌手、专辑入口后
 /// 需要更宽的窗口才能与中组拉开距离。
@@ -1172,6 +1206,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   );
   final dragSystemVol = ValueNotifier(0.0);
 
+  final MenuController _menuController = MenuController();
+
   bool isDragging = false;
   bool isSystemDragging = false;
   bool _isMenuOpen = false;
@@ -1185,10 +1221,43 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   bool _showSystemCustomIndicator = false;
   bool _isHovering = false;
   bool _isSystemHovering = false;
+
+  /// 面板当前显示的行：false 为应用音量，true 为系统音量。
+  bool _showSystemRow = false;
+
+  /// 点击按钮后钉住面板，鼠标移开也不收起；再次点击取消。
+  bool _pinned = false;
+  Timer? _hoverOpenTimer;
+  Timer? _hoverCloseTimer;
+
+  /// 滚轮调节应用音量后的落盘防抖，连续滚动只在停止后写一次。
+  Timer? _volumePersistTimer;
+
+  /// 滚轮调节系统音量后的写入防抖，连续滚动只写最后一次目标值。
+  Timer? _systemVolumePersistTimer;
+  double? _pendingSystemVolumePersist;
+  int _systemVolumePersistRevision = 0;
+
+  /// 应用音量行同时响应本地拖动值与外部音量变化。
+  late final Listenable _appVolumeListenable = Listenable.merge([
+    dragVolDsp,
+    playbackService,
+  ]);
   late final VoidCallback _nowPlayingListener;
 
+  /// 读取系统音量；失败返回 null 并记录日志，轮询按无数据降级。
   Future<double?> _readSystemVol({required Duration timeout}) async {
-    return systemVolumeService.read(timeout: timeout);
+    try {
+      return await systemVolumeService.read(timeout: timeout);
+    } catch (error, stackTrace) {
+      log.app.debug(
+        'now_playing_system_volume_read_failed',
+        '读取系统音量失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
   }
 
   @override
@@ -1200,6 +1269,9 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
       final v = playbackService.volumeDsp;
       if ((v - _lastVolumeDsp).abs() <= 0.0001) return;
       _lastVolumeDsp = v;
+      if (!isDragging && (v - dragVolDsp.value).abs() > 0.0001) {
+        dragVolDsp.value = v;
+      }
       if (_isMenuOpen && !isDragging) {
         _triggerIndicator();
       }
@@ -1209,15 +1281,18 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     dragSystemVol.value = systemVolumeService.volume.value;
     _systemVolValueListener = () {
       if (!mounted || isSystemDragging) return;
+      // 滚轮防抖写入期间系统音量仍是旧值，跳过轮询同步避免滑块被拉回。
+      if (_pendingSystemVolumePersist != null) return;
       dragSystemVol.value = systemVolumeService.volume.value;
     };
     systemVolumeService.volume.addListener(_systemVolValueListener);
   }
 
   void _triggerIndicator() {
-    // 气泡已显示时不再 setState、也不再重建 Timer，避免拖动期间逐帧重建。
-    if (_showCustomIndicator) return;
-    setState(() => _showCustomIndicator = true);
+    // 气泡已显示时跳过 setState，避免拖动期间逐帧重建；每次调节都重置隐藏计时器。
+    if (!_showCustomIndicator) {
+      setState(() => _showCustomIndicator = true);
+    }
     _indicatorTimer?.cancel();
     _indicatorTimer = Timer(const Duration(milliseconds: 1000), () {
       if (mounted) {
@@ -1227,7 +1302,10 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   void _triggerSystemIndicator() {
-    setState(() => _showSystemCustomIndicator = true);
+    // 气泡已显示时跳过 setState，避免滚轮与拖动期间逐帧重建；每次调节都重置隐藏计时器。
+    if (!_showSystemCustomIndicator) {
+      setState(() => _showSystemCustomIndicator = true);
+    }
     _systemIndicatorTimer?.cancel();
     _systemIndicatorTimer = Timer(const Duration(milliseconds: 1000), () {
       if (mounted) {
@@ -1239,123 +1317,375 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   @override
   void dispose() {
     _disposed = true;
+    final hasPendingVolumePersist = _volumePersistTimer?.isActive ?? false;
+    final pendingSystemVolume = _pendingSystemVolumePersist;
     _systemVolBoostTimer?.cancel();
     _indicatorTimer?.cancel();
     _systemIndicatorTimer?.cancel();
+    _hoverOpenTimer?.cancel();
+    _hoverCloseTimer?.cancel();
+    _volumePersistTimer?.cancel();
+    _systemVolumePersistTimer?.cancel();
     playbackService.nowPlayingNotifier.removeListener(_nowPlayingListener);
     systemVolumeService.volume.removeListener(_systemVolValueListener);
+    if (hasPendingVolumePersist) {
+      // 离开页面时把滚轮调节但尚未落盘的应用音量补写一次；此处已无法 setState。
+      _savePlaybackPreference();
+    }
+    if (pendingSystemVolume != null) {
+      // 离开页面时把滚轮调节但尚未写入的系统音量补写一次。
+      _writeSystemVolume(pendingSystemVolume);
+    }
+    dragSystemVol.dispose();
+    dragVolDsp.dispose();
     super.dispose();
+  }
+
+  /// 只写播放偏好文件，不触发播放服务通知。
+  void _savePlaybackPreference() {
+    unawaited(
+      AppPreference.instance.savePlaybackOnly().catchError((Object error) {
+        log.app.debug(
+          'now_playing_volume_persist_failed',
+          '写入应用音量偏好失败',
+          fields: {'error': error.runtimeType.toString()},
+        );
+        return false;
+      }),
+    );
+  }
+
+  /// 写入系统音量；失败只记录日志。
+  void _writeSystemVolume(double value) {
+    unawaited(
+      systemVolumeService.set(value).catchError((Object error) {
+        log.app.debug(
+          'now_playing_system_volume_set_failed',
+          '写入系统音量失败',
+          fields: {'error': error.runtimeType.toString()},
+        );
+      }),
+    );
+  }
+
+  /// 系统音量写入防抖：连续滚动只在停止后写入最后一次目标值；
+  /// 拖动结束时传 `Duration.zero` 立即提交。
+  void _scheduleSystemVolumePersist(
+    double value, {
+    Duration delay = const Duration(milliseconds: 150),
+  }) {
+    _pendingSystemVolumePersist = value;
+    final revision = ++_systemVolumePersistRevision;
+    _systemVolumePersistTimer?.cancel();
+    _systemVolumePersistTimer = Timer(delay, () {
+      _systemVolumePersistTimer = null;
+      final target = _pendingSystemVolumePersist;
+      if (target == null) return;
+      unawaited(_commitSystemVolume(target, revision));
+    });
+  }
+
+  /// 写入系统音量；完成前保持防抖标记，避免轮询用旧值覆盖滑块。
+  Future<void> _commitSystemVolume(double target, int revision) async {
+    try {
+      await systemVolumeService.set(target);
+    } catch (error) {
+      log.app.debug(
+        'now_playing_system_volume_set_failed',
+        '写入系统音量失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+    if (revision != _systemVolumePersistRevision) return;
+    _pendingSystemVolumePersist = null;
+    if (!mounted || _disposed || !_isMenuOpen || !_showSystemRow) return;
+    _startSystemVolumePolling();
   }
 
   @override
   Widget build(BuildContext context) {
     final useMonet = AppSettings.instance.useMaterialYouForControls;
     final scheme = Theme.of(context).colorScheme;
-    final menuWidth = (MediaQuery.sizeOf(context).width - 64.0)
-        .clamp(180.0, 300.0)
-        .toDouble();
+    // 可用宽度先扣掉菜单两侧留白，再限制上限；窄窗口下随窗口收窄。
+    final availableWidth = max(
+      0.0,
+      MediaQuery.sizeOf(context).width - 48.0,
+    );
+    final menuWidth = min(availableWidth, 260.0);
     //
 
     return MenuAnchor(
+      controller: _menuController,
       style: appMenuStyle,
       onOpen: _onVolumeMenuOpen,
       onClose: _onVolumeMenuClose,
       menuChildren: [_volumeMenuBody(scheme, menuWidth)],
       builder: (context, controller, _) {
-        return IconButton(
-          tooltip: '音量',
-          onPressed: () {
-            if (controller.isOpen) {
-              controller.close();
-            } else {
-              controller.open();
-            }
-          },
-          icon: const Icon(Symbols.volume_up),
-          color: playerChromeForeground(context, enabled: useMonet),
-        );
+        return _buildVolumeButton(context, controller, useMonet: useMonet);
       },
     );
   }
 
+  /// 音量按钮：悬停打开面板、滚轮直接调节、点击钉住或关闭。
+  Widget _buildVolumeButton(
+    BuildContext context,
+    MenuController controller, {
+    required bool useMonet,
+  }) {
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerSignal: (event) => _handleVolumeScroll(event, controller),
+      child: MouseRegion(
+        onEnter: (_) => _onVolumeButtonHoverEnter(controller),
+        onExit: (_) => _onVolumeButtonHoverExit(controller),
+        child: IconButton(
+          tooltip: '音量',
+          onPressed: () => _toggleVolumePanel(controller),
+          icon: const Icon(Symbols.volume_up),
+          color: playerChromeForeground(context, enabled: useMonet),
+        ),
+      ),
+    );
+  }
+
+  void _onVolumeButtonHoverEnter(MenuController controller) {
+    _hoverCloseTimer?.cancel();
+    _hoverOpenTimer?.cancel();
+    if (controller.isOpen) return;
+    _hoverOpenTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted || _disposed || controller.isOpen) return;
+      unawaited(controller.open());
+    });
+  }
+
+  void _onVolumeButtonHoverExit(MenuController controller) {
+    _hoverOpenTimer?.cancel();
+    _scheduleHoverClose(controller);
+  }
+
+  void _scheduleHoverClose(MenuController controller) {
+    _hoverCloseTimer?.cancel();
+    _hoverCloseTimer = Timer(const Duration(milliseconds: 220), () {
+      if (!mounted || _disposed || _pinned) return;
+      if (controller.isOpen) {
+        unawaited(controller.close());
+      }
+    });
+  }
+
+  void _toggleVolumePanel(MenuController controller) {
+    if (_pinned) {
+      _pinned = false;
+      unawaited(controller.close());
+      return;
+    }
+    _pinned = true;
+    _hoverOpenTimer?.cancel();
+    _hoverCloseTimer?.cancel();
+    if (!controller.isOpen) {
+      unawaited(controller.open());
+    }
+  }
+
+  void _handleVolumeScroll(
+    PointerSignalEvent event,
+    MenuController controller,
+  ) {
+    if (event is! PointerScrollEvent) return;
+    if (event.scrollDelta.dy == 0) return;
+    _hoverOpenTimer?.cancel();
+    _hoverCloseTimer?.cancel();
+    if (!controller.isOpen) {
+      unawaited(controller.open());
+    }
+    final step = -event.scrollDelta.dy.sign * 0.05;
+    if (_showSystemRow) {
+      final next = (dragSystemVol.value + step).clamp(0.0, 1.0).toDouble();
+      // 防抖期间系统音量尚未改变，先停掉轮询，避免读回旧值覆盖滑块。
+      _stopSystemVolumePolling();
+      dragSystemVol.value = next;
+      _scheduleSystemVolumePersist(next);
+      _triggerSystemIndicator();
+      return;
+    }
+    final next = (playbackService.volumeDsp + step)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    dragVolDsp.value = next;
+    _lastVolumeDsp = next;
+    playbackService.setVolumeDsp(next, persist: false);
+    _triggerIndicator();
+    _volumePersistTimer?.cancel();
+    _volumePersistTimer = Timer(const Duration(milliseconds: 300), () {
+      if (_disposed) return;
+      try {
+        playbackService.setVolumeDsp(playbackService.volumeDsp);
+      } catch (error) {
+        log.app.debug(
+          'now_playing_volume_persist_failed',
+          '滚轮调节后写入应用音量失败',
+          fields: {'error': error.runtimeType.toString()},
+        );
+      }
+    });
+  }
+
   void _onVolumeMenuOpen() {
     _isMenuOpen = true;
+    _hoverOpenTimer?.cancel();
+    _hoverCloseTimer?.cancel();
     if (!isDragging) {
       dragVolDsp.value = playbackService.volumeDsp;
     }
+    if (_showSystemRow) {
+      // 滚轮防抖写入中的目标值优先，避免被系统旧音量覆盖。
+      dragSystemVol.value =
+          _pendingSystemVolumePersist ?? systemVolumeService.volume.value;
+      _startSystemVolumePolling();
+    } else {
+      _stopSystemVolumePolling();
+    }
+  }
+
+  void _onVolumeMenuClose() {
+    _isMenuOpen = false;
+    _pinned = false;
+    _hoverOpenTimer?.cancel();
+    _hoverCloseTimer?.cancel();
+    _stopSystemVolumePolling();
+    // 菜单子树移除时滑块的 onExit 不会触发，直接复位悬停状态。
+    _isHovering = false;
+    _isSystemHovering = false;
+  }
+
+  void _startSystemVolumePolling() {
+    if (_systemVolBoostTimer?.isActive ?? false) return;
+    // 滚轮防抖写入期间系统音量仍是旧值，等提交完成后再启动轮询。
+    if (_pendingSystemVolumePersist != null) return;
     int ticks = 0;
-    _systemVolBoostTimer?.cancel();
     _systemVolBoostTimer = Timer.periodic(const Duration(milliseconds: 120), (
       _,
     ) async {
-      if (!mounted || isSystemDragging) return;
+      // 页面销毁后定时器无法继续持有 notifier，直接停止轮询。
+      if (!mounted || _disposed) {
+        _stopSystemVolumePolling();
+        return;
+      }
+      if (isSystemDragging) return;
       if (ticks++ > 25) {
-        _systemVolBoostTimer?.cancel();
+        _stopSystemVolumePolling();
         return;
       }
       final v = await _readSystemVol(
         timeout: const Duration(milliseconds: 500),
       );
+      // 读取期间可能已销毁、进入拖动或滚轮防抖写入，读回值不可信。
+      if (!mounted ||
+          _disposed ||
+          isSystemDragging ||
+          _pendingSystemVolumePersist != null) {
+        return;
+      }
       if (v != null && (v - dragSystemVol.value).abs() > 0.003) {
         dragSystemVol.value = v;
       }
     });
   }
 
-  void _onVolumeMenuClose() {
-    _isMenuOpen = false;
+  void _stopSystemVolumePolling() {
     _systemVolBoostTimer?.cancel();
+    _systemVolBoostTimer = null;
+  }
+
+  void _toggleVolumeRow() {
+    final showSystemRow = !_showSystemRow;
+    setState(() {
+      _showSystemRow = showSystemRow;
+      _isHovering = false;
+      _isSystemHovering = false;
+    });
+    if (showSystemRow) {
+      // 滚轮防抖写入中的目标值优先，避免被系统旧音量覆盖。
+      dragSystemVol.value =
+          _pendingSystemVolumePersist ?? systemVolumeService.volume.value;
+      _startSystemVolumePolling();
+    } else {
+      _stopSystemVolumePolling();
+      dragVolDsp.value = playbackService.volumeDsp;
+    }
   }
 
   Widget _volumeMenuBody(ColorScheme scheme, double menuWidth) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 16.0),
-      child: SizedBox(
-        width: menuWidth,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _labeledSlider(
-              scheme,
-              label: '系统音量',
-              child: _systemVolumeSlider(scheme),
-            ),
-            const SizedBox(height: 8.0),
-            const Divider(height: 20),
-            const SizedBox(height: 4.0),
-            _labeledSlider(
-              scheme,
-              label: '应用音量',
-              child: _appVolumeSlider(scheme),
-            ),
-          ],
+    final useMonet = AppSettings.instance.useMaterialYouForControls;
+    // 窄菜单下压缩百分比文本宽度，把水平空间让给滑块。
+    final percentWidth = menuWidth < 160.0 ? 36.0 : 44.0;
+    return MouseRegion(
+      onEnter: (_) {
+        _hoverOpenTimer?.cancel();
+        _hoverCloseTimer?.cancel();
+      },
+      onExit: (_) => _scheduleHoverClose(_menuController),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
+        child: SizedBox(
+          width: menuWidth,
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: _showSystemRow ? '切换到应用音量' : '切换到系统音量',
+                visualDensity: VisualDensity.compact,
+                onPressed: _toggleVolumeRow,
+                icon: Icon(
+                  _showSystemRow ? Symbols.volume_mute : Symbols.volume_up,
+                ),
+                color: playerChromeForeground(context, enabled: useMonet),
+              ),
+              Expanded(
+                child: SliderTheme(
+                  data: const SliderThemeData(
+                    showValueIndicator: ShowValueIndicator.never,
+                  ),
+                  child: _showSystemRow
+                      ? _systemVolumeSlider(scheme)
+                      : _appVolumeSlider(scheme),
+                ),
+              ),
+              if (_showSystemRow)
+                ValueListenableBuilder<double>(
+                  valueListenable: dragSystemVol,
+                  builder: (context, value, _) =>
+                      _volumePercentLabel(value, scheme, percentWidth),
+                )
+              else
+                ListenableBuilder(
+                  listenable: _appVolumeListenable,
+                  builder: (context, _) => _volumePercentLabel(
+                    playbackService.volumeDsp,
+                    scheme,
+                    percentWidth,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _labeledSlider(
-    ColorScheme scheme, {
-    required String label,
-    required Widget child,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16.0, 4.0, 16.0, 8.0),
-          child: Text(
-            label,
-            style: TextStyle(color: scheme.onSurface, fontSize: 12),
-          ),
-        ),
-        SliderTheme(
-          data: const SliderThemeData(
-            showValueIndicator: ShowValueIndicator.never,
-          ),
-          child: child,
-        ),
-      ],
+  Widget _volumePercentLabel(
+    double value,
+    ColorScheme scheme,
+    double width,
+  ) {
+    // 外部音量值可能越界，显示值与滑块位置保持一致。
+    final safeValue = value.clamp(0.0, 1.0).toDouble();
+    return SizedBox(
+      width: width,
+      child: Text(
+        '${(safeValue * 100).round()}%',
+        textAlign: TextAlign.end,
+        style: TextStyle(color: scheme.onSurface, fontSize: 12),
+      ),
     );
   }
 
@@ -1366,7 +1696,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
       builder: (context, systemVolValue, _) {
         return _volumeSliderStack(
           scheme: scheme,
-          value: systemVolValue,
+          value: systemVolValue.clamp(0.0, 1.0).toDouble(),
           color: useMonet
               ? scheme.secondary
               : playerThemeForeground(scheme, enabled: false),
@@ -1376,20 +1706,27 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
           showBubble: _showSystemCustomIndicator || _isSystemHovering,
           onHover: (hovering) => setState(() => _isSystemHovering = hovering),
           onChangeStart: (value) {
+            // 拖动接管系统音量后，滚轮防抖的待写入值由拖动结束统一写入。
+            _systemVolumePersistTimer?.cancel();
+            _pendingSystemVolumePersist = null;
+            _systemVolumePersistRevision += 1;
             isSystemDragging = true;
             dragSystemVol.value = value;
-            systemVolumeService.set(value);
+            _writeSystemVolume(value);
             _triggerSystemIndicator();
           },
           onChanged: (value) {
             dragSystemVol.value = value;
-            systemVolumeService.set(value);
+            _writeSystemVolume(value);
             if (isSystemDragging) _triggerSystemIndicator();
           },
           onChangeEnd: (value) {
             isSystemDragging = false;
             dragSystemVol.value = value;
-            systemVolumeService.set(value);
+            // 拖动结束后经提交队列写入，pending 标记在写入完成前阻止轮询读回旧值；
+            // 提交完成后由 _commitSystemVolume 重启轮询。
+            _stopSystemVolumePolling();
+            _scheduleSystemVolumePersist(value, delay: Duration.zero);
           },
         );
       },
@@ -1399,19 +1736,19 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   Widget _appVolumeSlider(ColorScheme scheme) {
     final useMonet = AppSettings.instance.useMaterialYouForControls;
     return ListenableBuilder(
-      listenable: dragVolDsp,
+      listenable: _appVolumeListenable,
       builder: (context, _) {
-        final currentValue = isDragging
-            ? dragVolDsp.value
-            : playbackService.volumeDsp;
         return _volumeSliderStack(
           scheme: scheme,
-          value: currentValue,
+          // 音量服务不保证入参在 0..1，先收敛再交给 Slider，避免断言。
+          value: playbackService.volumeDsp.clamp(0.0, 1.0).toDouble(),
           color: playerThemeForeground(scheme, enabled: useMonet),
           textColor: playerThemeOnForeground(scheme, enabled: useMonet),
           showBubble: _showCustomIndicator || _isHovering,
           onHover: (hovering) => setState(() => _isHovering = hovering),
           onChangeStart: (value) {
+            // 拖动接管音量后，滚轮防抖的待落盘值由拖动结束统一写入。
+            _volumePersistTimer?.cancel();
             isDragging = true;
             dragVolDsp.value = value;
             playbackService.setVolumeDsp(value, persist: false);
@@ -1423,8 +1760,10 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
             if (isDragging) _triggerIndicator();
           },
           onChangeEnd: (value) {
+            _volumePersistTimer?.cancel();
             isDragging = false;
             dragVolDsp.value = value;
+            _lastVolumeDsp = value;
             playbackService.setVolumeDsp(value);
             _triggerIndicator();
           },
@@ -1447,7 +1786,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     return LayoutBuilder(
       builder: (context, constraints) {
         const padding = 24.0;
-        final trackWidth = constraints.maxWidth - (padding * 2);
+        final trackWidth = max(0.0, constraints.maxWidth - (padding * 2));
         final leftOffset = padding + trackWidth * value;
         return MouseRegion(
           onEnter: (_) => onHover(true),

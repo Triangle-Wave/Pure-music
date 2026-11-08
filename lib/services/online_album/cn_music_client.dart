@@ -118,13 +118,20 @@ class CnMusicClient {
     required String title,
     required String artist,
     int limit = 8,
+    String? rawQuery,
   }) async {
-    final trimmedTitle = title.trim();
+    final customQuery = rawQuery?.trim();
+    final effectiveQuery = customQuery != null && customQuery.isNotEmpty
+        ? customQuery
+        : null;
+    final trimmedTitle = effectiveQuery ?? title.trim();
     if (trimmedTitle.isEmpty) return const [];
-    final keyword = [
-      trimmedTitle,
-      artist.trim(),
-    ].where((value) => value.isNotEmpty).join(' ');
+    final keyword =
+        effectiveQuery ??
+        [
+          trimmedTitle,
+          artist.trim(),
+        ].where((value) => value.isNotEmpty).join(' ');
 
     final groups = await Future.wait<List<CnAlbumCandidate>>([
       _neteaseAlbums(trimmedTitle, limit),

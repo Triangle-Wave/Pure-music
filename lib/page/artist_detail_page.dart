@@ -75,6 +75,9 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
   final OnlineArtistImageService _online = OnlineArtistImageService.instance;
 
   OnlineArtistCandidateCache? _candidateCache;
+
+  /// 对话框打开时展示的候选缓存，用于判断搜索是否返回了新结果。
+  OnlineArtistCandidateCache? _dialogCache;
   OnlineQueryStatus? _onlineStatus;
   bool _onlineLoading = false;
   int _onlineRequestId = 0;
@@ -98,6 +101,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       _onlineRequestId++;
       _onlineLoading = false;
       _candidateCache = null;
+      _dialogCache = null;
       _onlineStatus = null;
       _primaryPic = _artistPicture(widget.artist);
       if (AppSettings.instance.onlineArtistImageEnabled) {
@@ -153,7 +157,37 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       }
     }
     if (!mounted) return;
-    final options = <OnlineCandidateOption>[
+    _dialogCache = cache;
+    final choice = await showOnlineCandidateDialog(
+      context,
+      title: '选择艺术家头像',
+      options: _candidateOptions(cache),
+      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
+      disabled: cache?.disabled ?? false,
+      artworkLoader: _online.artwork,
+      initialQuery: _initialQuery(cache),
+      defaultQuery: _defaultQuery,
+      searchHint: '歌手名或关键词',
+      search: _searchCandidates,
+    );
+    if (choice == null || !mounted) return;
+    await _applyChoice(choice);
+  }
+
+  /// 实体默认搜索词：艺术家名。
+  String get _defaultQuery => widget.artist.name.trim();
+
+  /// 对话框初始搜索词：优先回显缓存里用户上次使用的词，否则用默认词。
+  String _initialQuery(OnlineArtistCandidateCache? cache) {
+    final saved = cache?.searchQuery?.trim();
+    if (saved != null && saved.isNotEmpty) return saved;
+    return _defaultQuery;
+  }
+
+  List<OnlineCandidateOption> _candidateOptions(
+    OnlineArtistCandidateCache? cache,
+  ) {
+    return <OnlineCandidateOption>[
       for (final candidate
           in cache?.candidates ?? const <OnlineArtistCandidate>[])
         OnlineCandidateOption(
@@ -167,16 +201,53 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
           score: candidate.score * 100,
         ),
     ];
-    final choice = await showOnlineCandidateDialog(
-      context,
-      title: '选择艺术家头像',
-      options: options,
-      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
-      disabled: cache?.disabled ?? false,
-      artworkLoader: _online.artwork,
-    );
-    if (choice == null || !mounted) return;
-    await _applyChoice(choice);
+  }
+
+  /// 按用户提交的词重新搜索。
+  ///
+  /// 词等于默认词时走服务的默认分字段查询（`query: null`）；服务层拒绝该词
+  /// （失败或无结果）时返回空列表，页面状态与主图保持不动，由对话框保留原
+  /// 列表并提示。
+  Future<List<OnlineCandidateOption>> _searchCandidates(String query) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const <OnlineCandidateOption>[];
+    final isDefaultQuery = trimmed == _defaultQuery;
+    final previous = _dialogCache ?? _candidateCache;
+    try {
+      final cache = await _online.loadCandidates(
+        widget.artist.name,
+        query: isDefaultQuery ? null : trimmed,
+        force: true,
+      );
+      if (!mounted) return const <OnlineCandidateOption>[];
+      final accepted = isDefaultQuery
+          ? cache != null &&
+                _online.queryStatusFor(widget.artist.name) !=
+                    OnlineQueryStatus.failed &&
+                !identical(cache, previous) &&
+                (previous == null || cache.savedAt != previous.savedAt)
+          : cache?.searchQuery?.trim() == trimmed;
+      if (!accepted || cache == null) {
+        return const <OnlineCandidateOption>[];
+      }
+      final activeChanged =
+          cache.activeCandidate?.id != previous?.activeCandidate?.id ||
+          cache.activeImageUrl != previous?.activeImageUrl;
+      _dialogCache = cache;
+      setState(() {
+        _candidateCache = cache;
+        _onlineStatus = _online.queryStatusFor(widget.artist.name);
+        if (activeChanged) _primaryPic = _artistPicture(widget.artist);
+      });
+      return _candidateOptions(cache);
+    } catch (error) {
+      log.library.warn(
+        'artist_detail_online_search_failed',
+        '艺术家在线头像搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return const <OnlineCandidateOption>[];
+    }
   }
 
   Future<void> _applyChoice(OnlineCandidateChoice choice) async {

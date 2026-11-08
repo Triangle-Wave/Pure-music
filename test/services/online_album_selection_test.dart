@@ -9,21 +9,33 @@ import 'package:pure_music/services/online_album/musicbrainz_client.dart';
 import 'package:pure_music/services/online_album/online_album_service.dart';
 
 class _FakeCnMusicClient extends CnMusicClient {
-  _FakeCnMusicClient(this.albums, {this.fail = false});
+  _FakeCnMusicClient(
+    this.albums, {
+    this.fail = false,
+    this.albumsByQuery = const {},
+  });
 
   final List<CnAlbumCandidate> albums;
   final bool fail;
+
+  /// 按用户改写的搜索词返回不同候选；未命中时回退 [albums]。
+  final Map<String, List<CnAlbumCandidate>> albumsByQuery;
   int calls = 0;
+
+  /// 依次记录每次查询收到的改写词；普通查询为 null。
+  final List<String?> rawQueries = <String?>[];
 
   @override
   Future<List<CnAlbumCandidate>> searchAlbums({
     required String title,
     required String artist,
     int limit = 8,
+    String? rawQuery,
   }) async {
     calls++;
+    rawQueries.add(rawQuery);
     if (fail) throw StateError('offline');
-    return albums;
+    return albumsByQuery[rawQuery] ?? albums;
   }
 }
 
@@ -360,6 +372,50 @@ void main() {
       );
       final selected = await service.loadCandidates(album);
       expect(selected!.info?.title, 'Abbey Road Tribute');
+    });
+
+    test('改写搜索词时绕过缓存并按整段词查询', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_album');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const remaster = CnAlbumCandidate(
+        source: CnMusicSource.netease,
+        id: '3',
+        title: 'Abbey Road Remaster',
+        artist: 'The Beatles',
+        coverUrl: 'https://p1.music.126.net/remaster.jpg',
+        trackCount: 17,
+        year: 2019,
+      );
+      final client = _FakeCnMusicClient(
+        const [_netease],
+        albumsByQuery: const {
+          'Abbey Road Remaster': [remaster],
+        },
+      );
+      final service = OnlineAlbumService.createForTest(
+        cnMusic: client,
+        musicBrainz: _FakeMusicBrainzClient(),
+        appDataDirectory: () async => dir,
+      );
+      final album = _abbeyRoad();
+      await service.loadCandidates(album);
+      expect(client.calls, 1);
+      expect(client.rawQueries.single, isNull);
+
+      final cache = await service.loadCandidates(
+        album,
+        query: '  Abbey Road Remaster  ',
+      );
+      expect(client.calls, 2);
+      expect(client.rawQueries.last, 'Abbey Road Remaster');
+      expect(cache, isNotNull);
+      expect(
+        cache!.candidates.map((candidate) => candidate.title),
+        contains('Abbey Road Remaster'),
+      );
+      expect(cache.searchQuery, 'Abbey Road Remaster');
     });
   });
 }

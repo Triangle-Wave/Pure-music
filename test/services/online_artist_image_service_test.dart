@@ -12,12 +12,16 @@ class _FakeCnMusicClient extends CnMusicClient {
   final List<CnArtistCandidate> artists;
   int calls = 0;
 
+  /// 依次记录每次搜索收到的关键词。
+  final List<String> names = <String>[];
+
   @override
   Future<List<CnArtistCandidate>> searchArtists({
     required String name,
     int limit = 8,
   }) async {
     calls++;
+    names.add(name);
     return artists;
   }
 }
@@ -219,6 +223,41 @@ void main() {
       expect(await second.imageFor('周杰伦'), isNull);
       expect(secondClient.calls, 0);
       expect(await second.preferredImageFor('周杰伦'), isNull);
+    });
+
+    test('改写搜索词时绕过缓存并带上新关键词', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_artist');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const candidate = CnArtistCandidate(
+        source: CnMusicSource.netease,
+        id: '1',
+        name: '周杰伦',
+        picUrl: 'https://p1.music.126.net/artist.jpg',
+      );
+      final client = _FakeCnMusicClient(const [candidate]);
+      final service = OnlineArtistImageService.createForTest(
+        cnMusic: client,
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async => null,
+      );
+      await service.loadCandidates('周杰伦');
+      expect(client.calls, 1);
+      expect(client.names.single, '周杰伦');
+
+      final cache = await service.loadCandidates(
+        '周杰伦',
+        query: ' 周杰伦 Jay ',
+      );
+      expect(client.calls, 2);
+      expect(client.names.last, '周杰伦 Jay');
+      expect(cache, isNotNull);
+      expect(cache!.searchQuery, '周杰伦 Jay');
+      expect(
+        cache.candidates.map((item) => item.name),
+        contains('周杰伦'),
+      );
     });
   });
 }

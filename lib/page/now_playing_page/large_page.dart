@@ -39,18 +39,32 @@ class _NowPlayingLargePage extends StatelessWidget {
     );
     return Row(
       children: [
-        Expanded(
-          child: RepaintBoundary(
-            child: Transform.translate(
-              offset: const Offset(0, _normalLandscapeBottomAreaHeight / 2),
-              child: Center(
-                child: _NowPlayingInfo(coverSizeOverride: coverSize),
-              ),
-            ),
-          ),
-        ),
+        Expanded(child: _leftPane(coverSize)),
         Expanded(child: _rightPane(currentLineAlignment)),
       ],
+    );
+  }
+
+  /// 左侧封面区：播放列表展示时，点击本区域（含封面以外的空白）回到歌词。
+  Widget _leftPane(double coverSize) {
+    final content = RepaintBoundary(
+      child: Transform.translate(
+        offset: const Offset(0, _normalLandscapeBottomAreaHeight / 2),
+        child: Center(
+          child: _NowPlayingInfo(coverSizeOverride: coverSize),
+        ),
+      ),
+    );
+    return ValueListenableBuilder<NowPlayingViewMode>(
+      valueListenable: nowPlayingViewMode,
+      builder: (context, mode, child) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: mode == NowPlayingViewMode.withPlaylist
+            ? exitPlaylistToLyric
+            : null,
+        child: child,
+      ),
+      child: content,
     );
   }
 
@@ -457,16 +471,13 @@ class _NowPlayingLargeViewSwitch extends StatefulWidget {
 
 class _NowPlayingLargeViewSwitchState
     extends State<_NowPlayingLargeViewSwitch> {
-  Future<void> _changeView(NowPlayingViewMode currentViewMode) async {
+  void _changeView(NowPlayingViewMode currentViewMode) {
     final nextViewMode =
         currentViewMode == NowPlayingViewMode.onlyMain ||
             currentViewMode == NowPlayingViewMode.withLyric
         ? NowPlayingViewMode.withPlaylist
         : NowPlayingViewMode.withLyric;
-
-    nowPlayingViewMode.value = nextViewMode;
-    AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode = nextViewMode;
-    await AppPreference.instance.save();
+    switchNowPlayingView(nextViewMode);
   }
 
   @override

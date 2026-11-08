@@ -150,14 +150,25 @@ class OnlineArtistImageService {
   }
 
   /// 读取艺术家候选与当前选择；缓存缺失或 [force] 为真时重新搜索。
+  ///
+  /// [query] 是用户在候选对话框里改写的搜索词：非空时立即按该词重搜并写回
+  /// 缓存，候选打分也以该词为基准。
   Future<OnlineArtistCandidateCache?> loadCandidates(
     String artistName, {
     bool force = false,
+    String? query,
   }) async {
     final name = artistName.trim();
     if (name.isEmpty) return null;
     if (!AppSettings.instance.onlineArtistImageEnabled) return null;
-    return _ensureCandidates(name, cacheKeyForArtist(name), force: force);
+    final userQuery = query?.trim();
+    final hasUserQuery = userQuery != null && userQuery.isNotEmpty;
+    return _ensureCandidates(
+      name,
+      cacheKeyForArtist(name),
+      force: force || hasUserQuery,
+      query: hasUserQuery ? userQuery : null,
+    );
   }
 
   /// 保存用户选择。`candidateId` 为空且 [disabled] 为真表示“不使用”。
@@ -260,13 +271,14 @@ class OnlineArtistImageService {
     String name,
     String key, {
     required bool force,
+    String? query,
   }) async {
     final pending = _pendingCandidates[key];
     if (pending != null) {
       if (!force) return pending;
       await pending;
     }
-    final request = _loadCandidateCache(name, key, force: force);
+    final request = _loadCandidateCache(name, key, force: force, query: query);
     _pendingCandidates[key] = request;
     unawaited(
       request.whenComplete(() {
@@ -282,7 +294,13 @@ class OnlineArtistImageService {
     String name,
     String key, {
     required bool force,
+    String? query,
   }) async {
+    final userQuery = query?.trim();
+    final activeQuery = userQuery == null || userQuery.isEmpty
+        ? null
+        : userQuery;
+    final searchKeyword = activeQuery ?? name;
     OnlineArtistCandidateCache? previous;
     try {
       previous = _candidateMemory[key] ?? await _readCacheEntry(key);
@@ -303,7 +321,7 @@ class OnlineArtistImageService {
     final stopwatch = Stopwatch()..start();
     try {
       candidates = await _withSearchSlot(
-        () => _cnMusic.searchArtists(name: name),
+        () => _cnMusic.searchArtists(name: searchKeyword),
       );
     } catch (error) {
       _queryStatuses[key] = OnlineQueryStatus.failed;
@@ -312,6 +330,7 @@ class OnlineArtistImageService {
         '艺术家头像搜索失败',
         fields: {
           'cacheKey': key,
+          'hasQuery': activeQuery != null,
           'elapsedMs': stopwatch.elapsedMilliseconds,
           'error': error.runtimeType.toString(),
         },
@@ -325,7 +344,7 @@ class OnlineArtistImageService {
       final pic = candidate.picUrl;
       if (pic == null || pic.isEmpty) continue;
       final score = artistNameSimilarity(
-        name,
+        searchKeyword,
         candidate.name,
         aliases: aliases,
       );
@@ -349,6 +368,7 @@ class OnlineArtistImageService {
         '艺术家头像搜索没有结果',
         fields: {
           'cacheKey': key,
+          'hasQuery': activeQuery != null,
           'candidates': candidates.length,
           'elapsedMs': stopwatch.elapsedMilliseconds,
         },
@@ -361,25 +381,48 @@ class OnlineArtistImageService {
         '艺术家头像搜索完成',
         fields: {
           'cacheKey': key,
+          'hasQuery': activeQuery != null,
           'count': ranked.length,
           'elapsedMs': stopwatch.elapsedMilliseconds,
         },
       );
     }
 
+    // 用户改写搜索词后旧选择可能不在新列表里；把它追加到末尾并保留选择，
+    // 避免头像在用户重新挑选前自己跳变。
     final selectedId = previous?.selectedCandidateId;
-    final stillExists =
-        selectedId != null &&
-        ranked.any((candidate) => candidate.id == selectedId);
+    var resolvedId = selectedId;
+    final merged = List<OnlineArtistCandidate>.of(ranked);
+    if (selectedId != null &&
+        !merged.any((candidate) => candidate.id == selectedId)) {
+      final kept = _findArtistCandidate(previous, selectedId);
+      if (kept != null) {
+        merged.add(kept);
+      } else {
+        resolvedId = null;
+      }
+    }
     final cache = OnlineArtistCandidateCache(
-      candidates: List.unmodifiable(ranked),
-      selectedCandidateId: stillExists ? selectedId : null,
+      candidates: List.unmodifiable(merged),
+      selectedCandidateId: resolvedId,
       disabled: previous?.disabled ?? false,
       savedAt: _clock(),
+      searchQuery: activeQuery,
     );
     await _writeCacheEntry(key, cache);
     _candidateMemory[key] = cache;
     return cache;
+  }
+
+  OnlineArtistCandidate? _findArtistCandidate(
+    OnlineArtistCandidateCache? cache,
+    String id,
+  ) {
+    if (cache == null) return null;
+    for (final candidate in cache.candidates) {
+      if (candidate.id == id) return candidate;
+    }
+    return null;
   }
 
   /// 列表里可能同时出现大量艺术家；限制同时进行的搜索数量，

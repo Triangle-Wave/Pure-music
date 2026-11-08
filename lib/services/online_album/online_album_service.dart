@@ -131,24 +131,36 @@ class OnlineAlbumService {
   }
 
   /// 读取专辑候选与当前选择；缓存缺失或 [force] 为真时重新查询。
+  ///
+  /// [query] 是用户在候选对话框里改写的搜索词：非空时按该词整段搜索并写回
+  /// 缓存，不再拼接专辑名与艺术家。
   Future<OnlineAlbumCandidateCache?> loadCandidates(
     Album album, {
     bool force = false,
+    String? query,
   }) async {
     if (!AppSettings.instance.onlineAlbumInfoEnabled) {
       return null;
     }
     final key = cacheKeyForAlbum(album);
+    final userQuery = query?.trim();
+    final hasUserQuery = userQuery != null && userQuery.isNotEmpty;
+    final effectiveForce = force || hasUserQuery;
     final pending = _pendingLookups[key];
     if (pending != null) {
-      if (!force) return pending;
+      if (!effectiveForce) return pending;
       await pending;
     }
-    if (!force) {
+    if (!effectiveForce) {
       final memory = _albumMemory[key];
       if (memory != null) return memory;
     }
-    final request = _loadCandidates(album, key, force: force);
+    final request = _loadCandidates(
+      album,
+      key,
+      force: effectiveForce,
+      query: hasUserQuery ? userQuery : null,
+    );
     _pendingLookups[key] = request;
     unawaited(
       request.whenComplete(() {
@@ -264,7 +276,12 @@ class OnlineAlbumService {
     Album album,
     String key, {
     required bool force,
+    String? query,
   }) async {
+    final userQuery = query?.trim();
+    final activeQuery = userQuery == null || userQuery.isEmpty
+        ? null
+        : userQuery;
     OnlineAlbumCandidateCache? previous;
     try {
       previous = _albumMemory[key] ?? await _readCandidateCache(key);
@@ -289,7 +306,7 @@ class OnlineAlbumService {
       return previous;
     }
 
-    final fetched = await _fetchCandidatesSafely(album);
+    final fetched = await _fetchCandidatesSafely(album, query: activeQuery);
     if (fetched == null) {
       _queryStatuses[key] = OnlineQueryStatus.failed;
       log.library.warn(
@@ -316,6 +333,7 @@ class OnlineAlbumService {
           selectedCandidateId: previous.selectedCandidateId,
           disabled: previous.disabled,
           savedAt: previous.savedAt ?? _clock(),
+          searchQuery: previous.searchQuery,
         );
         await _writeCandidateCache(key, upgraded);
         _albumMemory[key] = upgraded;
@@ -337,19 +355,41 @@ class OnlineAlbumService {
         'hasMatch': hasMatch,
       },
     );
+    // 用户改写搜索词后旧选择可能不在新列表里；把它追加到末尾并保留选择，
+    // 避免封面在用户重新挑选前自己跳变。
     final selectedId = previous?.selectedCandidateId;
-    final stillExists =
-        selectedId != null &&
-        fetched.any((candidate) => candidate.id == selectedId);
+    var resolvedId = selectedId;
+    final merged = List<OnlineAlbumCandidate>.of(fetched);
+    if (selectedId != null &&
+        !merged.any((candidate) => candidate.id == selectedId)) {
+      final kept = _findAlbumCandidate(previous, selectedId);
+      if (kept != null) {
+        merged.add(kept);
+      } else {
+        resolvedId = null;
+      }
+    }
     final cache = OnlineAlbumCandidateCache(
-      candidates: List.unmodifiable(fetched),
-      selectedCandidateId: stillExists ? selectedId : null,
+      candidates: List.unmodifiable(merged),
+      selectedCandidateId: resolvedId,
       disabled: previous?.disabled ?? false,
       savedAt: _clock(),
+      searchQuery: activeQuery,
     );
     await _writeCandidateCache(key, cache);
     _albumMemory[key] = cache;
     return cache;
+  }
+
+  OnlineAlbumCandidate? _findAlbumCandidate(
+    OnlineAlbumCandidateCache? cache,
+    String id,
+  ) {
+    if (cache == null) return null;
+    for (final candidate in cache.candidates) {
+      if (candidate.id == id) return candidate;
+    }
+    return null;
   }
 
   /// 旧 schema 缓存缺少封底、碟片或内页时允许重新查询。
@@ -449,22 +489,35 @@ class OnlineAlbumService {
     }
   }
 
-  Future<List<OnlineAlbumCandidate>?> _fetchCandidatesSafely(Album album) async {
+  Future<List<OnlineAlbumCandidate>?> _fetchCandidatesSafely(
+    Album album, {
+    String? query,
+  }) async {
     try {
-      final result = await _fetchCandidates(album);
+      final result = await _fetchCandidates(album, query: query);
       return result;
     } catch (error) {
       log.library.warn(
         'online_album_fetch_failed',
         '在线专辑候选查询失败',
-        fields: {'error': error.runtimeType.toString()},
+        fields: {
+          'hasQuery': query != null && query.trim().isNotEmpty,
+          'error': error.runtimeType.toString(),
+        },
       );
       return null;
     }
   }
 
-  Future<List<OnlineAlbumCandidate>?> _fetchCandidates(Album album) async {
-    final title = album.name.trim();
+  Future<List<OnlineAlbumCandidate>?> _fetchCandidates(
+    Album album, {
+    String? query,
+  }) async {
+    final userQuery = query?.trim();
+    final effectiveQuery = userQuery != null && userQuery.isNotEmpty
+        ? userQuery
+        : null;
+    final title = effectiveQuery ?? album.name.trim();
     if (title.isEmpty || album.works.isEmpty) {
       return const <OnlineAlbumCandidate>[];
     }
@@ -478,6 +531,7 @@ class OnlineAlbumService {
         artist: artist,
         trackCount: trackCount,
         yearHint: yearHint,
+        rawQuery: effectiveQuery,
       ),
     ];
     cnCandidates.sort((a, b) => b.score.compareTo(a.score));
@@ -492,6 +546,7 @@ class OnlineAlbumService {
       artist: artist,
       trackCount: trackCount,
       yearHint: yearHint,
+      searchWithoutArtist: effectiveQuery != null,
     );
     if (mbCandidates == null) {
       return cnCandidates.isEmpty ? null : cnCandidates;
@@ -506,10 +561,15 @@ class OnlineAlbumService {
     required String artist,
     required int trackCount,
     required int? yearHint,
+    String? rawQuery,
   }) async {
     List<CnAlbumCandidate> candidates;
     try {
-      candidates = await _cnMusic.searchAlbums(title: title, artist: artist);
+      candidates = await _cnMusic.searchAlbums(
+        title: title,
+        artist: artist,
+        rawQuery: rawQuery,
+      );
     } catch (error) {
       log.library.warn(
         'online_album_cn_search_failed',
@@ -578,17 +638,21 @@ class OnlineAlbumService {
   }
 
   /// MusicBrainz 候选。返回 null 表示请求失败；返回空列表表示确实无结果。
+  ///
+  /// [searchWithoutArtist] 为真表示标题已是用户的完整搜索词，查询不再附加
+  /// 艺术家，避免把专辑艺术家拼进关键词。
   Future<List<OnlineAlbumCandidate>?> _fetchMusicBrainzCandidates({
     required String title,
     required String artist,
     required int trackCount,
     required int? yearHint,
+    bool searchWithoutArtist = false,
   }) async {
     List<MbReleaseGroup> groups;
     try {
       groups = await _musicBrainz.searchReleaseGroups(
         release: title,
-        artist: artist,
+        artist: searchWithoutArtist ? '' : artist,
       );
     } catch (error) {
       log.library.warn(

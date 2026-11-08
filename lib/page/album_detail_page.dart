@@ -159,6 +159,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   final OnlineAlbumService _onlineAlbum = OnlineAlbumService.instance;
 
   OnlineAlbumCandidateCache? _candidateCache;
+
+  /// 对话框打开时展示的候选缓存，用于判断搜索是否返回了新结果。
+  OnlineAlbumCandidateCache? _dialogCache;
   OnlineAlbumInfo? _onlineInfo;
   OnlineQueryStatus? _onlineStatus;
   List<AlbumArtwork> _localArtworks = const [];
@@ -198,6 +201,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _onlineInfo = null;
       _onlineStatus = null;
       _candidateCache = null;
+      _dialogCache = null;
       _localArtworks = const [];
       _onlineMain = const [];
       _artworks = const [];
@@ -544,7 +548,45 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       }
     }
     if (!mounted) return;
-    final options = <OnlineCandidateOption>[
+    _dialogCache = cache;
+    final choice = await showOnlineCandidateDialog(
+      context,
+      title: '选择专辑来源',
+      options: _candidateOptions(cache),
+      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
+      disabled: cache?.disabled ?? false,
+      artworkLoader: _onlineAlbum.artwork,
+      initialQuery: _initialQuery(cache),
+      defaultQuery: _defaultQuery,
+      searchHint: '专辑名、艺术家或任意关键词',
+      search: _searchCandidates,
+    );
+    if (choice == null || !mounted) return;
+    await _applyCandidateChoice(choice);
+  }
+
+  /// 实体默认搜索词：专辑名与艺术家各自去掉首尾空白后拼接，只保留非空项；
+  /// 两者都为空时返回空串。
+  String get _defaultQuery {
+    final title = widget.album.name.trim();
+    final artist = albumArtistFor(widget.album).trim();
+    return <String>[
+      if (title.isNotEmpty) title,
+      if (artist.isNotEmpty) artist,
+    ].join(' ');
+  }
+
+  /// 对话框初始搜索词：优先回显缓存里用户上次使用的词，否则用默认词。
+  String _initialQuery(OnlineAlbumCandidateCache? cache) {
+    final saved = cache?.searchQuery?.trim();
+    if (saved != null && saved.isNotEmpty) return saved;
+    return _defaultQuery;
+  }
+
+  List<OnlineCandidateOption> _candidateOptions(
+    OnlineAlbumCandidateCache? cache,
+  ) {
+    return <OnlineCandidateOption>[
       for (final candidate
           in cache?.candidates ?? const <OnlineAlbumCandidate>[])
         OnlineCandidateOption(
@@ -560,16 +602,78 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
           score: candidate.score,
         ),
     ];
-    final choice = await showOnlineCandidateDialog(
-      context,
-      title: '选择专辑来源',
-      options: options,
-      selectedId: cache?.selectedCandidateId ?? cache?.activeCandidate?.id,
-      disabled: cache?.disabled ?? false,
-      artworkLoader: _onlineAlbum.artwork,
-    );
-    if (choice == null || !mounted) return;
-    await _applyCandidateChoice(choice);
+  }
+
+  /// 按用户提交的词重新搜索。
+  ///
+  /// 词等于默认词时走服务的默认分字段查询（`query: null`）；服务层拒绝该词
+  /// （失败或无结果）时返回空列表，页面状态、候选缓存与主图保持不动，由对话
+  /// 框保留原列表并提示。本次搜索占用新的请求号，尚未完成的页面加载不得覆盖
+  /// 搜索结果。
+  Future<List<OnlineCandidateOption>> _searchCandidates(String query) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const <OnlineCandidateOption>[];
+    final isDefaultQuery = trimmed == _defaultQuery;
+    final previous = _dialogCache ?? _candidateCache;
+    final previousUrl =
+        _selectedArtwork >= 0 && _selectedArtwork < _artworks.length
+        ? _artworks[_selectedArtwork].url
+        : null;
+    final hadPendingLoad = _onlineLoading;
+    final requestId = ++_onlineRequestId;
+    try {
+      final cache = await _onlineAlbum.loadCandidates(
+        widget.album,
+        query: isDefaultQuery ? null : trimmed,
+        force: true,
+      );
+      if (!mounted || requestId != _onlineRequestId) {
+        return const <OnlineCandidateOption>[];
+      }
+      final accepted = isDefaultQuery
+          ? cache != null &&
+                _onlineAlbum.queryStatusFor(widget.album) !=
+                    OnlineQueryStatus.failed &&
+                !identical(cache, previous) &&
+                (previous == null || cache.savedAt != previous.savedAt)
+          : cache?.searchQuery?.trim() == trimmed;
+      if (!accepted || cache == null) {
+        _settleSearch(requestId, hadPendingLoad: hadPendingLoad);
+        return const <OnlineCandidateOption>[];
+      }
+      _dialogCache = cache;
+      await _applyCandidateCache(
+        cache,
+        previousUrl: previousUrl,
+        requestId: requestId,
+      );
+      if (!mounted || requestId != _onlineRequestId) {
+        return const <OnlineCandidateOption>[];
+      }
+      return _candidateOptions(cache);
+    } catch (error) {
+      log.library.warn(
+        'online_album_candidates_search_failed',
+        '在线专辑候选搜索失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      _settleSearch(requestId, hadPendingLoad: hadPendingLoad);
+      return const <OnlineCandidateOption>[];
+    }
+  }
+
+  /// 搜索没有产生可展示的结果时结束它占用的请求号：复位加载标记，并在本次
+  /// 搜索作废了尚未完成的页面加载时按服务层当前查询状态收尾，避免界面停在
+  /// 永久的加载态。
+  void _settleSearch(int requestId, {required bool hadPendingLoad}) {
+    if (!mounted || requestId != _onlineRequestId) return;
+    setState(() {
+      _onlineLoading = false;
+      if (hadPendingLoad && !_onlineDone) {
+        _onlineStatus = _onlineAlbum.queryStatusFor(widget.album);
+        _onlineDone = true;
+      }
+    });
   }
 
   Future<void> _applyCandidateChoice(OnlineCandidateChoice choice) async {
