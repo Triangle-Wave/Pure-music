@@ -146,6 +146,7 @@ jobs:
         with:
           msystem: MINGW64
           update: false
+          release: false
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-binutils
