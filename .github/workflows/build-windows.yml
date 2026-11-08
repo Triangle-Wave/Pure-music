@@ -187,9 +187,25 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/qingyueyin/Pure-music/releases/latest" `
-            -Headers @{ "User-Agent" = "github-actions" }
+          $apiUri = "https://api.github.com/repos/qingyueyin/Pure-music/releases/latest"
+          $apiMaxAttempts = 6
+          $apiDelays = @(5, 10, 15, 20, 25)
+          $release = $null
+          for ($apiAttempt = 1; $apiAttempt -le $apiMaxAttempts; $apiAttempt++) {
+            try {
+              $release = Invoke-RestMethod -Uri $apiUri -Headers @{ "User-Agent" = "github-actions" }
+              break
+            }
+            catch {
+              $apiMessage = $_.Exception.Message
+              if ($apiAttempt -eq $apiMaxAttempts) {
+                throw "release API request failed after ${apiMaxAttempts} attempts: $apiMessage"
+              }
+              $apiWait = $apiDelays[$apiAttempt - 1]
+              Write-Warning "release API attempt $apiAttempt/$apiMaxAttempts failed: $apiMessage; retrying in $apiWait s"
+              Start-Sleep -Seconds $apiWait
+            }
+          }
           $asset = $release.assets | Where-Object { $_.name -like "*portable.zip" } | Select-Object -First 1
           if (-not $asset) { throw "portable.zip not found in latest release" }
 
