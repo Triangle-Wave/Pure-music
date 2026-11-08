@@ -1220,6 +1220,9 @@ class _NowPlayingVolDspSlider extends StatefulWidget {
       _NowPlayingVolDspSliderState();
 }
 
+/// 音量面板的底色与前景色。
+typedef _VolumePanelColors = ({Color background, Color foreground});
+
 class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   /// 单格滚轮调节的步进比例。
   static const double _scrollStep = 0.01;
@@ -1449,14 +1452,81 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
 
     return MenuAnchor(
       controller: _menuController,
-      style: appMenuStyle,
+      style: _volumePanelMenuStyle,
       onOpen: _onVolumeMenuOpen,
       onClose: _onVolumeMenuClose,
-      menuChildren: [_volumeMenuBody(scheme, menuWidth)],
+      menuChildren: [
+        // 切歌时重新读取封面调色板，面板底色随之刷新。
+        ListenableBuilder(
+          listenable: playbackService.nowPlayingNotifier,
+          builder: (context, _) => _volumeMenuBody(scheme, menuWidth),
+        ),
+      ],
       builder: (context, controller, _) {
         return _buildVolumeButton(context, controller, useMonet: useMonet);
       },
     );
+  }
+
+  /// 面板自行绘制圆角底色，材质层保持透明且无阴影。
+  static final MenuStyle _volumePanelMenuStyle = appMenuStyle.copyWith(
+    backgroundColor: const WidgetStatePropertyAll<Color?>(Colors.transparent),
+    surfaceTintColor: const WidgetStatePropertyAll<Color?>(
+      Colors.transparent,
+    ),
+    shadowColor: const WidgetStatePropertyAll<Color?>(Colors.transparent),
+    elevation: const WidgetStatePropertyAll<double?>(0.0),
+    padding: const WidgetStatePropertyAll<EdgeInsetsGeometry?>(
+      EdgeInsets.zero,
+    ),
+  );
+
+  /// 面板配色：封面主色不透明铺底，前景按对比度取白或深色。
+  _VolumePanelColors _panelColors(ColorScheme scheme) {
+    // 调色板尚未生成时使用主色派生的主题色，
+    // 就绪后在下一次切歌或页面重建时切换为封面主色。
+    var background = scheme.primary;
+    final audio = playbackService.nowPlaying;
+    if (audio != null) {
+      try {
+        final palette = ColorExtractionService().getCachedPaletteForPath(
+          audio.path,
+          modified: audio.modified,
+        );
+        if (palette != null && palette.isNotEmpty) {
+          background = palette.first.withValues(alpha: 1.0);
+        }
+      } catch (error, stackTrace) {
+        log.app.debug(
+          'now_playing_volume_panel_palette_failed',
+          '读取音量面板封面调色板失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return (background: background, foreground: _panelForeground(background));
+  }
+
+  /// 亮底用深色字、暗底用白字；深色档在中亮度背景上对比不足时收紧到纯黑。
+  Color _panelForeground(Color background) {
+    final whiteContrast = _panelContrast(Colors.white, background);
+    final blackContrast = _panelContrast(Colors.black, background);
+    if (whiteContrast >= blackContrast) return Colors.white;
+    if (_panelContrast(Colors.black87, background) >= 4.5) {
+      return Colors.black87;
+    }
+    return Colors.black;
+  }
+
+  /// 带透明度合成后再算对比度，避免把半透明前景当成纯色。
+  double _panelContrast(Color foreground, Color background) {
+    final blended = Color.alphaBlend(foreground, background);
+    final blendedLuminance = blended.computeLuminance();
+    final backgroundLuminance = background.computeLuminance();
+    final lighter = max(blendedLuminance, backgroundLuminance);
+    final darker = min(blendedLuminance, backgroundLuminance);
+    return (lighter + 0.05) / (darker + 0.05);
   }
 
   /// 音量按钮：悬停打开面板、滚轮直接调节、点击钉住或关闭。
@@ -1653,7 +1723,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   Widget _volumeMenuBody(ColorScheme scheme, double menuWidth) {
-    final useMonet = AppSettings.instance.useMaterialYouForControls;
+    final colors = _panelColors(scheme);
     // 窄菜单下压缩百分比文本宽度，把水平空间让给滑块。
     final percentWidth = menuWidth < 160.0 ? 36.0 : 44.0;
     return MouseRegion(
@@ -1662,56 +1732,71 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
         _hoverCloseTimer?.cancel();
       },
       onExit: (_) => _scheduleHoverClose(_menuController),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
-        child: SizedBox(
-          width: menuWidth,
-          child: Row(
-            children: [
-              IconButton(
-                tooltip: _showSystemRow ? '切换到应用音量' : '切换到系统音量',
-                visualDensity: VisualDensity.compact,
-                onPressed: _toggleVolumeRow,
-                icon: Icon(
-                  _showSystemRow ? Symbols.volume_mute : Symbols.volume_up,
-                ),
-                color: playerChromeForeground(context, enabled: useMonet),
-              ),
-              Expanded(
-                child: SliderTheme(
-                  data: const SliderThemeData(
-                    showValueIndicator: ShowValueIndicator.never,
-                  ),
-                  child: _showSystemRow
-                      ? _systemVolumeSlider(scheme)
-                      : _appVolumeSlider(scheme),
-                ),
-              ),
-              if (_showSystemRow)
-                ValueListenableBuilder<double>(
-                  valueListenable: dragSystemVol,
-                  builder: (context, value, _) =>
-                      _volumePercentLabel(value, scheme, percentWidth),
-                )
-              else
-                ListenableBuilder(
-                  listenable: _appVolumeListenable,
-                  builder: (context, _) => _volumePercentLabel(
-                    playbackService.volumeDsp,
-                    scheme,
-                    percentWidth,
-                  ),
-                ),
-            ],
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          // 背景单独裁剪圆角：数值气泡悬在面板上方，不能随背景一起被裁掉。
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: AppRadius.mdCircular,
+              child: ColoredBox(color: colors.background),
+            ),
           ),
-        ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
+            child: SizedBox(
+              width: menuWidth,
+              child: Row(
+                children: [
+                  IconButton(
+                    tooltip: _showSystemRow ? '切换到应用音量' : '切换到系统音量',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: _toggleVolumeRow,
+                    icon: Icon(
+                      _showSystemRow ? Symbols.volume_mute : Symbols.volume_up,
+                    ),
+                    color: colors.foreground,
+                  ),
+                  Expanded(
+                    child: SliderTheme(
+                      data: const SliderThemeData(
+                        showValueIndicator: ShowValueIndicator.never,
+                      ),
+                      child: _showSystemRow
+                          ? _systemVolumeSlider(colors)
+                          : _appVolumeSlider(colors),
+                    ),
+                  ),
+                  if (_showSystemRow)
+                    ValueListenableBuilder<double>(
+                      valueListenable: dragSystemVol,
+                      builder: (context, value, _) => _volumePercentLabel(
+                        value,
+                        colors.foreground,
+                        percentWidth,
+                      ),
+                    )
+                  else
+                    ListenableBuilder(
+                      listenable: _appVolumeListenable,
+                      builder: (context, _) => _volumePercentLabel(
+                        playbackService.volumeDsp,
+                        colors.foreground,
+                        percentWidth,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _volumePercentLabel(
     double value,
-    ColorScheme scheme,
+    Color foreground,
     double width,
   ) {
     // 外部音量值可能越界，显示值与滑块位置保持一致。
@@ -1721,25 +1806,18 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
       child: Text(
         '${(safeValue * 100).round()}%',
         textAlign: TextAlign.end,
-        style: TextStyle(color: scheme.onSurface, fontSize: 12),
+        style: TextStyle(color: foreground, fontSize: 12),
       ),
     );
   }
 
-  Widget _systemVolumeSlider(ColorScheme scheme) {
-    final useMonet = AppSettings.instance.useMaterialYouForControls;
+  Widget _systemVolumeSlider(_VolumePanelColors colors) {
     return ValueListenableBuilder(
       valueListenable: dragSystemVol,
       builder: (context, systemVolValue, _) {
         return _volumeSliderStack(
-          scheme: scheme,
           value: systemVolValue.clamp(0.0, 1.0).toDouble(),
-          color: useMonet
-              ? scheme.secondary
-              : playerThemeForeground(scheme, enabled: false),
-          textColor: useMonet
-              ? scheme.onSecondary
-              : playerThemeOnForeground(scheme, enabled: false),
+          foreground: colors.foreground,
           showBubble: _showSystemCustomIndicator || _isSystemHovering,
           onHover: (hovering) => setState(() => _isSystemHovering = hovering),
           onChangeStart: (value) {
@@ -1770,17 +1848,14 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     );
   }
 
-  Widget _appVolumeSlider(ColorScheme scheme) {
-    final useMonet = AppSettings.instance.useMaterialYouForControls;
+  Widget _appVolumeSlider(_VolumePanelColors colors) {
     return ListenableBuilder(
       listenable: _appVolumeListenable,
       builder: (context, _) {
         return _volumeSliderStack(
-          scheme: scheme,
           // 音量服务不保证入参在 0..1，先收敛再交给 Slider，避免断言。
           value: playbackService.volumeDsp.clamp(0.0, 1.0).toDouble(),
-          color: playerThemeForeground(scheme, enabled: useMonet),
-          textColor: playerThemeOnForeground(scheme, enabled: useMonet),
+          foreground: colors.foreground,
           showBubble: _showCustomIndicator || _isHovering,
           onHover: (hovering) => setState(() => _isHovering = hovering),
           onChangeStart: (value) {
@@ -1810,10 +1885,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   Widget _volumeSliderStack({
-    required ColorScheme scheme,
     required double value,
-    required Color color,
-    required Color textColor,
+    required Color foreground,
     required bool showBubble,
     required ValueChanged<bool> onHover,
     required ValueChanged<double> onChangeStart,
@@ -1833,9 +1906,9 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
             alignment: Alignment.centerLeft,
             children: [
               Slider(
-                thumbColor: color,
-                activeColor: color,
-                inactiveColor: scheme.outline,
+                thumbColor: foreground,
+                activeColor: foreground,
+                inactiveColor: foreground.withValues(alpha: 0.3),
                 min: 0,
                 max: 1,
                 value: value,
@@ -1844,7 +1917,12 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
                 onChangeEnd: onChangeEnd,
               ),
               if (showBubble)
-                _volumeBubble(leftOffset, value, color, textColor),
+                _volumeBubble(
+                  leftOffset,
+                  value,
+                  foreground,
+                  _panelForeground(foreground),
+                ),
             ],
           ),
         );
@@ -1852,11 +1930,13 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     );
   }
 
+  /// 数值气泡：底色取面板前景色，文字取该底色的对比色，
+  /// 气泡位于面板内部或悬在面板上方时都与背景保持反差。
   Widget _volumeBubble(
     double leftOffset,
     double value,
-    Color color,
-    Color textColor,
+    Color bubbleColor,
+    Color bubbleTextColor,
   ) {
     return Positioned(
       left: leftOffset - 24.0,
@@ -1865,8 +1945,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
         child: _CustomValueIndicator(
           value: value * 100,
           suffix: '%',
-          color: color,
-          textColor: textColor,
+          color: bubbleColor,
+          textColor: bubbleTextColor,
         ),
       ),
     );

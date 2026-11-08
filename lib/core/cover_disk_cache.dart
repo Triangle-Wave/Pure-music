@@ -14,9 +14,12 @@ const int coverDiskCacheMaxBytes = 256 << 20;
 /// 封面二级磁盘缓存。
 ///
 /// 目录为缓存根下的 `covers/`（默认 `<数据根>/cache/covers/`）：本地图片按
-/// “源路径 + 修改时间 + 目标像素尺寸 + 图片序号”生成 PNG 缩略图，文件夹图片
-/// 的序号固定为 -1；在线图片按 URL 哈希保存下载结果。文件名只含 SHA-1 摘要与
-/// 内容扩展名，不把原始路径或 URL 写进目录。旧位置的文件可继续作为只读回退命中。
+/// “解码策略版本 + 源路径 + 修改时间 + 目标像素尺寸 + 图片序号”生成 PNG 缩略图，
+/// 文件夹图片的序号固定为 -1；在线图片按 URL 哈希保存下载结果。文件名只含
+/// SHA-1 摘要与内容扩展名，不把原始路径或 URL 写进目录。
+///
+/// 本地缩略图键含解码版本，当前版本为 `local-v2`；旧版本键下的文件不再命中，
+/// 由现有容量淘汰清理。旧位置的缓存目录中键与本版本相同的文件仍按只读回退命中。
 ///
 /// 所有磁盘错误都降级为未命中，调用方继续使用内存缓存与网络链路；缓存文件
 /// 损坏时直接删除，下一次请求重新生成或下载。
@@ -47,6 +50,10 @@ class CoverDiskCache {
 
   static const int _minImageBytes = 32;
   static const int _pruneScanLimit = 4096;
+
+  /// 本地缩略图的解码策略版本。解码方式变化时递增，旧键下的缩略图自然失效，
+  /// 成为由容量淘汰清理的孤立文件。
+  static const String _localKeyVersion = 'local-v2';
 
   Directory? _directory;
   Directory? _legacyDirectory;
@@ -167,7 +174,7 @@ class CoverDiskCache {
     final size = '${_bucket(width)}x${_bucket(height)}';
     // 图片序号区分同一文件的不同内嵌图；文件夹图片固定为 -1。
     final index = pictureIndex ?? -1;
-    final raw = 'local|$normalized|$stamp|$size|#$index';
+    final raw = '$_localKeyVersion|$normalized|$stamp|$size|#$index';
     return sha1.convert(utf8.encode(raw)).toString();
   }
 

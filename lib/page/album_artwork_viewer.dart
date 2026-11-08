@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/library/album_artwork.dart';
 
 /// 大图边长上限（物理像素）。
@@ -98,6 +99,8 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+    // 解码目标取窗口宽高：图片按目标框等比缩放，宽图与竖图都能拿到长边
+    // 足够的解码尺寸，contain 放大时不丢细节；正方形封面自然落到最短边。
     final width = (size.width * devicePixelRatio)
         .round()
         .clamp(1, _maxViewerImageSide)
@@ -281,9 +284,23 @@ class _ArtworkPageState extends State<_ArtworkPage> {
           .loader(widget.artwork, widget.width, widget.height)
           .then<ImageProvider?>(
             (provider) => provider,
-            onError: (Object error, StackTrace stackTrace) => null,
+            onError: (Object error, StackTrace stackTrace) {
+              log.app.debug(
+                'album_artwork_viewer_load_failed',
+                '专辑大图加载失败，显示占位',
+                error: error,
+                stackTrace: stackTrace,
+              );
+              return null;
+            },
           );
-    } catch (error) {
+    } catch (error, stackTrace) {
+      log.app.debug(
+        'album_artwork_viewer_load_failed',
+        '专辑大图加载失败，显示占位',
+        error: error,
+        stackTrace: stackTrace,
+      );
       return Future<ImageProvider?>.value();
     }
   }
