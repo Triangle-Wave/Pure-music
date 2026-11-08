@@ -1,15 +1,26 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
+import 'package:pure_music/services/online_album/album_match.dart';
 import 'package:pure_music/services/online_album/cn_music_client.dart';
+import 'package:pure_music/services/online_album/online_album_models.dart';
 import 'package:pure_music/services/online_album/online_artist_image_service.dart';
 
 class _FakeCnMusicClient extends CnMusicClient {
-  _FakeCnMusicClient(this.artists);
+  _FakeCnMusicClient(
+    this.artists, {
+    this.byName = const <String, List<CnArtistCandidate>>{},
+  });
 
   final List<CnArtistCandidate> artists;
+
+  /// 按搜索词返回不同候选；未命中时回退到 [artists]。
+  final Map<String, List<CnArtistCandidate>> byName;
   int calls = 0;
 
   /// 依次记录每次搜索收到的关键词。
@@ -22,7 +33,7 @@ class _FakeCnMusicClient extends CnMusicClient {
   }) async {
     calls++;
     names.add(name);
-    return artists;
+    return byName[name] ?? artists;
   }
 }
 
@@ -258,6 +269,134 @@ void main() {
         cache.candidates.map((item) => item.name),
         contains('周杰伦'),
       );
+    });
+
+    test('括号显示名各自独立缓存与选择', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_artist');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const kugimiya = CnArtistCandidate(
+        source: CnMusicSource.netease,
+        id: '11',
+        name: 'cv.釘宮 理恵',
+        picUrl: 'https://p1.music.126.net/kugimiya.jpg',
+      );
+      const asakawa = CnArtistCandidate(
+        source: CnMusicSource.netease,
+        id: '12',
+        name: 'cv.浅川 悠',
+        picUrl: 'https://p1.music.126.net/asakawa.jpg',
+      );
+      final client = _FakeCnMusicClient(
+        const [],
+        byName: const {
+          '(cv.釘宮 理恵)': [kugimiya],
+          '(cv.浅川 悠)': [asakawa],
+        },
+      );
+      final loadedUrls = <String>[];
+      final service = OnlineArtistImageService.createForTest(
+        cnMusic: client,
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async {
+          loadedUrls.add(url);
+          return null;
+        },
+      );
+
+      final first = await service.loadCandidates('(cv.釘宮 理恵)');
+      final second = await service.loadCandidates('(cv.浅川 悠)');
+      expect(first!.candidates.single.imageUrl, kugimiya.picUrl);
+      expect(second!.candidates.single.imageUrl, asakawa.picUrl);
+      expect(
+        service.cacheKeyForArtist('(cv.釘宮 理恵)'),
+        isNot(service.cacheKeyForArtist('(cv.浅川 悠)')),
+      );
+
+      await service.updateSelection(
+        '(cv.釘宮 理恵)',
+        candidateId: first.candidates.single.id,
+      );
+      await service.updateSelection(
+        '(cv.浅川 悠)',
+        candidateId: second.candidates.single.id,
+      );
+
+      final firstRestored = await service.loadCandidates('(cv.釘宮 理恵)');
+      final secondRestored = await service.loadCandidates('(cv.浅川 悠)');
+      expect(firstRestored!.selectedCandidateId, first.candidates.single.id);
+      expect(secondRestored!.selectedCandidateId, second.candidates.single.id);
+      expect(
+        firstRestored.selectedCandidateId,
+        isNot(secondRestored.selectedCandidateId),
+      );
+
+      await service.preferredImageFor('(cv.釘宮 理恵)');
+      await service.preferredImageFor('(cv.浅川 悠)');
+      expect(loadedUrls, [kugimiya.picUrl, asakawa.picUrl]);
+    });
+
+    test('旧键缓存迁移到新键并保留选择', () async {
+      final dir = await Directory.systemTemp.createTemp('pure_music_artist');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      const artistName = '(cv.釘宮 理恵)';
+      const legacyCandidate = OnlineArtistCandidate(
+        id: 'cn:netease:21',
+        source: '网易云',
+        name: 'cv.釘宮 理恵',
+        imageUrl: 'https://p1.music.126.net/legacy-kugimiya.jpg',
+        score: 1,
+      );
+      final legacyCache = OnlineArtistCandidateCache(
+        candidates: const [legacyCandidate],
+        selectedCandidateId: legacyCandidate.id,
+        savedAt: DateTime(2026, 10, 1),
+      );
+      final cacheDirectory = Directory(
+        path.join(dir.path, 'online_album', 'artist'),
+      );
+      await cacheDirectory.create(recursive: true);
+      final legacyKey = sha1
+          .convert(utf8.encode(normalizeForMatch(artistName)))
+          .toString();
+      final legacyFile = File(
+        path.join(cacheDirectory.path, '$legacyKey.json'),
+      );
+      await legacyFile.writeAsString(jsonEncode(legacyCache.toJson()));
+      final newKey = sha1.convert(utf8.encode(artistName.trim())).toString();
+      final newFile = File(path.join(cacheDirectory.path, '$newKey.json'));
+      expect(newKey, isNot(legacyKey));
+      expect(await newFile.exists(), isFalse);
+
+      final client = _FakeCnMusicClient(const []);
+      final loadedUrls = <String>[];
+      final service = OnlineArtistImageService.createForTest(
+        cnMusic: client,
+        appDataDirectory: () async => dir,
+        artworkLoader: (String url) async {
+          loadedUrls.add(url);
+          return null;
+        },
+      );
+
+      final loaded = await service.loadCandidates(artistName);
+      expect(loaded!.selectedCandidateId, legacyCandidate.id);
+      expect(client.calls, 0);
+      expect(await newFile.exists(), isTrue);
+
+      final migrated = OnlineArtistCandidateCache.fromJson(
+        jsonDecode(await newFile.readAsString()),
+      );
+      expect(migrated!.selectedCandidateId, legacyCandidate.id);
+      expect(migrated.candidates.single.id, legacyCandidate.id);
+      expect(migrated.candidates.single.imageUrl, legacyCandidate.imageUrl);
+
+      await service.preferredImageFor(artistName);
+      expect(loadedUrls, [legacyCandidate.imageUrl]);
+      expect(await legacyFile.exists(), isTrue);
     });
   });
 }

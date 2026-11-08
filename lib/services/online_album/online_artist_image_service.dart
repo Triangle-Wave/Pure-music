@@ -127,7 +127,7 @@ class OnlineArtistImageService {
     if (name.isEmpty) return null;
     final key = cacheKeyForArtist(name);
     try {
-      final cache = _candidateMemory[key] ?? await _readCacheEntry(key);
+      final cache = await _loadCacheEntry(name, key);
       if (cache == null || !cache.hasExplicitSelection) return null;
       final url = cache.activeImageUrl;
       if (url == null || url.isEmpty) return null;
@@ -145,8 +145,18 @@ class OnlineArtistImageService {
   /// 选中候选的图片下载走与专辑封面相同的磁盘缓存链路。
   Future<ImageProvider?> artwork(String url) => _artworkLoader(url);
 
+  /// 缓存键与显示名一一对应，不同显示名必须得到不同键。
+  ///
+  /// 名字可能整体带括号（如 `(cv.釘宮 理恵)`），不能走会剥离括号的匹配归一化。
   String cacheKeyForArtist(String artistName) {
-    return sha1.convert(utf8.encode(normalizeForMatch(artistName))).toString();
+    final key = artistName.trim();
+    return sha1.convert(utf8.encode(key)).toString();
+  }
+
+  /// 旧键：按匹配归一化生成，仅用于读取并迁移历史缓存。
+  String _legacyCacheKeyForArtist(String artistName) {
+    final normalized = normalizeForMatch(artistName.trim());
+    return sha1.convert(utf8.encode(normalized)).toString();
   }
 
   /// 读取艺术家候选与当前选择；缓存缺失或 [force] 为真时重新搜索。
@@ -180,7 +190,7 @@ class OnlineArtistImageService {
     final name = artistName.trim();
     if (name.isEmpty) return null;
     final key = cacheKeyForArtist(name);
-    final stored = _candidateMemory[key] ?? await _readCacheEntry(key);
+    final stored = await _loadCacheEntry(name, key);
     final cache =
         stored ??
         OnlineArtistCandidateCache(
@@ -211,7 +221,7 @@ class OnlineArtistImageService {
     final key = cacheKeyForArtist(name);
     _memory.remove(key);
     _selectionRevision++;
-    final cache = _candidateMemory[key] ?? await _readCacheEntry(key);
+    final cache = await _loadCacheEntry(name, key);
     final url = cache?.activeImageUrl;
     if (url == null || url.isEmpty) return;
     try {
@@ -303,7 +313,7 @@ class OnlineArtistImageService {
     final searchKeyword = activeQuery ?? name;
     OnlineArtistCandidateCache? previous;
     try {
-      previous = _candidateMemory[key] ?? await _readCacheEntry(key);
+      previous = await _loadCacheEntry(name, key);
     } catch (error) {
       log.library.warn(
         'online_artist_image_cache_read_failed',
@@ -514,6 +524,27 @@ class OnlineArtistImageService {
       );
       return const <File>[];
     }
+  }
+
+  /// 按「内存 → 新键文件 → 旧键文件（迁移到新键）」顺序读取缓存条目。
+  ///
+  /// 迁移只在新键文件不存在且旧键与新键不同时发生，读到的旧内容写入新键后
+  /// 返回。迁移成功不主动删除旧键文件，避免影响共用该历史键的其他显示名。
+  /// 新键写入失败由 [_writeCacheEntry] 内部记录日志并降级，本次仍返回旧内容。
+  Future<OnlineArtistCandidateCache?> _loadCacheEntry(
+    String name,
+    String key,
+  ) async {
+    final memory = _candidateMemory[key];
+    if (memory != null) return memory;
+    final current = await _readCacheEntry(key);
+    if (current != null) return current;
+    final legacyKey = _legacyCacheKeyForArtist(name);
+    if (legacyKey == key) return null;
+    final legacy = await _readCacheEntry(legacyKey);
+    if (legacy == null) return null;
+    await _writeCacheEntry(key, legacy);
+    return legacy;
   }
 
   Future<OnlineArtistCandidateCache?> _readCacheEntry(String key) async {
