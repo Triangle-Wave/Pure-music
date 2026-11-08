@@ -70,6 +70,9 @@ final nowPlayingViewMode = ValueNotifier(
   AppPreference.instance.nowPlayingPagePref.nowPlayingViewMode,
 );
 
+/// 音量面板是否展开；展开期间暂停播放页光标自动隐藏。
+final ValueNotifier<bool> nowPlayingVolumePanelOpen = ValueNotifier(false);
+
 /// 切换播放页视图：更新全局模式并写入偏好，写盘失败只记录日志。
 void switchNowPlayingView(NowPlayingViewMode mode) {
   if (nowPlayingViewMode.value == mode) return;
@@ -184,6 +187,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   void _bumpCursor() {
     _cursorHideTimer?.cancel();
     _cursorHiddenNotifier.value = false;
+    // 音量面板展开期间保持光标可见：隐藏光标层会接管命中测试，
+    // 让音量按钮收到 onExit 并触发悬停关闭。
+    if (nowPlayingVolumePanelOpen.value) return;
     _cursorHideTimer = Timer(const Duration(milliseconds: 1200), () {
       if (!mounted) return;
       _cursorHiddenNotifier.value = true;
@@ -423,6 +429,18 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     }
   }
 
+  /// 音量面板开合联动光标自动隐藏：展开时立即显示光标并暂停计时，收起后重新计时。
+  void _onVolumePanelOpenChanged() {
+    if (!mounted) return;
+    if (nowPlayingVolumePanelOpen.value) {
+      _cursorHideTimer?.cancel();
+      _cursorHideTimer = null;
+      _cursorHiddenNotifier.value = false;
+      return;
+    }
+    _bumpCursor();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -436,6 +454,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     ]);
     playbackService.nowPlayingNotifier.addListener(updateCover);
     nowPlayingViewMode.addListener(_onViewModeChanged);
+    nowPlayingVolumePanelOpen.addListener(_onVolumePanelOpenChanged);
     updateCover();
     _bumpCursor();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -475,6 +494,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     SleepBlocker.instance.reevaluate();
     playbackService.nowPlayingNotifier.removeListener(updateCover);
     nowPlayingViewMode.removeListener(_onViewModeChanged);
+    nowPlayingVolumePanelOpen.removeListener(_onVolumePanelOpenChanged);
+    // 页面销毁时复位面板状态，避免下一次进入播放页时光标一直可见。
+    nowPlayingVolumePanelOpen.value = false;
     _coverDebounceTimer?.cancel();
     _songChangeTrimTimer?.cancel();
     _cursorHideTimer?.cancel();
@@ -1215,6 +1237,9 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   bool isSystemDragging = false;
   bool _isMenuOpen = false;
   bool _disposed = false;
+
+  /// 面板展开是否由本控件触发；销毁时只复位本控件打开的全局状态。
+  bool _panelOpenedByThisControl = false;
   double _lastVolumeDsp = -1;
   Timer? _systemVolBoostTimer;
   late final VoidCallback _systemVolValueListener;
@@ -1320,6 +1345,11 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   @override
   void dispose() {
     _disposed = true;
+    // 只复位本控件打开的面板状态，避免路由切换期间旧控件销毁误关新页面的面板。
+    if (_panelOpenedByThisControl) {
+      _panelOpenedByThisControl = false;
+      nowPlayingVolumePanelOpen.value = false;
+    }
     final hasPendingVolumePersist = _volumePersistTimer?.isActive ?? false;
     final pendingSystemVolume = _pendingSystemVolumePersist;
     _systemVolBoostTimer?.cancel();
@@ -1442,7 +1472,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
         onEnter: (_) => _onVolumeButtonHoverEnter(controller),
         onExit: (_) => _onVolumeButtonHoverExit(controller),
         child: IconButton(
-          tooltip: '音量',
+          tooltip: controller.isOpen ? null : '音量',
           onPressed: () => _toggleVolumePanel(controller),
           icon: const Icon(Symbols.volume_up),
           color: playerChromeForeground(context, enabled: useMonet),
@@ -1534,6 +1564,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   void _onVolumeMenuOpen() {
+    _panelOpenedByThisControl = true;
+    nowPlayingVolumePanelOpen.value = true;
     _isMenuOpen = true;
     _hoverOpenTimer?.cancel();
     _hoverCloseTimer?.cancel();
@@ -1551,6 +1583,8 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   }
 
   void _onVolumeMenuClose() {
+    _panelOpenedByThisControl = false;
+    nowPlayingVolumePanelOpen.value = false;
     _isMenuOpen = false;
     _pinned = false;
     _hoverOpenTimer?.cancel();
