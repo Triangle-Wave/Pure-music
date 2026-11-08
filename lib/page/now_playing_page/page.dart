@@ -1454,7 +1454,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     if (controller.isOpen) return;
     _hoverOpenTimer = Timer(const Duration(milliseconds: 120), () {
       if (!mounted || _disposed || controller.isOpen) return;
-      unawaited(controller.open());
+      controller.open();
     });
   }
 
@@ -1468,7 +1468,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     _hoverCloseTimer = Timer(const Duration(milliseconds: 220), () {
       if (!mounted || _disposed || _pinned) return;
       if (controller.isOpen) {
-        unawaited(controller.close());
+        controller.close();
       }
     });
   }
@@ -1476,14 +1476,14 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
   void _toggleVolumePanel(MenuController controller) {
     if (_pinned) {
       _pinned = false;
-      unawaited(controller.close());
+      controller.close();
       return;
     }
     _pinned = true;
     _hoverOpenTimer?.cancel();
     _hoverCloseTimer?.cancel();
     if (!controller.isOpen) {
-      unawaited(controller.open());
+      controller.open();
     }
   }
 
@@ -1496,7 +1496,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     _hoverOpenTimer?.cancel();
     _hoverCloseTimer?.cancel();
     if (!controller.isOpen) {
-      unawaited(controller.open());
+      controller.open();
     }
     final step = -event.scrollDelta.dy.sign * 0.05;
     if (_showSystemRow) {
