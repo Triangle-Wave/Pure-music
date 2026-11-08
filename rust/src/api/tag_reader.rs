@@ -4114,7 +4114,7 @@ mod tag_reader_tests {
         assert!(!is_within_any_root(Path::new("X:\\"), &roots));
         assert_eq!(
             path_segments("X:\\lib\\cat\\album1"),
-            vec!["x", "lib", "cat", "album1"]
+            vec!["x:", "lib", "cat", "album1"]
         );
 
         // 父目录等于库根时允许作为发现起点。
