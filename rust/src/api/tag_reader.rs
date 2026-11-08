@@ -2524,6 +2524,8 @@ fn build_index_from_folders(
     sink: StreamSink<IndexActionState>,
 ) -> Result<(), io::Error> {
     validate_scan_roots(&folders)?;
+    // 原始库根随索引保存，更新时作为父目录发现起点的上界。
+    let roots = folders.clone();
     let index_dir = PathBuf::from(&index_path);
     let mut audio_folders: Vec<AudioFolder> = vec![];
     let mut scanned: u64 = 0;
@@ -2675,6 +2677,7 @@ fn build_index_from_folders(
     let json_value = serde_json::json!({
         "version": CURRENT_INDEX_VERSION,
         "folders": audio_folders_json,
+        "roots": roots,
     });
 
     let _ = sink.add(IndexActionState {
@@ -2756,12 +2759,13 @@ fn discover_new_audio_folders(
         match AudioFolder::read_from_folder(root) {
             Ok(audio_folder) => {
                 new_entries.push(audio_folder.to_json_value());
-                return Ok(());
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
+
+    // 含音频的目录继续下探：多碟专辑的 Disc1、Disc2 等子目录也各自建立索引条目。
 
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -3094,6 +3098,7 @@ fn indexed_folder_scan(
 #[cfg(test)]
 mod tag_reader_tests {
     use std::{
+        collections::HashSet,
         iter,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
@@ -3105,11 +3110,14 @@ mod tag_reader_tests {
 
     use super::cue::is_cue_path;
     use super::{
-        detect_and_encode, drop_invalid_duplicates_by_media_id, dsd_native_bitrate,
+        detect_and_encode, discover_new_audio_folders, discovery_roots,
+        drop_invalid_duplicates_by_media_id, dsd_native_bitrate, folder_change_stamp,
         folder_contains_virtual_container, folder_has_cue_source_residue, has_virtual_tracks,
-        indexed_audio_update_from_parts, indexed_folder_scan, is_iso_path, is_lyric_item_key,
-        join_deduped, parse_midi_metadata, path_key, probe_indexed_path, read_audio_extra_metadata,
-        read_by_asf, read_cue_folder, read_sacd_folder, should_emit_index_progress,
+        index_declared_roots, index_folder_snapshots_unchanged, indexed_audio_update_from_parts,
+        indexed_folder_scan, indexed_parents_common_prefix, is_iso_path, is_lyric_item_key,
+        is_within_any_root, join_deduped, parent_discovery_root, parse_midi_metadata, path_key,
+        path_segments, probe_indexed_path, read_audio_extra_metadata, read_by_asf,
+        read_cue_folder, read_sacd_folder, should_emit_index_progress,
         should_scan_indexed_audio_files, should_show_recording_date, tag_reader_worker_count_for,
         Audio, AudioFolder, IndexedAudioUpdate, IndexedFolderScan, SUPPORTED_FORMATS,
     };
@@ -4021,12 +4029,356 @@ mod tag_reader_tests {
             IndexedFolderScan::Skip
         );
     }
+
+    #[test]
+    fn discovery_continues_into_subfolders_of_new_audio_folder() {
+        let temp = temp_cue_dir();
+        std::fs::create_dir_all(&temp.0).expect("create temp dir");
+        let album = temp.0.join("album");
+        let disc = album.join("Disc1");
+        std::fs::create_dir_all(&disc).expect("create nested dirs");
+        write_test_file(&album.join("track.wav"), &wav_24bit_bytes());
+        write_test_file(&disc.join("track.wav"), &wav_24bit_bytes());
+
+        let mut new_entries = Vec::new();
+        let mut scanned = HashSet::new();
+        discover_new_audio_folders(&album, &HashSet::new(), &mut new_entries, &mut scanned)
+            .expect("discover nested audio folders");
+
+        let found: HashSet<String> = new_entries
+            .iter()
+            .filter_map(|entry| entry["path"].as_str().map(String::from))
+            .collect();
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&album.to_string_lossy().to_string()));
+        assert!(found.contains(&disc.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn fast_path_reacts_to_parent_folder_change() {
+        let temp = temp_cue_dir();
+        std::fs::create_dir_all(&temp.0).expect("create temp dir");
+        let album = temp.0.join("album");
+        std::fs::create_dir_all(&album).expect("create album dir");
+        write_test_file(&album.join("track.wav"), &minimal_wav_bytes());
+        let album_stamp = folder_change_stamp(&album);
+
+        // 目录 mtime 精确到秒：跨过一秒再新增同级目录，父目录 mtime 才严格晚于 album_stamp。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::create_dir_all(temp.0.join("sibling")).expect("create sibling dir");
+
+        let changed = super::library_db::IndexFolderSnapshot {
+            path: album.to_string_lossy().to_string(),
+            modified: album_stamp,
+        };
+        assert!(!index_folder_snapshots_unchanged(&[changed]));
+
+        // 目录与父目录都不存在时按未变化处理，快路径不中断。
+        let missing = temp.0.join("missing").join("album");
+        let absent = super::library_db::IndexFolderSnapshot {
+            path: missing.to_string_lossy().to_string(),
+            modified: 0,
+        };
+        assert!(index_folder_snapshots_unchanged(&[absent]));
+    }
+
+    #[test]
+    fn fast_path_reacts_to_parent_of_folder_with_xml() {
+        let temp = temp_cue_dir();
+        std::fs::create_dir_all(&temp.0).expect("create temp dir");
+        let album = temp.0.join("album");
+        std::fs::create_dir_all(&album).expect("create album dir");
+        write_test_file(&album.join("track.wav"), &minimal_wav_bytes());
+        write_test_file(&album.join("album.xml"), b"<album/>");
+        let album_stamp = folder_change_stamp(&album);
+        // 含 XML 的目录戳是 mtime * 1<<20 + len 的混合值，远大于任何目录 mtime。
+        assert!(album_stamp > 1_u64 << 40);
+
+        // 目录 mtime 精确到秒：跨过一秒再新增同级目录，父目录 mtime 才严格晚于目录自身 mtime。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::create_dir_all(temp.0.join("sibling")).expect("create sibling dir");
+
+        let changed = super::library_db::IndexFolderSnapshot {
+            path: album.to_string_lossy().to_string(),
+            modified: album_stamp,
+        };
+        assert!(!index_folder_snapshots_unchanged(&[changed]));
+    }
+
+    #[test]
+    fn parent_discovery_root_respects_library_roots() {
+        // 索引明确记录库根时，库根自身与库根之下都允许，库根之上不允许。
+        let roots = vec![String::from("X:\\lib")];
+        assert!(is_within_any_root(Path::new("X:\\lib"), &roots));
+        assert!(is_within_any_root(Path::new("x:/LIB/cat"), &roots));
+        assert!(!is_within_any_root(Path::new("X:\\"), &roots));
+        assert_eq!(
+            path_segments("X:\\lib\\cat\\album1"),
+            vec!["x", "lib", "cat", "album1"]
+        );
+
+        // 父目录等于库根时允许作为发现起点。
+        let root = parent_discovery_root("X:/lib/cat/album1", &roots, &HashSet::new());
+        assert_eq!(root.map(|(text, _)| text), Some(String::from("X:/lib/cat")));
+
+        // 库根更深时，落在库根之外的父目录跳过。
+        let deep = vec![String::from("X:\\lib\\cat")];
+        assert!(is_within_any_root(Path::new("X:\\lib\\cat\\disc1"), &deep));
+        assert!(!is_within_any_root(Path::new("X:\\lib\\other"), &deep));
+        assert!(parent_discovery_root("X:/lib/other/album1", &deep, &HashSet::new()).is_none());
+
+        // 已在索引中的父目录不再重复入列。
+        let indexed = HashSet::from([String::from("X:/lib/cat")]);
+        assert!(parent_discovery_root("X:/lib/cat/album1", &roots, &indexed).is_none());
+
+        // 多个库根各自生效。
+        let multi = vec![String::from("X:\\lib"), String::from("Y:\\music")];
+        assert_eq!(
+            parent_discovery_root("Y:/music/album", &multi, &HashSet::new())
+                .map(|(text, _)| text),
+            Some(String::from("Y:/music"))
+        );
+        assert!(parent_discovery_root("Z:/other/album", &multi, &HashSet::new()).is_none());
+
+        // 旧索引没有 roots 时退回已索引目录父目录集合的公共前缀；
+        // 单个专辑的父目录就是库根，父目录发现起点照常可用。
+        let single = indexed_parents_common_prefix(["D:\\Music\\Album"]);
+        assert_eq!(single, vec!["d:", "music"]);
+        let fallback = discovery_roots(Vec::new(), ["D:\\Music\\Album"]);
+        assert_eq!(fallback, vec![String::from("d:\\music")]);
+        assert_eq!(
+            parent_discovery_root("D:/Music/Album", &fallback, &HashSet::new())
+                .map(|(text, _)| text),
+            Some(String::from("D:/Music"))
+        );
+
+        // 多个库根没有公共分段时前缀为空，无法确定库根边界，父目录起点不再反推。
+        let disjoint = indexed_parents_common_prefix(["D:\\Music\\Album", "E:\\Music\\Album"]);
+        assert!(disjoint.is_empty());
+        assert!(discovery_roots(Vec::new(), ["D:\\Music\\Album", "E:\\Music\\Album"]).is_empty());
+        assert!(parent_discovery_root("E:/Music/Album", &[], &HashSet::new()).is_none());
+
+        // 空库根集合不提供任何父目录边界。
+        assert!(!is_within_any_root(Path::new("E:/Music"), &[]));
+        assert!(!is_within_any_root(Path::new("E:/Music/Album"), &[]));
+    }
+
+    #[test]
+    fn index_declared_roots_filters_empty_and_duplicates() {
+        let index = serde_json::json!({
+            "roots": ["D:\\Music", "", "   ", "d:/music", "E:\\Music"],
+        });
+        assert_eq!(
+            index_declared_roots(&index),
+            vec![String::from("D:\\Music"), String::from("E:\\Music")]
+        );
+
+        // 首尾空白在保存与去重前去除，父目录匹配不受空白影响。
+        let padded = index_declared_roots(&serde_json::json!({
+            "roots": ["  D:\\Music  ", "d:/music"],
+        }));
+        assert_eq!(padded, vec![String::from("D:\\Music")]);
+        assert!(is_within_any_root(Path::new("d:/music/album"), &padded));
+
+        // 索引记录的 roots 优先于父目录公共前缀。
+        assert_eq!(
+            discovery_roots(
+                index_declared_roots(&index),
+                ["D:\\Music\\Album", "E:\\Music\\Album"]
+            ),
+            vec![String::from("D:\\Music"), String::from("E:\\Music")]
+        );
+
+        assert!(index_declared_roots(&serde_json::json!({"version": 2})).is_empty());
+    }
+}
+
+/// 已索引目录的父目录 mtime（秒）。
+///
+/// 同级目录新增或删除只更新父目录的 mtime，被索引目录自身的戳保持不变；
+/// 快路径用这个值判断是否需要进入增量扫描重新发现目录。
+/// 父目录不存在或元数据不可读时返回 None，调用方按未变化处理。
+fn parent_folder_modified_secs(path: &Path) -> Option<u64> {
+    let parent = path.parent()?;
+    let modified = fs::metadata(parent)
+        .and_then(|metadata| metadata.modified())
+        .ok()?;
+    Some(system_time_secs(Ok(modified)))
+}
+
+/// 目录自身 mtime（秒），不含同目录 XML 的指纹。
+///
+/// 父目录比较使用这个值：目录含 XML 时 `folder_change_stamp` 返回
+/// `mtime * 1<<20 + len` 的混合戳，量级远大于任何父目录 mtime，不能直接比较。
+/// 元数据不可读时返回 None，调用方按未变化处理。
+fn folder_modified_secs(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|modified| system_time_secs(Ok(modified)))
 }
 
 fn index_folder_snapshots_unchanged(folders: &[library_db::IndexFolderSnapshot]) -> bool {
-    folders
-        .iter()
-        .all(|folder| folder_change_stamp(Path::new(folder.path.as_str())) == folder.modified)
+    folders.iter().all(|folder| {
+        let path = Path::new(folder.path.as_str());
+        // 目录自身内容戳含 XML 指纹，与索引记录的 modified 比较。
+        if folder_change_stamp(path) != folder.modified {
+            return false;
+        }
+        // 父目录比较使用目录自身 mtime，不使用含 XML 指纹的混合戳。
+        match (
+            parent_folder_modified_secs(path),
+            folder_modified_secs(path),
+        ) {
+            (Some(parent_modified), Some(own_modified)) => parent_modified <= own_modified,
+            _ => true,
+        }
+    })
+}
+
+/// 路径分段：按 `\` 与 `/` 切分、丢弃空段并转小写。
+///
+/// 两种分隔符混用时得到同一组分段，大小写差异在比较前已消除。
+fn path_segments(path: &str) -> Vec<String> {
+    path.split(|character| character == '\\' || character == '/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// 已索引目录路径的公共前缀段。
+///
+/// 逐段求最长公共前缀；没有输入时返回空向量。
+fn indexed_paths_common_prefix<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut prefix: Option<Vec<String>> = None;
+    for path in paths {
+        let segments = path_segments(path);
+        prefix = Some(match prefix.take() {
+            Some(current) => {
+                let shared = current
+                    .iter()
+                    .zip(segments.iter())
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                current.into_iter().take(shared).collect()
+            }
+            None => segments,
+        });
+    }
+    prefix.unwrap_or_default()
+}
+
+/// 已索引目录的父目录集合的公共前缀段。
+///
+/// 旧索引没有库根字段时用它近似库根：已索引目录的父目录通常就是库根，
+/// 或位于库根之下。没有可用父目录时返回空向量，表示无法确定库根边界。
+fn indexed_parents_common_prefix<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let parents: Vec<String> = paths
+        .filter_map(|path| Path::new(path).parent())
+        .map(|parent| parent.to_string_lossy().to_string())
+        .collect();
+    indexed_paths_common_prefix(parents.iter().map(String::as_str))
+}
+
+/// 索引记录的库根。
+///
+/// 路径文本去除首尾空白后保存，过滤空串与无法分段的路径，按去除空白后的分段去重，
+/// 使大小写、分隔符或首尾空白不同的同一目录只保留首个。
+fn index_declared_roots(index: &serde_json::Value) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    let Some(items) = index.get("roots").and_then(|value| value.as_array()) else {
+        return roots;
+    };
+    for item in items {
+        let Some(root) = item.as_str() else {
+            continue;
+        };
+        if root.trim().is_empty() {
+            continue;
+        }
+        let segments = path_segments(root.trim());
+        if segments.is_empty() || !seen.insert(segments) {
+            continue;
+        }
+        roots.push(root.trim().to_string());
+    }
+    roots
+}
+
+/// 父目录发现起点的库根集合。
+///
+/// 索引记录了库根时直接使用；旧索引没有该字段时，退回已索引目录父目录集合的公共前缀。
+/// 返回空向量表示无法确定库根边界，此时不提供父目录起点，发现只从已索引目录自身开始；
+/// 用户执行一次完整重建即可写入精确 roots。
+fn discovery_roots<'a>(
+    declared: Vec<String>,
+    indexed_paths: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    if !declared.is_empty() {
+        return declared;
+    }
+    let prefix = indexed_parents_common_prefix(indexed_paths);
+    if prefix.is_empty() {
+        Vec::new()
+    } else {
+        vec![prefix.join("\\")]
+    }
+}
+
+/// 父目录是否等于某个库根，或位于某个库根之下。
+///
+/// 按路径分段、大小写不敏感比较；库根列表为空表示没有可用边界，一律返回 false。
+fn is_within_any_root(parent: &Path, roots: &[String]) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    roots.iter().any(|root| {
+        let segments = path_segments(root);
+        !segments.is_empty() && path_within_prefix(parent, &segments)
+    })
+}
+
+/// 路径是否等于或长于给定分段前缀，且逐段与前缀相同。
+///
+/// 空前缀按匹配处理；父目录短于库根分段意味着越过库根。
+fn path_within_prefix(path: &Path, prefix: &[String]) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let segments = path_segments(&path.to_string_lossy());
+    segments.len() >= prefix.len()
+        && segments
+            .iter()
+            .zip(prefix.iter())
+            .all(|(segment, expected)| segment == expected)
+}
+
+/// 由已索引目录反推的父目录发现起点。
+///
+/// 返回父目录的路径文本与路径对象。盘根、已在索引中的父目录、越过库根的父目录
+/// 都返回 None；旧索引无法确定库根边界（roots 为空）时同样返回 None，不反推，
+/// 避免库外目录进入曲库。
+fn parent_discovery_root(
+    folder_path: &str,
+    roots: &[String],
+    indexed_paths: &HashSet<String>,
+) -> Option<(String, PathBuf)> {
+    if roots.is_empty() {
+        return None;
+    }
+    let parent = Path::new(folder_path).parent()?;
+    if parent.parent().is_none() {
+        return None;
+    }
+    if !is_within_any_root(parent, roots) {
+        return None;
+    }
+    let parent_path = parent.to_string_lossy().to_string();
+    if indexed_paths.contains(&parent_path) {
+        return None;
+    }
+    Some((parent_path, parent.to_path_buf()))
 }
 
 pub fn update_index(
@@ -4069,6 +4421,8 @@ pub fn update_index(
     let refresh_all_metadata = version.is_some_and(|value| value < CURRENT_INDEX_VERSION);
     let mut index_changed = refresh_all_metadata;
     index["version"] = serde_json::json!(CURRENT_INDEX_VERSION);
+    // 库根在取得 folders 的可变借用之前读出，后续作为父目录发现起点的上界。
+    let declared_roots = index_declared_roots(&index);
 
     let folders = index["folders"]
         .as_array_mut()
@@ -4102,7 +4456,19 @@ pub fn update_index(
         .map(|audios| audios.len() as u64)
         .sum::<u64>();
     let mut checked = 0_u64;
-    let mut discovery_roots = Vec::new();
+    let mut discovery_start_dirs = Vec::new();
+    // 已收集的父目录起点，避免多个同级目录重复入列。
+    let mut root_keys: HashSet<String> = HashSet::new();
+    // 已索引目录的路径集合：父目录已在索引中时不需要额外起点，
+    // 它的 mtime 变化会让该目录自身进入增量扫描并遍历其子树。
+    let indexed_paths: HashSet<String> = folders
+        .iter()
+        .filter_map(|folder| folder["path"].as_str().map(String::from))
+        .collect();
+    // 父目录发现起点的库根：索引记录的 roots 优先，旧索引退回已索引目录父目录集合的
+    // 公共前缀。父目录不得越过库根，否则库根自身含音频被索引时，反推的父目录会落在
+    // 库外并把库外目录带入发现。
+    let roots = discovery_roots(declared_roots, indexed_paths.iter().map(String::as_str));
 
     for folder_item in folders.iter_mut() {
         let folder_path = match folder_item["path"].as_str() {
@@ -4110,6 +4476,16 @@ pub fn update_index(
             None => continue,
         };
         reject_network_folder(Path::new(&folder_path))?;
+        // 父目录不含直接音频时不会进入索引，同级目录新增或删除只更新父目录 mtime，
+        // 因此由已索引子目录反推父目录作为发现起点。盘根、已在索引中的父目录、
+        // 越过库根的父目录都跳过，避免无意义的整盘遍历与库外目录入库。
+        if let Some((parent_path, parent)) =
+            parent_discovery_root(&folder_path, &roots, &indexed_paths)
+        {
+            if root_keys.insert(parent_path) {
+                discovery_start_dirs.push(parent);
+            }
+        }
         let latest = folder_item["latest"].as_u64().unwrap_or(0);
         let old_folder_modified = folder_item["modified"].as_u64().unwrap_or(0);
 
@@ -4151,7 +4527,7 @@ pub fn update_index(
             skipped_tag_reads += folder_audio_count;
             continue;
         }
-        discovery_roots.push(PathBuf::from(&folder_path));
+        discovery_start_dirs.push(PathBuf::from(&folder_path));
 
         let _ = sink.add(IndexActionState {
             progress: if total == 0 {
@@ -4341,7 +4717,7 @@ pub fn update_index(
             .collect();
         let mut new_entries: Vec<serde_json::Value> = Vec::new();
         let mut scanned_dirs: HashSet<String> = HashSet::new();
-        for root_path in discovery_roots {
+        for root_path in discovery_start_dirs {
             let _ = sink.add(IndexActionState {
                 progress: if total == 0 {
                     0.0
