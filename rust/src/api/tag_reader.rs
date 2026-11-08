@@ -4274,6 +4274,7 @@ fn indexed_paths_common_prefix<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 /// 或位于库根之下。没有可用父目录时返回空向量，表示无法确定库根边界。
 fn indexed_parents_common_prefix<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let parents: Vec<String> = paths
+        .into_iter()
         .filter_map(|path| Path::new(path).parent())
         .map(|parent| parent.to_string_lossy().to_string())
         .collect();
