@@ -5,9 +5,18 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.28**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.29**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.29</strong></summary>
+
+**专辑大图**
+
+- 全屏查看按图片长边等比缩放，横图、竖图与正方形封面都保持原始比例。
+
+</details>
 
 <details>
 <summary><strong>2.3.28</strong></summary>
