@@ -1179,7 +1179,7 @@ class CoverImageCache {
   bool _isImageCoverPath(String value) =>
       _imageCoverExtensions.contains(path.extension(value).toLowerCase());
 
-  /// 同目录封面图片直接读取，并按目标框等比缩放后解码。
+  /// 同目录封面图片直接读取，按长边等比缩放到目标框，不放大。
   /// 走图片文件自身的 Key（路径 + mtime + 尺寸），与音频内嵌图缓存键相互独立。
   Future<Uint8List?> _loadImageCoverFile(
     String imagePath,
@@ -1189,49 +1189,28 @@ class CoverImageCache {
     try {
       final raw = await File(imagePath).readAsBytes();
       if (raw.isEmpty) return null;
-      final buffer = await ui.ImmutableBuffer.fromUint8List(raw);
+      // 只给宽度一个维度，解码器按原图比例缩放，不改变宽高比。
+      final targetWidth = max(1, max(width, height));
+      final codec = await ui.instantiateImageCodec(
+        raw,
+        targetWidth: targetWidth,
+        allowUpscaling: false,
+      );
       try {
-        final codec = await ui.instantiateImageCodecWithSize(
-          buffer,
-          getTargetSize: width <= 0 || height <= 0
-              ? null
-              : (int intrinsicWidth, int intrinsicHeight) {
-                  // 目标尺寸是解码上限：原图超出目标框时按短边等比缩小，
-                  // 原图小于目标框时保持原尺寸，不做放大。
-                  if (intrinsicWidth <= width && intrinsicHeight <= height) {
-                    return ui.TargetImageSize(
-                      width: intrinsicWidth,
-                      height: intrinsicHeight,
-                    );
-                  }
-                  final scale = min(
-                    width / intrinsicWidth,
-                    height / intrinsicHeight,
-                  );
-                  return ui.TargetImageSize(
-                    width: max(1, (intrinsicWidth * scale).round()),
-                    height: max(1, (intrinsicHeight * scale).round()),
-                  );
-                },
-        );
+        final frame = await codec.getNextFrame();
         try {
-          final frame = await codec.getNextFrame();
-          try {
-            final data = await frame.image.toByteData(
-              format: ui.ImageByteFormat.png,
-            );
-            if (data == null) return null;
-            return Uint8List.fromList(
-              data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-            );
-          } finally {
-            frame.image.dispose();
-          }
+          final data = await frame.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (data == null) return null;
+          return Uint8List.fromList(
+            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          );
         } finally {
-          codec.dispose();
+          frame.image.dispose();
         }
       } finally {
-        buffer.dispose();
+        codec.dispose();
       }
     } catch (error, trace) {
       log.app.debug(
