@@ -1199,6 +1199,9 @@ class _NowPlayingVolDspSlider extends StatefulWidget {
 }
 
 class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
+  /// 单格滚轮调节的步进比例。
+  static const double _scrollStep = 0.01;
+
   final playbackService = PlayService.instance.playbackService;
   final systemVolumeService = SystemVolumeService.instance;
   final dragVolDsp = ValueNotifier(
@@ -1498,7 +1501,7 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     if (!controller.isOpen) {
       controller.open();
     }
-    final step = -event.scrollDelta.dy.sign * 0.05;
+    final step = -event.scrollDelta.dy.sign * _scrollStep;
     if (_showSystemRow) {
       final next = (dragSystemVol.value + step).clamp(0.0, 1.0).toDouble();
       // 防抖期间系统音量尚未改变，先停掉轮询，避免读回旧值覆盖滑块。
