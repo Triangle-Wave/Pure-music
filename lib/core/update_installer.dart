@@ -64,6 +64,8 @@ bool installerLogShowsStart({
 }
 
 /// 启动安装程序并返回进程 pid；启动失败时抛出原始异常。
+///
+/// [arguments] 为调用方生成的完整静默更新参数，实现直接传给安装程序即可。
 typedef InstallerProcessLauncher =
     Future<int> Function(
       String executable,
@@ -465,7 +467,12 @@ class UpdateInstaller {
   UpdateInstaller._();
 
   static const _portableSupportDirectory = '.update';
+
+  /// Dart 侧安装步骤日志文件名，位于 `<数据根>\updates\`。
   static const _installerUpdateLogFileName = 'installer_update.log';
+
+  /// Inno Setup 安装日志文件名，仅用于 `/LOG=`，位于 `<数据根>\updates\`。
+  static const _installerSetupLogFileName = 'installer_setup.log';
 
   static Future<UpdateInstallOutcome> run({
     required UpdateInfo info,
@@ -735,8 +742,8 @@ class UpdateInstaller {
     return _startInstallerUpdate(installerPath: savePath, onPhase: onPhase);
   }
 
-  /// 安装版更新：直接启动 Inno Setup 安装程序，由安装器关闭当前程序。
-  /// 安装完成后由安装程序的 Run 段启动新版，这里不额外重启。
+  /// 安装版更新：以静默参数启动 Inno Setup 安装程序，由安装器关闭当前程序。
+  /// 安装完成后安装器的 Run 段在 `/AUTOSTART` 下启动新版，这里不额外重启。
   static Future<UpdateInstallOutcome> _startInstallerUpdate({
     required String installerPath,
     required UpdatePhaseCallback onPhase,
@@ -763,8 +770,8 @@ class UpdateInstaller {
     );
   }
 
-  /// 直接启动安装程序：安装器按 CloseApplications 关闭当前程序并替换文件，
-  /// 启动成功后退出现有进程；启动失败保留安装包，由用户手动运行。
+  /// 静默启动安装程序：安装器按 CloseApplications 关闭当前程序并静默覆盖
+  /// 上次安装目录；启动成功后退出现有进程，启动失败保留安装包供手动运行。
   static Future<UpdateInstallOutcome> startInstallerUpdate({
     required String installerPath,
     required String executablePath,
@@ -775,17 +782,20 @@ class UpdateInstaller {
   }) async {
     final appDir = p.dirname(executablePath);
     final installerDir = p.dirname(installerPath);
+    final logDirectory = p.dirname(logPath);
     final launch = launchProcess ?? _launchInstallerProcess;
     final exitApplication = exitApp ?? _exitCurrentApplication;
 
+    await _ensureInstallerLogDirectory(logDirectory);
     await _recordInstallerStep(
       logPath,
       '进入安装：installerPath=$installerPath, appDir=$appDir, '
       'exe=$executablePath',
     );
+    final installerArguments = _installerArguments(logDirectory);
     await _recordInstallerStep(
       logPath,
-      '直接启动安装程序：$installerPath /CLOSEAPPLICATIONS, '
+      '静默启动安装程序：$installerPath ${installerArguments.join(' ')}, '
       'workingDirectory=$installerDir',
     );
 
@@ -794,7 +804,7 @@ class UpdateInstaller {
     try {
       processId = await launch(
         installerPath,
-        const ['/CLOSEAPPLICATIONS'],
+        installerArguments,
         workingDirectory: installerDir,
       );
     } catch (error, stackTrace) {
@@ -843,7 +853,31 @@ class UpdateInstaller {
     return UpdateInstallOutcome.installerStarted;
   }
 
+  /// 当前安装器的基础开关：关闭正在运行的应用，由安装器替换文件。
+  static const List<String> _installerBaseArguments = ['/CLOSEAPPLICATIONS'];
+
+  /// 静默覆盖安装的完整命令行参数。
+  ///
+  /// `/LOG=` 写入 [logDirectory] 下的 `installer_setup.log`；Dart 步骤日志
+  /// `installer_update.log` 与它同目录但分属两个文件，安装器不会覆盖应用侧
+  /// 记录。安装完成后仅在命令行带 `/AUTOSTART` 时启动新版，CI 的静默安装
+  /// 不会拉起应用。
+  static List<String> _installerArguments(String logDirectory) {
+    final installerLogPath = p.join(logDirectory, _installerSetupLogFileName);
+    return <String>[
+      '/VERYSILENT',
+      '/SUPPRESSMSGBOXES',
+      '/NORESTART',
+      '/SP-',
+      ..._installerBaseArguments,
+      '/AUTOSTART',
+      '/LOG=$installerLogPath',
+    ];
+  }
+
   /// 以分离进程直接运行安装程序，返回其 pid。
+  ///
+  /// [arguments] 由调用方生成完整静默更新参数，这里原样传入。
   static Future<int> _launchInstallerProcess(
     String executable,
     List<String> arguments, {
@@ -860,6 +894,21 @@ class UpdateInstaller {
 
   static Future<void> _exitCurrentApplication() =>
       WindowLifecycleService.instance.exitApp();
+
+  /// 确保步骤日志与 Inno 安装日志所在目录存在；失败只记录警告，
+  /// 后续写入各自兜底，不阻断安装启动。
+  static Future<void> _ensureInstallerLogDirectory(String path) async {
+    try {
+      await Directory(path).create(recursive: true);
+    } catch (error, stackTrace) {
+      log.update.warn(
+        'legacy',
+        '[UpdateInstaller] 创建安装日志目录失败：$error',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
 
   /// 同时写入应用日志与安装日志；安装日志失败不阻断安装流程。
   static Future<void> _recordInstallerStep(

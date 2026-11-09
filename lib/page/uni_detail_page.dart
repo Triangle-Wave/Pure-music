@@ -59,6 +59,8 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
     this.extraActions,
     this.bodyOverride,
     this.onPrimaryPicTap,
+    this.picTapLabel = '更换封面',
+    this.picTapIcon = Symbols.brush,
     this.primaryPicBusy = false,
     this.enableSearch = false,
     this.searchQuery = '',
@@ -112,6 +114,13 @@ class UniDetailPage<P, S, T> extends StatefulWidget {
   final List<Widget>? extraActions;
   final Widget? bodyOverride;
   final VoidCallback? onPrimaryPicTap;
+
+  /// 头图悬停提示文案。
+  final String picTapLabel;
+
+  /// 头图悬停提示图标。
+  final IconData picTapIcon;
+
   final bool primaryPicBusy;
   final bool enableSearch;
   final String searchQuery;
@@ -517,6 +526,8 @@ class _UniDetailPageState<P, S, T> extends State<UniDetailPage<P, S, T>> {
           multiSelectController: multiSelectController,
           multiSelectViewActions: widget.multiSelectViewActions,
           onPicTap: widget.onPrimaryPicTap,
+          picTapLabel: widget.picTapLabel,
+          picTapIcon: widget.picTapIcon,
           picBusy: widget.primaryPicBusy,
           searchController: widget.enableSearch ? _searchController : null,
           searchQuery: widget.searchQuery,
@@ -1278,6 +1289,8 @@ class UniDetailPageHeader extends StatelessWidget {
     required this.actions,
     this.multiSelectViewActions,
     this.onPicTap,
+    this.picTapLabel = '更换封面',
+    this.picTapIcon = Symbols.brush,
     this.picBusy = false,
     this.searchController,
     this.searchQuery = '',
@@ -1301,6 +1314,13 @@ class UniDetailPageHeader extends StatelessWidget {
   final List<Widget> actions;
   final List<Widget>? multiSelectViewActions;
   final VoidCallback? onPicTap;
+
+  /// 悬停提示文案。
+  final String picTapLabel;
+
+  /// 悬停提示图标。
+  final IconData picTapIcon;
+
   final bool picBusy;
   final TextEditingController? searchController;
   final String searchQuery;
@@ -1400,6 +1420,8 @@ class UniDetailPageHeader extends StatelessWidget {
       scheme: scheme,
       size: size,
       onTap: onPicTap,
+      tapLabel: picTapLabel,
+      tapIcon: picTapIcon,
       busy: picBusy,
       placeholder: Icon(
         Symbols.queue_music,
@@ -1582,6 +1604,8 @@ class _HoverableCover extends StatefulWidget {
   final ColorScheme scheme;
   final double size;
   final VoidCallback? onTap;
+  final String tapLabel;
+  final IconData tapIcon;
   final bool busy;
   final Widget placeholder;
   const _HoverableCover({
@@ -1592,6 +1616,8 @@ class _HoverableCover extends StatefulWidget {
     required this.scheme,
     required this.size,
     this.onTap,
+    required this.tapLabel,
+    required this.tapIcon,
     this.busy = false,
     required this.placeholder,
   });
@@ -1739,10 +1765,10 @@ class _HoverableCoverState extends State<_HoverableCover> {
                   color: scheme.onSurface,
                 ),
               )
-            : Icon(Symbols.brush, size: 28, color: scheme.onSurface),
+            : Icon(widget.tapIcon, size: 28, color: scheme.onSurface),
         const SizedBox(height: 4),
         Text(
-          widget.busy ? '选择中' : '更换封面',
+          widget.busy ? '选择中' : widget.tapLabel,
           style: TextStyle(
             color: scheme.onSurface,
             fontSize: AppType.body,

@@ -367,7 +367,15 @@ void main() {
       expect(outcome, UpdateInstallOutcome.installerStarted);
       expect(launchCalls, 1);
       expect(launchedExecutable, installerPath);
-      expect(launchedArguments, const ['/CLOSEAPPLICATIONS']);
+      expect(launchedArguments, [
+        '/VERYSILENT',
+        '/SUPPRESSMSGBOXES',
+        '/NORESTART',
+        '/SP-',
+        '/CLOSEAPPLICATIONS',
+        '/AUTOSTART',
+        '/LOG=${p.join(p.dirname(logPath), 'installer_setup.log')}',
+      ]);
       expect(launchedWorkingDirectory, p.dirname(installerPath));
       expect(phases, contains('正在启动安装程序'));
       expect(exitCalls, 1);

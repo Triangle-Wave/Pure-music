@@ -108,7 +108,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Root: HKCU; Subkey: "Software\Pure Music"; ValueType: string; ValueName: "InstallLocation"; ValueData: "{app}"; Flags: uninsdeletekey
 
 [Run]
+; 交互安装：完成页勾选后在退出时启动；静默安装跳过该条目。
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; 应用内更新：命令行带 /AUTOSTART 时，静默安装完成后直接启动新版。
+Filename: "{app}\{#AppExeName}"; Flags: nowait; Check: ShouldAutoStart
 
 [Code]
 var
@@ -116,6 +119,26 @@ var
   PortableDataPathPage: TInputDirWizardPage;
   PortableSourceData: String;
   SkipPortableImport: Boolean;
+
+// 命令行是否包含指定开关，参数比较不区分大小写。
+function CmdLineParamExists(Param: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), Param) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+// 应用内静默更新由 Dart 侧传入 /AUTOSTART，安装完成后直接启动新版。
+function ShouldAutoStart: Boolean;
+begin
+  Result := CmdLineParamExists('/AUTOSTART');
+end;
 
 function DirectoryHasEntries(const Path: String): Boolean;
 var

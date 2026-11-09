@@ -1722,7 +1722,16 @@ class _NowPlayingVolDspSliderState extends State<_NowPlayingVolDspSlider> {
     }
   }
 
+  /// 面板滚轮入口：面板任意位置滚动都调节当前行音量。
   Widget _volumeMenuBody(ColorScheme scheme, double menuWidth) {
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerSignal: (event) => _handleVolumeScroll(event, _menuController),
+      child: _volumeMenuPanel(scheme, menuWidth),
+    );
+  }
+
+  Widget _volumeMenuPanel(ColorScheme scheme, double menuWidth) {
     final colors = _panelColors(scheme);
     // 窄菜单下压缩百分比文本宽度，把水平空间让给滑块。
     final percentWidth = menuWidth < 160.0 ? 36.0 : 44.0;

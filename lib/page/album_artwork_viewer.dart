@@ -9,6 +9,60 @@ import 'package:pure_music/library/album_artwork.dart';
 /// 大图边长上限（物理像素）。
 const int _maxViewerImageSide = 2048;
 
+/// 打开多图查看器。
+///
+/// [loader] 按目标物理像素尺寸读取图片；返回值或解码失败时页面显示占位，
+/// 不会把异常抛到界面。空列表直接返回，不创建对话框。单张图片不显示切换
+/// 箭头；[showCounter] 为空时底部计数也按图片数量决定。
+Future<void> showImageGalleryViewer<T>(
+  BuildContext context, {
+  required List<T> items,
+  required int initialIndex,
+  required Object Function(T item) keyOf,
+  required String Function(T item) labelOf,
+  required Future<ImageProvider?> Function(
+    T item,
+    int width,
+    int height,
+  ) loader,
+  IconData placeholderIcon = Symbols.album,
+  bool? showCounter,
+}) {
+  if (items.isEmpty) return Future<void>.value();
+  final index = initialIndex.clamp(0, items.length - 1).toInt();
+  return showDialog<void>(
+    context: context,
+    barrierColor: Colors.black,
+    builder: (context) => _ImageViewerDialog<T>(
+      items: List<T>.unmodifiable(items),
+      initialIndex: index,
+      keyOf: keyOf,
+      labelOf: labelOf,
+      loader: loader,
+      placeholderIcon: placeholderIcon,
+      showCounter: showCounter ?? items.length > 1,
+    ),
+  );
+}
+
+/// 打开单张图片查看器。
+Future<void> showSingleImageViewer(
+  BuildContext context, {
+  required Future<ImageProvider?> Function(int width, int height) loader,
+  String? title,
+  IconData placeholderIcon = Symbols.album,
+}) {
+  return showImageGalleryViewer<int>(
+    context,
+    items: const <int>[0],
+    initialIndex: 0,
+    keyOf: (item) => item,
+    labelOf: (_) => title ?? '',
+    loader: (_, width, height) => loader(width, height),
+    placeholderIcon: placeholderIcon,
+  );
+}
+
 /// 打开专辑图片查看器。
 ///
 /// [loader] 按目标物理像素尺寸读取图片；返回值或解码失败时页面显示占位，
@@ -23,40 +77,41 @@ Future<void> showAlbumArtworkViewer(
     int height,
   ) loader,
 }) {
-  if (artworks.isEmpty) return Future<void>.value();
-  final index = initialIndex.clamp(0, artworks.length - 1).toInt();
-  return showDialog<void>(
-    context: context,
-    barrierColor: Colors.black,
-    builder: (context) => _AlbumArtworkViewerDialog(
-      artworks: List<AlbumArtwork>.unmodifiable(artworks),
-      initialIndex: index,
-      loader: loader,
-    ),
+  return showImageGalleryViewer<AlbumArtwork>(
+    context,
+    items: artworks,
+    initialIndex: initialIndex,
+    keyOf: (artwork) => artwork.key,
+    labelOf: (artwork) => artwork.label,
+    loader: loader,
+    showCounter: true,
   );
 }
 
-class _AlbumArtworkViewerDialog extends StatefulWidget {
-  const _AlbumArtworkViewerDialog({
-    required this.artworks,
+class _ImageViewerDialog<T> extends StatefulWidget {
+  const _ImageViewerDialog({
+    required this.items,
     required this.initialIndex,
+    required this.keyOf,
+    required this.labelOf,
     required this.loader,
+    required this.placeholderIcon,
+    required this.showCounter,
   });
 
-  final List<AlbumArtwork> artworks;
+  final List<T> items;
   final int initialIndex;
-  final Future<ImageProvider?> Function(
-    AlbumArtwork artwork,
-    int width,
-    int height,
-  ) loader;
+  final Object Function(T item) keyOf;
+  final String Function(T item) labelOf;
+  final Future<ImageProvider?> Function(T item, int width, int height) loader;
+  final IconData placeholderIcon;
+  final bool showCounter;
 
   @override
-  State<_AlbumArtworkViewerDialog> createState() =>
-      _AlbumArtworkViewerDialogState();
+  State<_ImageViewerDialog<T>> createState() => _ImageViewerDialogState<T>();
 }
 
-class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
+class _ImageViewerDialogState<T> extends State<_ImageViewerDialog<T>> {
   late final PageController _controller;
   late int _index;
 
@@ -74,7 +129,7 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
   }
 
   void _go(int delta) {
-    final total = widget.artworks.length;
+    final total = widget.items.length;
     if (total <= 1) return;
     final target = (_index + delta) % total;
     final page = target < 0 ? target + total : target;
@@ -109,7 +164,7 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
         .round()
         .clamp(1, _maxViewerImageSide)
         .toInt();
-    final current = widget.artworks[_index];
+    final current = widget.items[_index];
     return Dialog.fullscreen(
       backgroundColor: Colors.black,
       child: CallbackShortcuts(
@@ -126,25 +181,30 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
               children: [
                 PageView.builder(
                   controller: _controller,
-                  itemCount: widget.artworks.length,
+                  itemCount: widget.items.length,
                   onPageChanged: (index) {
                     if (!mounted) return;
                     setState(() => _index = index);
                   },
-                  itemBuilder: (context, index) => _ArtworkPage(
-                    key: ValueKey(widget.artworks[index].key),
-                    artwork: widget.artworks[index],
-                    width: width,
-                    height: height,
-                    loader: widget.loader,
-                  ),
+                  itemBuilder: (context, index) {
+                    final item = widget.items[index];
+                    return _ArtworkPage<T>(
+                      key: ValueKey<Object>(widget.keyOf(item)),
+                      item: item,
+                      label: widget.labelOf(item),
+                      width: width,
+                      height: height,
+                      loader: widget.loader,
+                      placeholderIcon: widget.placeholderIcon,
+                    );
+                  },
                 ),
-                if (widget.artworks.length > 1) ...[
+                if (widget.items.length > 1) ...[
                   _arrow(forward: false),
                   _arrow(forward: true),
                 ],
                 _topBar(current),
-                _bottomBar(),
+                if (widget.showCounter) _bottomBar(),
               ],
             ),
           ),
@@ -174,7 +234,7 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
     );
   }
 
-  Widget _topBar(AlbumArtwork artwork) {
+  Widget _topBar(T item) {
     return Positioned(
       top: 0,
       left: 0,
@@ -187,7 +247,7 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
             children: [
               Expanded(
                 child: Text(
-                  artwork.label,
+                  widget.labelOf(item),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -224,7 +284,7 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
         child: Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Text(
-            '第 ${_index + 1} / ${widget.artworks.length} 张',
+            '第 ${_index + 1} / ${widget.items.length} 张',
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white70, fontSize: 13),
           ),
@@ -234,32 +294,35 @@ class _AlbumArtworkViewerDialogState extends State<_AlbumArtworkViewerDialog> {
   }
 }
 
-class _ArtworkPage extends StatefulWidget {
+class _ArtworkPage<T> extends StatefulWidget {
   const _ArtworkPage({
     super.key,
-    required this.artwork,
+    required this.item,
+    required this.label,
     required this.width,
     required this.height,
     required this.loader,
+    required this.placeholderIcon,
   });
 
-  final AlbumArtwork artwork;
+  final T item;
+
+  /// 顶栏标题与占位文案。
+  final String label;
 
   /// 目标物理像素尺寸。
   final int width;
   final int height;
 
-  final Future<ImageProvider?> Function(
-    AlbumArtwork artwork,
-    int width,
-    int height,
-  ) loader;
+  final Future<ImageProvider?> Function(T item, int width, int height) loader;
+
+  final IconData placeholderIcon;
 
   @override
-  State<_ArtworkPage> createState() => _ArtworkPageState();
+  State<_ArtworkPage<T>> createState() => _ArtworkPageState<T>();
 }
 
-class _ArtworkPageState extends State<_ArtworkPage> {
+class _ArtworkPageState<T> extends State<_ArtworkPage<T>> {
   late Future<ImageProvider?> _image;
 
   @override
@@ -269,9 +332,9 @@ class _ArtworkPageState extends State<_ArtworkPage> {
   }
 
   @override
-  void didUpdateWidget(covariant _ArtworkPage oldWidget) {
+  void didUpdateWidget(covariant _ArtworkPage<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.artwork.key != widget.artwork.key ||
+    if (oldWidget.label != widget.label ||
         oldWidget.width != widget.width ||
         oldWidget.height != widget.height) {
       _image = _load();
@@ -281,13 +344,13 @@ class _ArtworkPageState extends State<_ArtworkPage> {
   Future<ImageProvider?> _load() {
     try {
       return widget
-          .loader(widget.artwork, widget.width, widget.height)
+          .loader(widget.item, widget.width, widget.height)
           .then<ImageProvider?>(
             (provider) => provider,
             onError: (Object error, StackTrace stackTrace) {
               log.app.debug(
                 'album_artwork_viewer_load_failed',
-                '专辑大图加载失败，显示占位',
+                '图片查看器加载失败，显示占位',
                 error: error,
                 stackTrace: stackTrace,
               );
@@ -297,7 +360,7 @@ class _ArtworkPageState extends State<_ArtworkPage> {
     } catch (error, stackTrace) {
       log.app.debug(
         'album_artwork_viewer_load_failed',
-        '专辑大图加载失败，显示占位',
+        '图片查看器加载失败，显示占位',
         error: error,
         stackTrace: stackTrace,
       );
@@ -346,10 +409,10 @@ class _ArtworkPageState extends State<_ArtworkPage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Symbols.album, size: 56, color: Colors.white54),
+          Icon(widget.placeholderIcon, size: 56, color: Colors.white54),
           const SizedBox(height: 10),
           Text(
-            widget.artwork.label,
+            widget.label,
             style: const TextStyle(color: Colors.white70, fontSize: 14),
           ),
         ],

@@ -142,6 +142,34 @@ class OnlineArtistImageService {
     }
   }
 
+  /// 当前选中的在线头像地址，供高清大图直接复用同一条缓存链路。
+  ///
+  /// [explicitOnly] 为真时只返回用户显式选择的候选，与 [preferredImageFor]
+  /// 的判定一致。读取失败返回 null。
+  Future<String?> activeImageUrlFor(
+    String artistName, {
+    bool explicitOnly = false,
+  }) async {
+    if (!AppSettings.instance.onlineArtistImageEnabled) return null;
+    final name = artistName.trim();
+    if (name.isEmpty) return null;
+    try {
+      final cache = await _loadCacheEntry(name, cacheKeyForArtist(name));
+      if (cache == null) return null;
+      if (explicitOnly && !cache.hasExplicitSelection) return null;
+      final url = cache.activeImageUrl;
+      if (url == null || url.isEmpty) return null;
+      return url;
+    } catch (error) {
+      log.library.warn(
+        'online_artist_image_url_failed',
+        '读取艺术家头像地址失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
   /// 选中候选的图片下载走与专辑封面相同的磁盘缓存链路。
   Future<ImageProvider?> artwork(String url) => _artworkLoader(url);
 

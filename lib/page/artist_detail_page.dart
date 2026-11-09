@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:pure_music/component/online_candidate_dialog.dart';
 import 'package:pure_music/core/artist_alias_groups.dart';
+import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/preference.dart';
@@ -14,6 +15,7 @@ import 'package:pure_music/library/audio_sort.dart';
 import 'package:pure_music/component/album_tile.dart';
 import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
+import 'package:pure_music/page/album_artwork_viewer.dart';
 import 'package:pure_music/page/uni_detail_page.dart';
 import 'package:pure_music/page/artist_link_dialog.dart';
 import 'package:pure_music/page/uni_page.dart';
@@ -83,10 +85,16 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
   int _onlineRequestId = 0;
   late Future<ImageProvider?> _primaryPic;
 
+  /// 主头像是否已解析出可展示的图片；解析为空时不提供放大入口。
+  bool _hasPicture = true;
+
+  /// 查看器解码目标的物理像素上限。
+  static const int _maxAvatarViewerSide = 2048;
+
   @override
   void initState() {
     super.initState();
-    _primaryPic = _artistPicture(widget.artist);
+    _setPrimaryPicture();
     if (AppSettings.instance.onlineArtistImageEnabled) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_loadOnlineCandidates());
@@ -103,13 +111,131 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       _candidateCache = null;
       _dialogCache = null;
       _onlineStatus = null;
-      _primaryPic = _artistPicture(widget.artist);
+      _setPrimaryPicture();
       if (AppSettings.instance.onlineArtistImageEnabled) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) unawaited(_loadOnlineCandidates());
         });
       }
     }
+  }
+
+  /// 重新解析主头像，并同步是否提供放大入口。
+  void _setPrimaryPicture() {
+    final future = _artistPicture(widget.artist);
+    _primaryPic = future;
+    _hasPicture = true;
+    unawaited(
+      future.then(
+        (provider) {
+          if (!mounted || !identical(_primaryPic, future)) return;
+          final hasPicture = provider != null;
+          if (_hasPicture == hasPicture) return;
+          setState(() => _hasPicture = hasPicture);
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!mounted || !identical(_primaryPic, future)) return;
+          log.library.warn(
+            'artist_detail_primary_picture_failed',
+            '艺术家主头像解析失败',
+            fields: {'error': error.runtimeType.toString()},
+          );
+          if (!_hasPicture) return;
+          setState(() => _hasPicture = false);
+        },
+      ),
+    );
+  }
+
+  /// 按查看器请求的物理像素读取头像高清图。
+  ///
+  /// 顺序与头图一致：用户显式选择的在线头像、本地封面、自动选择的在线
+  /// 头像；都取不到时回退当前头图。任何分支失败都记录日志并继续降级。
+  Future<ImageProvider?> _loadAvatarAtSize(
+    int width,
+    int height,
+    double pixelRatio,
+  ) async {
+    final artist = widget.artist;
+    final ratio = pixelRatio.isFinite && pixelRatio > 0 ? pixelRatio : 1.0;
+    final maxLogical = (_maxAvatarViewerSide / ratio)
+        .ceil()
+        .clamp(1, _maxAvatarViewerSide)
+        .toInt();
+    final logicalWidth = (width / ratio).round().clamp(1, maxLogical).toInt();
+    final logicalHeight = (height / ratio).round().clamp(1, maxLogical).toInt();
+    try {
+      final url = await _online.activeImageUrlFor(
+        artist.name,
+        explicitOnly: true,
+      );
+      if (url != null) {
+        final provider = await _online.artwork(url);
+        if (provider != null) return provider;
+      }
+    } catch (error) {
+      log.library.warn(
+        'artist_avatar_viewer_online_failed',
+        '艺术家头像大图在线加载失败',
+        fields: {
+          'source': 'explicit',
+          'error': error.runtimeType.toString(),
+        },
+      );
+    }
+    final path = artist.primaryPath;
+    if (path != null && artist.works.isNotEmpty) {
+      try {
+        final provider = await CoverImageCache.instance.get(
+          path: path,
+          modified: artist.works.first.modified,
+          width: logicalWidth,
+          height: logicalHeight,
+        );
+        if (provider != null) return provider;
+      } catch (error) {
+        log.library.warn(
+          'artist_avatar_viewer_local_failed',
+          '艺术家头像大图本地加载失败',
+          fields: {'error': error.runtimeType.toString()},
+        );
+      }
+    }
+    try {
+      final url = await _online.activeImageUrlFor(artist.name);
+      if (url != null) {
+        final provider = await _online.artwork(url);
+        if (provider != null) return provider;
+      }
+    } catch (error) {
+      log.library.warn(
+        'artist_avatar_viewer_online_failed',
+        '艺术家头像大图在线加载失败',
+        fields: {'source': 'auto', 'error': error.runtimeType.toString()},
+      );
+    }
+    try {
+      return await _artistPicture(artist);
+    } catch (error) {
+      log.library.warn(
+        'artist_avatar_viewer_fallback_failed',
+        '艺术家头像大图回退加载失败',
+        fields: {'error': error.runtimeType.toString()},
+      );
+      return null;
+    }
+  }
+
+  void _openAvatarViewer() {
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    unawaited(
+      showSingleImageViewer(
+        context,
+        title: widget.artist.name,
+        placeholderIcon: Symbols.person,
+        loader: (width, height) => _loadAvatarAtSize(width, height, pixelRatio),
+      ),
+    );
   }
 
   Future<void> _loadOnlineCandidates({bool force = false}) async {
@@ -138,7 +264,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       _onlineLoading = false;
       _candidateCache = cache;
       _onlineStatus = _online.queryStatusFor(widget.artist.name);
-      if (force) _primaryPic = _artistPicture(widget.artist);
+      if (force) _setPrimaryPicture();
     });
   }
 
@@ -237,7 +363,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       setState(() {
         _candidateCache = cache;
         _onlineStatus = _online.queryStatusFor(widget.artist.name);
-        if (activeChanged) _primaryPic = _artistPicture(widget.artist);
+        if (activeChanged) _setPrimaryPicture();
       });
       return _candidateOptions(cache);
     } catch (error) {
@@ -281,7 +407,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     setState(() {
       _onlineLoading = false;
       _candidateCache = cache;
-      _primaryPic = _artistPicture(widget.artist);
+      _setPrimaryPicture();
     });
   }
 
@@ -362,6 +488,9 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       primaryContent: artist,
       primaryPic: _primaryPic,
       picShape: PicShape.oval,
+      onPrimaryPicTap: _hasPicture ? _openAvatarViewer : null,
+      picTapLabel: '查看头像',
+      picTapIcon: Symbols.fullscreen,
       title: artist.name,
       subtitle: '${artist.works.length} 首作品',
       subtitleExtra: _artistLinkSubtitle(context, artist),
