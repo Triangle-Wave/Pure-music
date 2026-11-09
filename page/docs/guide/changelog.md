@@ -5,9 +5,26 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.30**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.31**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.31</strong></summary>
+
+**播放页音量**
+
+- 音量面板展开后，滚轮在面板任意位置都能调节当前行音量。
+
+**歌手头像**
+
+- 歌手详情页头像支持全屏放大，滚轮缩放、拖动平移，Esc 关闭。
+
+**应用内更新**
+
+- 更新包在原安装目录静默完成安装，安装结束后自动启动新版本。
+
+</details>
 
 <details>
 <summary><strong>2.3.30</strong></summary>
