@@ -62,6 +62,10 @@ class WindowRenderGate with WidgetsBindingObserver {
     windowMinimized: _windowMinimized,
   );
 
+  bool get isWindowMinimized => _windowMinimized;
+
+  bool get isTrayHidden => _trayHidden;
+
   void attach() {
     if (_attached) return;
     _attached = true;

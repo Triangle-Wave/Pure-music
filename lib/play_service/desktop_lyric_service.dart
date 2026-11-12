@@ -19,9 +19,11 @@ import 'package:pure_music/play_service/lyric_service.dart'
 import 'package:pure_music/native/bass/bass_player.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/desktop_lyric_colors.dart';
+import 'package:pure_music/core/desktop_lyric_visibility.dart';
 import 'package:pure_music/core/theme.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
 import 'package:desktop_lyric/message.dart' as msg;
@@ -192,6 +194,13 @@ class _WinJobObject {
 }
 
 class DesktopLyricService extends ChangeNotifier {
+  static const MethodChannel _windowChannel = MethodChannel(
+    'pure_music/desktop_lyric_window',
+  );
+
+  /// 最近一次窗口显隐通道是否成功；窗口未创建或通道不可用时为 false。
+  bool lastSetVisibleSucceeded = false;
+
   final PlayService playService;
   DesktopLyricService(this.playService) {
     _positionSyncListener = _sendLyricProgressSnapshot;
@@ -243,6 +252,32 @@ class DesktopLyricService extends ChangeNotifier {
   /// 是否正在关闭中（用于 UI 层禁用按钮）
   bool get isKilling => _isKilling;
 
+  /// 通过原生通道把桌面歌词窗口移回原位或移出屏幕。
+  /// 执行结果记录在 [lastSetVisibleSucceeded]，窗口尚未创建或通道不可用时为 false。
+  Future<void> setWindowVisible(bool visible) async {
+    try {
+      final result = await _windowChannel.invokeMethod<bool>(
+        'setVisible',
+        <String, dynamic>{'visible': visible},
+      );
+      final succeeded = result == true;
+      lastSetVisibleSucceeded = succeeded;
+      if (!succeeded) {
+        log.desktopLyric.warn(
+          'legacy',
+          '[desktop lyric] setWindowVisible($visible) returned $result',
+        );
+      }
+    } catch (error, trace) {
+      lastSetVisibleSucceeded = false;
+      log.desktopLyric.warn(
+        'legacy',
+        '[desktop lyric] setWindowVisible($visible) failed: $error',
+        stackTrace: trace,
+      );
+    }
+  }
+
   void _monitorProcessExit(Process process, int generation) {
     process.exitCode
         .then((code) {
@@ -283,6 +318,7 @@ class DesktopLyricService extends ChangeNotifier {
     _isRunning = false;
     _isKilling = false;
     isLocked = false;
+    lastSetVisibleSucceeded = false;
     _progressSyncTimer?.cancel();
     _progressSyncTimer = null;
     _currentLyricLineStartMs = null;
@@ -295,6 +331,7 @@ class DesktopLyricService extends ChangeNotifier {
     _nextSyntheticLineId = -1;
     _WinJobObject.close(_jobHandle);
     _jobHandle = null;
+    DesktopLyricVisibility.instance.onLyricStopped();
     notifyListeners();
   }
 
@@ -387,6 +424,7 @@ class DesktopLyricService extends ChangeNotifier {
       _jobHandle = _WinJobObject.createAndAssign(process.pid);
     }
 
+    DesktopLyricVisibility.instance.onLyricStarted();
     notifyListeners();
   }
 
@@ -1104,6 +1142,8 @@ class DesktopLyricService extends ChangeNotifier {
 
     _isRunning = false;
     _isKilling = false;
+    lastSetVisibleSucceeded = false;
+    DesktopLyricVisibility.instance.onLyricStopped();
     super.dispose();
   }
 }

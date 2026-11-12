@@ -243,6 +243,7 @@ class AppSettings {
   bool desktopShowTranslation = true;
   int desktopLyricTranslationPosition = 1;
   bool desktopShowNowPlayingInfo = true;
+  bool desktopFollowWindow = true;
   bool desktopHideOnPause = false;
   bool desktopHoverHide = false;
   bool desktopHoverUnlock = true;
@@ -937,6 +938,14 @@ class AppSettings {
   static void _readDesktopLyricBehaviorSettings(
     Map<String, dynamic> settingsMap,
   ) {
+    final dfw = settingsMap['DesktopFollowWindow'];
+    if (dfw != null) {
+      _instance.desktopFollowWindow = normalizedBoolSetting(
+        dfw,
+        defaultValue: true,
+      );
+    }
+
     final dhop = settingsMap['DesktopHideOnPause'];
     if (dhop != null) {
       _instance.desktopHideOnPause = normalizedBoolSetting(
@@ -1256,6 +1265,7 @@ class AppSettings {
     'DesktopShowTranslation': desktopShowTranslation,
     'DesktopLyricTranslationPosition': desktopLyricTranslationPosition,
     'DesktopShowNowPlayingInfo': desktopShowNowPlayingInfo,
+    'DesktopFollowWindow': desktopFollowWindow,
     'DesktopHideOnPause': desktopHideOnPause,
     'DesktopHoverHide': desktopHoverHide,
     'DesktopHoverUnlock': desktopHoverUnlock,

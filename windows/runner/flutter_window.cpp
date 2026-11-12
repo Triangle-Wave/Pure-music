@@ -3,12 +3,18 @@
 #include <optional>
 
 #include <atomic>
+#include <memory>
+
+#include "flutter/generated_plugin_registrant.h"
+#include "desktop_lyric_window.h"
+#include "taskbar_thumbnail.h"
 
 // 文件作用域标志：窗口是否正在销毁。使用文件作用域以避免修改缺失的头文件。
 static std::atomic<bool> g_destroying{false};
 
-#include "flutter/generated_plugin_registrant.h"
-#include "taskbar_thumbnail.h"
+// 桌面歌词窗口通道实例跟随窗口生命周期，由 OnCreate 构造、OnDestroy 释放。
+// 文件作用域实例对应单一 FlutterWindow。
+static std::unique_ptr<DesktopLyricWindow> g_desktop_lyric_window;
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -37,6 +43,8 @@ bool FlutterWindow::OnCreate() {
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
   taskbar_thumbnail_ = std::make_unique<TaskbarThumbnail>(
       flutter_controller_->engine()->messenger(), GetHandle());
+  g_desktop_lyric_window = std::make_unique<DesktopLyricWindow>(
+      flutter_controller_->engine()->messenger());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -55,6 +63,7 @@ void FlutterWindow::OnDestroy() {
   g_destroying.store(true);
 
   taskbar_thumbnail_.reset();
+  g_desktop_lyric_window.reset();
   if (flutter_controller_) {
     // 在销毁前延迟以确保任何待处理的回调完成
     flutter_controller_ = nullptr;

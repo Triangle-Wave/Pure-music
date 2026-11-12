@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:pure_music/core/app_fonts.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/desktop_lyric_colors.dart';
+import 'package:pure_music/core/desktop_lyric_visibility.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/settings.dart';
@@ -4878,6 +4879,20 @@ class _DesktopWindowGroupState extends State<_DesktopWindowGroup>
     with _DesktopLyricConfigMixin {
   final settings = AppSettings.instance;
 
+  void _setFollowWindow(bool value) {
+    if (value == settings.desktopFollowWindow) return;
+    updateDesktopLyricConfig(() => settings.desktopFollowWindow = value);
+    try {
+      DesktopLyricVisibility.instance.refresh();
+    } catch (error, trace) {
+      log.settings.warn(
+        'legacy',
+        'Refreshing desktop lyric visibility failed: $error',
+        stackTrace: trace,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -4885,6 +4900,15 @@ class _DesktopWindowGroupState extends State<_DesktopWindowGroup>
       children: [
         const SettingsSectionHeader('窗口行为'),
         const SizedBox(height: 4.0),
+        SettingsTile(
+          description: '跟随播放器窗口显示',
+          subtitle: '主窗口在前台时隐藏歌词，最小化、隐藏到托盘或被其他窗口覆盖时显示',
+          action: Switch(
+            value: settings.desktopFollowWindow,
+            onChanged: _setFollowWindow,
+          ),
+        ),
+        const SizedBox(height: 16),
         SettingsTile(
           description: '暂停时隐藏',
           action: Switch(

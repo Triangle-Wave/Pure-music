@@ -7,6 +7,7 @@ import 'dart:ui';
 
 import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/desktop_lyric_visibility.dart';
 import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/component/hotkey_ui_feedback.dart';
@@ -1147,10 +1148,37 @@ class _DesktopLyricSwitchState extends State<_DesktopLyricSwitch> {
     setState(() => _isStarting = true);
     try {
       await PlayService.instance.desktopLyricService.startDesktopLyric();
+      if (AppSettings.instance.desktopFollowWindow &&
+          PlayService.instance.desktopLyricService.isRunning) {
+        try {
+          await DesktopLyricVisibility.instance.waitForMainHwnd();
+        } catch (error, trace) {
+          log.app.warn(
+            'legacy',
+            'Resolving main window handle failed: $error',
+            stackTrace: trace,
+          );
+        }
+        if (mounted && !DesktopLyricVisibility.instance.shouldShowLyric) {
+          _showFollowWindowHint();
+        }
+      }
     } finally {
       if (mounted) {
         setState(() => _isStarting = false);
       }
+    }
+  }
+
+  void _showFollowWindowHint() {
+    try {
+      showTextOnSnackBar('桌面歌词将在播放器失去焦点时显示');
+    } catch (error, trace) {
+      log.app.warn(
+        'legacy',
+        'Showing desktop lyric follow hint failed: $error',
+        stackTrace: trace,
+      );
     }
   }
 

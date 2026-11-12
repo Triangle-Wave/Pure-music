@@ -7,6 +7,7 @@ import 'package:pure_music/core/memory_monitor.dart';
 import 'package:pure_music/core/paths.dart' as app_paths;
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/core/desktop_lyric_visibility.dart';
 import 'package:pure_music/core/sleep_blocker.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/window_render_gate.dart';
@@ -383,6 +384,7 @@ class WindowLifecycleService with WindowListener, TrayListener {
     PlayService.existingPlaybackService?.startSmtcKeepAlive();
     MemoryMonitorService.instance.trimTrayHidden();
     _scheduleTrayTrim();
+    _refreshDesktopLyricVisibility();
     return true;
   }
 
@@ -402,12 +404,27 @@ class WindowLifecycleService with WindowListener, TrayListener {
     }
     await windowManager.focus();
     PlayService.existingPlaybackService?.stopSmtcKeepAlive();
+    _refreshDesktopLyricVisibility();
+  }
+
+  void _refreshDesktopLyricVisibility() {
+    if (_isExiting) return;
+    try {
+      DesktopLyricVisibility.instance.refresh();
+    } catch (error, trace) {
+      log.window.warn(
+        'legacy',
+        'Refreshing desktop lyric visibility failed: $error',
+        stackTrace: trace,
+      );
+    }
   }
 
   /// [skipSave] 用于备份导入后重启：内存中仍是旧状态，写回会覆盖刚导入的文件。
   Future<void> exitApp({bool skipSave = false}) async {
     if (_isExiting) return;
     _isExiting = true;
+    DesktopLyricVisibility.instance.dispose();
 
     if (!skipSave) {
       await _run('saveSettings', AppSettings.instance.saveSettings());
@@ -479,14 +496,28 @@ class WindowLifecycleService with WindowListener, TrayListener {
 
   @override
   void onWindowFocus() {
-    if (!WindowRenderGate.instance.shouldRender) return;
-    WindowRenderGate.instance.enterForeground();
+    if (WindowRenderGate.instance.shouldRender) {
+      WindowRenderGate.instance.enterForeground();
+    }
+    _refreshDesktopLyricVisibility();
+  }
+
+  @override
+  void onWindowBlur() {
+    _refreshDesktopLyricVisibility();
+  }
+
+  @override
+  void onWindowMinimize() {
+    _refreshDesktopLyricVisibility();
   }
 
   @override
   void onWindowRestore() {
-    if (!WindowRenderGate.instance.shouldRender) return;
-    WindowRenderGate.instance.enterForeground();
+    if (WindowRenderGate.instance.shouldRender) {
+      WindowRenderGate.instance.enterForeground();
+    }
+    _refreshDesktopLyricVisibility();
   }
 
   @override
