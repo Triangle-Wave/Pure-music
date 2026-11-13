@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:path/path.dart' as path;
 import 'package:sqlite3/sqlite3.dart';
@@ -62,11 +64,16 @@ class AppDb {
       final dbFile = File(path.join(dir.path, 'app.sqlite'));
       dbFile.parent.createSync(recursive: true);
 
-      opened = sqlite3.open(dbFile.path);
-      _initSchema(opened);
+      opened = openRecovering(dbFile);
       _db = opened;
       return opened;
-    } catch (_) {
+    } catch (error, stackTrace) {
+      log.app.warn(
+        'db_open_failed',
+        '打开数据库失败，释放句柄后向上传播',
+        error: error,
+        stackTrace: stackTrace,
+      );
       opened?.dispose();
       rethrow;
     } finally {
@@ -74,7 +81,107 @@ class AppDb {
     }
   }
 
-  void _initSchema(Database db) {
+  /// 打开数据库；文件损坏时隔离旧文件后重建。
+  @visibleForTesting
+  static Database openRecovering(File dbFile) {
+    if (dbFile.path.isEmpty) {
+      throw ArgumentError.value(dbFile.path, 'dbFile.path', '数据库路径不能为空');
+    }
+    try {
+      final db = sqlite3.open(dbFile.path);
+      try {
+        _initSchema(db);
+      } catch (error, stackTrace) {
+        log.app.warn(
+          'db_init_failed',
+          '初始化数据库失败，释放句柄后向上传播',
+          fields: {'path': dbFile.path},
+          error: error,
+          stackTrace: stackTrace,
+        );
+        db.dispose();
+        rethrow;
+      }
+      return db;
+    } on SqliteException catch (error) {
+      if (!_isCorruption(error)) rethrow;
+      final quarantined = _quarantine(dbFile);
+      if (quarantined == null) rethrow;
+      log.app.warn(
+        'db_corrupt',
+        '数据文件已隔离至 $quarantined，准备重建',
+        fields: {'code': error.resultCode, 'path': quarantined},
+      );
+      final db = sqlite3.open(dbFile.path);
+      try {
+        _initSchema(db);
+      } catch (error, stackTrace) {
+        log.app.warn(
+          'db_init_failed',
+          '重建数据库后初始化失败，释放句柄后向上传播',
+          fields: {'path': dbFile.path},
+          error: error,
+          stackTrace: stackTrace,
+        );
+        db.dispose();
+        rethrow;
+      }
+      return db;
+    }
+  }
+
+  /// 损坏类结果码：SQLITE_CORRUPT=11、SQLITE_NOTADB=26，扩展码取低 8 位。
+  @visibleForTesting
+  static bool isCorruptionCode(int resultCode) => _isCorruptionCode(resultCode);
+
+  static bool _isCorruption(SqliteException error) =>
+      _isCorruptionCode(error.resultCode);
+
+  static bool _isCorruptionCode(int resultCode) {
+    final code = resultCode & 0xff;
+    return code == 11 || code == 26;
+  }
+
+  /// 把损坏的数据库连同 WAL/SHM 一起改名保留，返回主文件的新路径。
+  @visibleForTesting
+  static String? quarantineDatabase(File dbFile) => _quarantine(dbFile);
+
+  static String? _quarantine(File dbFile) {
+    final stamp = DateTime.now()
+        .toIso8601String()
+        .replaceAll(const RegExp(r'[:.]'), '-');
+    String? mainPath;
+    for (final suffix in const ['', '-wal', '-shm']) {
+      final file = File('${dbFile.path}$suffix');
+      if (!file.existsSync()) continue;
+      final target = '${dbFile.path}.corrupt-$stamp$suffix';
+      try {
+        file.renameSync(target);
+        if (suffix.isEmpty) mainPath = target;
+      } catch (error, stackTrace) {
+        if (suffix.isEmpty) {
+          log.app.warn(
+            'db_corrupt',
+            '隔离主文件失败，保留原文件并停止重建',
+            fields: {'path': dbFile.path},
+            error: error,
+            stackTrace: stackTrace,
+          );
+          return null;
+        }
+        log.app.warn(
+          'db_corrupt',
+          '隔离附属文件失败，继续重建',
+          fields: {'path': file.path},
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return mainPath;
+  }
+
+  static void _initSchema(Database db) {
     final optionalColumns = trackOverrideOptionalColumns.entries
         .map((entry) => '${entry.key} ${entry.value}')
         .join(',\n  ');
@@ -131,7 +238,7 @@ CREATE TABLE IF NOT EXISTS track_overrides (
     _migrate(db);
   }
 
-  void _migrate(Database db) {
+  static void _migrate(Database db) {
     db.execute('BEGIN');
     try {
       final version =
