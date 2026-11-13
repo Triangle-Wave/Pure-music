@@ -5,9 +5,19 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.31**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.32**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.32</strong></summary>
+
+**桌面歌词**
+
+- 桌面歌词跟随播放器窗口自动显隐：主窗口在前台时隐藏歌词，最小化、隐藏到托盘或被其他窗口覆盖时显示。
+- 设置页「桌面歌词 → 窗口行为」提供「跟随播放器窗口显示」开关，默认开启；手动关闭桌面歌词后窗口变化不再自动出现。
+
+</details>
 
 <details>
 <summary><strong>2.3.31</strong></summary>
