@@ -149,7 +149,7 @@ class AppDb {
   static String? _quarantine(File dbFile) {
     final stamp = DateTime.now()
         .toIso8601String()
-        .replaceAll(const RegExp(r'[:.]'), '-');
+        .replaceAll(RegExp(r'[:.]'), '-');
     String? mainPath;
     for (final suffix in const ['', '-wal', '-shm']) {
       final file = File('${dbFile.path}$suffix');
