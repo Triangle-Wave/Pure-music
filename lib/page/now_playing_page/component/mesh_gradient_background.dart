@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_shaders/flutter_shaders.dart';
+import 'package:pure_music/page/now_playing_page/component/audio_reactive_flow.dart';
 import 'package:pure_music/page/now_playing_page/component/now_playing_background_inputs.dart';
 
 const _kDarkMeshScrim = Color(0x38171717);
@@ -18,6 +20,18 @@ const _kMeshClockPeriodMilliseconds = 1 << 26;
 double _meshClockSeconds() {
   final milliseconds = DateTime.now().millisecondsSinceEpoch;
   return (milliseconds % _kMeshClockPeriodMilliseconds) / 1000.0;
+}
+
+double _followAudio(
+  double current,
+  double target,
+  double deltaSeconds,
+  double attack,
+  double release,
+) {
+  if (!deltaSeconds.isFinite || deltaSeconds <= 0) return current;
+  final tau = target > current ? attack : release;
+  return current + (target - current) * (1 - exp(-deltaSeconds / tau));
 }
 
 typedef _OklabColor = ({double l, double a, double b});
@@ -240,8 +254,9 @@ Color resolvePlayerSafeForeground({
     final darkerRatio = _contrastRatio(darker, backdrop);
     final lighterRatio = _contrastRatio(lighter, backdrop);
     final candidate = darkerRatio >= lighterRatio ? darker : lighter;
-    final candidateRatio =
-        darkerRatio >= lighterRatio ? darkerRatio : lighterRatio;
+    final candidateRatio = darkerRatio >= lighterRatio
+        ? darkerRatio
+        : lighterRatio;
     if (candidateRatio > bestRatio) {
       best = candidate;
       bestRatio = candidateRatio;
@@ -273,8 +288,47 @@ class MeshGradientBackground extends StatelessWidget {
 
   static const shaderAssetPath = 'assets/shaders/soft_mesh_gradient.frag';
 
-  static Future<void> precache() =>
-      ShaderBuilder.precacheShader(shaderAssetPath);
+  static Future<void> precache() async {
+    await ShaderBuilder.precacheShader(shaderAssetPath);
+    await _warmUpShaderPipeline();
+  }
+
+  /// 着色器管线要等第一次真正绘制才编译，1920 宽窗口下那一帧 raster 会到 200ms 以上。
+  /// 启动时先画一次 16x16 的离屏场景：Picture.toImage 走 CPU 光栅，编译不到 GPU 管线，
+  /// 必须经 Scene.toImage 才会落到真实光栅线程。
+  static Future<void> _warmUpShaderPipeline() async {
+    try {
+      final program = await ui.FragmentProgram.fromAsset(shaderAssetPath);
+      for (final scrim in const [_kDarkMeshScrim, _kLightMeshScrim]) {
+        final shader = program.fragmentShader();
+        shader
+          ..setFloat(0, 1.0)
+          ..setFloat(1, 1.0)
+          ..setFloat(2, 0.0)
+          ..setFloat(3, 0.0);
+        for (var i = 0; i < _kShaderColorCount * 3; i++) {
+          shader.setFloat(4 + i, 0.5);
+        }
+        final recorder = ui.PictureRecorder();
+        ui.Canvas(recorder).drawRect(
+          const ui.Rect.fromLTWH(0.0, 0.0, 16.0, 16.0),
+          ui.Paint()
+            ..shader = shader
+            ..colorFilter = ui.ColorFilter.mode(scrim, ui.BlendMode.srcOver),
+        );
+        final picture = recorder.endRecording();
+        final builder = ui.SceneBuilder()..addPicture(ui.Offset.zero, picture);
+        final scene = builder.build();
+        final image = await scene.toImage(16, 16);
+        image.dispose();
+        scene.dispose();
+        picture.dispose();
+        shader.dispose();
+      }
+    } catch (_) {
+      // 预热失败不影响正常绘制，首次进入时再编译
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -334,6 +388,19 @@ class _MeshGradientBackgroundInternalState
 
   static const Duration _minRotationInterval = Duration(seconds: 60);
   static const Duration _maxRotationInterval = Duration(seconds: 90);
+
+  final AudioReactiveFlowEngine _audioEngine = AudioReactiveFlowEngine(
+    pulseAttackSeconds: .15,
+    pulseReleaseTauSeconds: .50,
+  );
+  StreamSubscription<Float32List>? _spectrumSubscription;
+  Stream<Float32List>? _subscribedStream;
+  final Stopwatch _spectrumClock = Stopwatch();
+  Duration? _lastSpectrumElapsed;
+  DateTime? _spectrumPausedAt;
+  bool _awaitingPlaybackSpectrum = false;
+  final ValueNotifier<double> _audioBeat = ValueNotifier(0);
+  final ValueNotifier<double> _audioTimeScale = ValueNotifier(1);
 
   @override
   void initState() {
@@ -401,9 +468,19 @@ class _MeshGradientBackgroundInternalState
       _bindPlayerStateListenable();
     }
 
+    if (oldWidget.inputs.trackId != widget.inputs.trackId) {
+      _audioEngine.resetForTrackChange();
+      _lastSpectrumElapsed = null;
+    }
+
     if (oldWidget.inputs.enableAnimation != widget.inputs.enableAnimation ||
         oldWidget.inputs.isVisible != widget.inputs.isVisible ||
         oldWidget.inputs.isPlaybackActive != widget.inputs.isPlaybackActive ||
+        oldWidget.inputs.audioReactiveFlow != widget.inputs.audioReactiveFlow ||
+        !identical(
+          widget.inputs.spectrumStream,
+          oldWidget.inputs.spectrumStream,
+        ) ||
         !identical(
           widget.inputs.albumCoverBytes,
           oldWidget.inputs.albumCoverBytes,
@@ -603,6 +680,89 @@ class _MeshGradientBackgroundInternalState
     _syncMeshController();
   }
 
+  void _syncAudioSubscription() {
+    final stream = widget.inputs.spectrumStream;
+    final shouldListen =
+        stream != null &&
+        widget.inputs.audioReactiveFlow &&
+        widget.inputs.enableAnimation &&
+        widget.inputs.isVisible &&
+        widget.inputs.isPlaybackActive;
+    if (shouldListen) {
+      if (identical(_subscribedStream, stream) &&
+          _spectrumSubscription != null) {
+        return;
+      }
+      // 流对象换了（例如播放服务重建）要重新订阅，并从旧基线重置。
+      _spectrumSubscription?.cancel();
+      _spectrumSubscription = null;
+      final pausedAt = _spectrumPausedAt;
+      if (_subscribedStream != null ||
+          pausedAt == null ||
+          DateTime.now().difference(pausedAt) > const Duration(seconds: 10)) {
+        _audioEngine.reset();
+      } else {
+        _audioEngine.resumeFromPause();
+      }
+      _subscribedStream = stream;
+      _awaitingPlaybackSpectrum = true;
+      _lastSpectrumElapsed = null;
+      _spectrumClock
+        ..reset()
+        ..start();
+      _spectrumSubscription = stream.listen(_handleSpectrum);
+      return;
+    }
+    if (_spectrumSubscription != null) {
+      _spectrumPausedAt = DateTime.now();
+    }
+    _subscribedStream = null;
+    _spectrumSubscription?.cancel();
+    _spectrumSubscription = null;
+    // 暂停/离开时保留当前值，恢复后从这里接续；只有关掉音频响应才回中性。
+    if (!widget.inputs.audioReactiveFlow) {
+      _audioBeat.value = 0;
+      _audioTimeScale.value = 1;
+    }
+  }
+
+  void _handleSpectrum(Float32List bands) {
+    if (_disposed || !mounted || !widget.inputs.audioReactiveFlow) return;
+    final response = AudioReactiveFlowResponse.fromBands(bands);
+    if (_awaitingPlaybackSpectrum) {
+      if (response.isNearlySilent) return;
+      _awaitingPlaybackSpectrum = false;
+    }
+    final elapsed = _spectrumClock.elapsed;
+    final previous = _lastSpectrumElapsed;
+    _lastSpectrumElapsed = elapsed;
+    final dtSeconds = previous == null
+        ? null
+        : (elapsed - previous).inMicroseconds / Duration.microsecondsPerSecond;
+    _audioEngine.update(response, dtSeconds: dtSeconds);
+    final raw =
+        _audioEngine.levelLow * .65 +
+        _audioEngine.levelMid * .30 +
+        _audioEngine.levelHigh * .05;
+    final energy = audioReactiveFlowLevel(raw);
+    // 频谱只有 23Hz，绘制值再过一层平滑，暂停/切歌恢复时不会一步跳到位。
+    final followSeconds = dtSeconds ?? 1 / 23;
+    _audioBeat.value = _followAudio(
+      _audioBeat.value,
+      _audioEngine.beatPulse,
+      followSeconds,
+      .06,
+      .20,
+    );
+    _audioTimeScale.value = _followAudio(
+      _audioTimeScale.value,
+      1 + energy * .55,
+      followSeconds,
+      .20,
+      .40,
+    );
+  }
+
   void _syncMeshController() {
     final shouldRun =
         widget.inputs.isVisible &&
@@ -612,6 +772,7 @@ class _MeshGradientBackgroundInternalState
     } else {
       _meshController.stop();
     }
+    _syncAudioSubscription();
     _syncRotationTimer();
   }
 
@@ -681,12 +842,17 @@ class _MeshGradientBackgroundInternalState
       _onPlayerStateListenable,
     );
     _stopRotationTimer();
+    _spectrumSubscription?.cancel();
+    _spectrumSubscription = null;
+    _subscribedStream = null;
     _meshController.dispose();
     _transitionTicker?.dispose();
     _paletteColors = const [];
     _prevPaletteColors = const [];
     _targetPaletteColors = const [];
     _transitionValueNotifier.dispose();
+    _audioBeat.dispose();
+    _audioTimeScale.dispose();
     super.dispose();
   }
 
@@ -734,23 +900,22 @@ class _MeshGradientBackgroundInternalState
     return LayoutBuilder(
       builder: (context, constraints) {
         final renderSize = _meshRenderSize(constraints.biggest);
+        final gradient = _SoftMeshGradient(
+          colors: colors,
+          transitionFromColors: transitionFromColors,
+          transitionToColors: transitionToColors,
+          colorTransition: _isTransitioning ? _transitionValueNotifier : null,
+          controller: _meshController,
+          scrimColor: scrimColor,
+          timeScale: _audioTimeScale,
+          beat: _audioBeat,
+        );
         return FittedBox(
           fit: BoxFit.fill,
           child: SizedBox.fromSize(
             size: renderSize,
-            // 边界必须包在这一层里面。包在外面时，着色器仍按整窗像素画。
-            child: RepaintBoundary(
-              child: _SoftMeshGradient(
-                colors: colors,
-                transitionFromColors: transitionFromColors,
-                transitionToColors: transitionToColors,
-                colorTransition: _isTransitioning
-                    ? _transitionValueNotifier
-                    : null,
-                controller: _meshController,
-                scrimColor: scrimColor,
-              ),
-            ),
+            // 不再单独成层：同帧脏层越多，引擎每帧的临时分配越多（见 MEM_LOOP）
+            child: gradient,
           ),
         );
       },
@@ -765,6 +930,8 @@ class _SoftMeshGradient extends StatefulWidget {
   final ValueListenable<double>? colorTransition;
   final _MeshAnimationController? controller;
   final Color scrimColor;
+  final ValueListenable<double> timeScale;
+  final ValueListenable<double> beat;
 
   const _SoftMeshGradient({
     required this.colors,
@@ -773,52 +940,61 @@ class _SoftMeshGradient extends StatefulWidget {
     this.colorTransition,
     this.controller,
     required this.scrimColor,
+    required this.timeScale,
+    required this.beat,
   });
 
   @override
   State<_SoftMeshGradient> createState() => _SoftMeshGradientState();
 }
 
-class _SoftMeshGradientState extends State<_SoftMeshGradient>
-    with SingleTickerProviderStateMixin {
+class _SoftMeshGradientState extends State<_SoftMeshGradient> {
   static const _shaderAssetPath = MeshGradientBackground.shaderAssetPath;
-  // 装饰动画跟随屏幕刷新率，每帧推进着色器时间。
-  static const double _timeScale = 1.0;
+  // 重绘压到 24fps，时间按真实步进累积。
+  static const Duration _frameInterval = Duration(milliseconds: 42);
 
-  late final Ticker _ticker;
+  final Stopwatch _clock = Stopwatch();
+  Timer? _timer;
   late final ValueNotifier<double> _time;
   late final ValueNotifier<int> _paintEpoch;
   late final Listenable _repaint;
   late final _SoftMeshGradientPainter _painter;
-  Duration? _lastElapsed;
+  Duration _lastElapsed = Duration.zero;
   VoidCallback? _controllerListener;
   bool _tickerModeEnabled = true;
 
-  void _onTick(Duration elapsed) {
+  void _onTick() {
     if (!mounted ||
         (widget.controller != null && !widget.controller!.isAnimating.value)) {
       _syncTicker();
       return;
     }
-    final previous = _lastElapsed;
-    _lastElapsed = elapsed;
-    if (previous == null) return;
+    final elapsed = _clock.elapsed;
     final deltaSeconds =
-        (elapsed - previous).inMicroseconds / Duration.microsecondsPerSecond;
+        (elapsed - _lastElapsed).inMicroseconds /
+        Duration.microsecondsPerSecond;
+    _lastElapsed = elapsed;
     if (deltaSeconds <= 0) return;
-    _time.value += deltaSeconds * _timeScale;
+    // 音频只加快 shader 内部时间，避免响度把重绘频率顶上去。
+    _time.value += deltaSeconds * widget.timeScale.value;
   }
 
   void _syncTicker() {
     final shouldRun =
         _tickerModeEnabled &&
         (widget.controller == null || widget.controller!.isAnimating.value);
-    if (shouldRun && !_ticker.isActive) {
-      _lastElapsed = null;
-      _ticker.start();
-    } else if (!shouldRun && _ticker.isActive) {
-      _ticker.stop();
-      _lastElapsed = null;
+    if (shouldRun && _timer == null) {
+      _clock
+        ..stop()
+        ..reset()
+        ..start();
+      _lastElapsed = Duration.zero;
+      _timer = Timer.periodic(_frameInterval, (_) => _onTick());
+    } else if (!shouldRun && _timer != null) {
+      _timer!.cancel();
+      _timer = null;
+      _clock.stop();
+      _lastElapsed = Duration.zero;
     }
   }
 
@@ -848,10 +1024,10 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
     _time = ValueNotifier(_meshClockSeconds());
     _paintEpoch = ValueNotifier(0);
     _repaint = Listenable.merge([_time, _paintEpoch]);
-    _ticker = createTicker(_onTick);
     _painter = _SoftMeshGradientPainter(
       repaint: _repaint,
       time: _time,
+      beat: widget.beat,
       scrimColor: widget.scrimColor,
     );
     _bindController();
@@ -880,7 +1056,7 @@ class _SoftMeshGradientState extends State<_SoftMeshGradient>
   @override
   void dispose() {
     _unbindController(widget.controller);
-    _ticker.dispose();
+    _timer?.cancel();
     _time.dispose();
     _paintEpoch.dispose();
     super.dispose();
@@ -933,6 +1109,7 @@ class _SoftMeshGradientPainter extends CustomPainter {
   _SoftMeshGradientPainter({
     required Listenable repaint,
     required this.time,
+    required this.beat,
     required Color scrimColor,
   }) : scrimColor = scrimColor,
        _paint = Paint()
@@ -941,6 +1118,7 @@ class _SoftMeshGradientPainter extends CustomPainter {
 
   FragmentShader? shader;
   final ValueListenable<double> time;
+  final ValueListenable<double> beat;
   List<_OklabColor> colors = const <_OklabColor>[];
   List<_OklabColor>? transitionFromColors;
   List<_OklabColor>? transitionToColors;
@@ -956,12 +1134,13 @@ class _SoftMeshGradientPainter extends CustomPainter {
     shader.setFloat(0, size.width);
     shader.setFloat(1, size.height);
     shader.setFloat(2, time.value);
+    shader.setFloat(3, beat.value.clamp(0.0, 1.0));
     if (_filterColor != scrimColor) {
       _filterColor = scrimColor;
       _paint.colorFilter = ColorFilter.mode(scrimColor, BlendMode.srcOver);
     }
 
-    var i = 3;
+    var i = 4;
     final from = transitionFromColors;
     final to = transitionToColors;
     final transition = colorTransition;
@@ -998,6 +1177,7 @@ class _SoftMeshGradientPainter extends CustomPainter {
   bool shouldRepaint(covariant _SoftMeshGradientPainter oldDelegate) {
     return oldDelegate.shader != shader ||
         oldDelegate.time != time ||
+        oldDelegate.beat != beat ||
         oldDelegate.colorTransition != colorTransition ||
         oldDelegate.scrimColor != scrimColor ||
         !listEquals(oldDelegate.transitionFromColors, transitionFromColors) ||

@@ -539,6 +539,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         flowSpeed: 1.0,
         intensity: brightness == Brightness.dark ? 1.0 : 0.9,
         audioReactiveFlow: nowPlayingAudioReactiveFlowNotifier.value,
+        trackId: playbackService.nowPlaying?.path,
         preExtractedColors: _preExtractedPalette,
       ),
       fallbackColor: _neutralBackgroundColor(brightness),

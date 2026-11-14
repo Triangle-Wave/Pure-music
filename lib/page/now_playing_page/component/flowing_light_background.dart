@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:pure_music/page/now_playing_page/component/audio_reactive_flow.dart';
 import 'package:pure_music/page/now_playing_page/component/now_playing_background_inputs.dart';
 
@@ -15,17 +14,22 @@ const _kDownsampleLow = 8.0;
 const _kDownsampleHigh = 12.0;
 const _kHighDpiThreshold = 2.625;
 const _kMinCropLongest = 128.0;
-const _kBlurSigma = 12.0;
 const _kBlurChromaBoost = 1.16;
 const _kDarkNeutralBackground = Color(0xFF171717);
 const _kLightNeutralBackground = Color(0xFFF0F0F0);
 const _kArtworkTransitionDuration = Duration(milliseconds: 300);
 const _kPlaybackSpeedTransitionDuration = Duration(milliseconds: 650);
+const _kFrameInterval = Duration(milliseconds: 66);
 
 const _kCoverPeriod1 = 75.0;
 const _kCoverPeriod2 = 55.0;
 const _kCoverPeriod3 = 62.0;
-const _kCoverPrefilterSigma = 6.0;
+const _kPrefilterPadding = 32;
+// 1280×720 参考窗口下的预模糊 sigma；其他尺寸按画布大小换算。
+const _kReferencePrimarySigma = 12.6;
+const _kReferenceSoftSigma = 11.5;
+
+typedef _PrefilterSigmas = ({double primary, double soft});
 
 const _kPrimaryLayerScale = 1.42;
 const _kPrimaryLayerAlpha = 255;
@@ -66,8 +70,20 @@ Size _flowingLightOverscanSize(Size cropSize) {
   );
 }
 
-double _flowingLightCompositeSigma(Size size) {
-  return (size.shortestSide * 0.10).clamp(8.0, 16.0);
+/// 按画布尺寸换算预模糊 sigma，复现旧版「6px 预模糊 + 运行时整屏模糊」的合成效果。
+@visibleForTesting
+({double primary, double soft}) flowingLightPrefilterSigmas(Size overscanSize) {
+  if (overscanSize.isEmpty) {
+    return (primary: _kReferencePrimarySigma, soft: _kReferenceSoftSigma);
+  }
+  final runtimeCanvas = (overscanSize.shortestSide * 0.10).clamp(8.0, 16.0);
+  final coverScale =
+      max(overscanSize.width, overscanSize.height) * _kOverscan / _kDecodeSize;
+  final runtimeTexture = runtimeCanvas / max(coverScale, 0.0001);
+  return (
+    primary: sqrt(36 + runtimeTexture * runtimeTexture),
+    soft: sqrt(9 + runtimeTexture * runtimeTexture),
+  );
 }
 
 const _kDarkFlowingLightStyle = _FlowingLightVisualStyle(
@@ -129,22 +145,26 @@ Color flowingLightCoverBaseColor(ByteData pixels, int width, int height) {
   );
 }
 
-Future<ui.Image> _prefilterCoverImage(ui.Image source) async {
-  final recorder = ui.PictureRecorder();
-  final canvas = Canvas(recorder);
-  final paint = Paint()
-    ..filterQuality = FilterQuality.medium
-    ..imageFilter = ui.ImageFilter.blur(
-      sigmaX: _kCoverPrefilterSigma,
-      sigmaY: _kCoverPrefilterSigma,
-      tileMode: TileMode.clamp,
-    );
-  canvas.drawImage(source, Offset.zero, paint);
-  final picture = recorder.endRecording();
-  try {
-    return await picture.toImage(source.width, source.height);
-  } finally {
-    picture.dispose();
+/// 预模糊好的封面纹理：主层用原尺寸，副层只按半尺寸显示，单独生成以免放大后变糊。
+class _CoverTextures {
+  const _CoverTextures(
+    this.primary,
+    this.soft, {
+    this.padding = _kPrefilterPadding,
+    this.owned = true,
+  });
+
+  final ui.Image primary;
+  final ui.Image soft;
+  // 纹理四周的透明边，缩放时按去掉边距后的内容尺寸算。
+  final int padding;
+  // 回退路径直接复用封面原图，所有权仍归 _DecodedCover。
+  final bool owned;
+
+  void dispose() {
+    if (!owned) return;
+    primary.dispose();
+    if (!identical(primary, soft)) soft.dispose();
   }
 }
 
@@ -159,42 +179,41 @@ class FlowingLightBackground extends StatefulWidget {
   State<FlowingLightBackground> createState() => _FlowingLightBackgroundState();
 }
 
-class _FlowingLightBackgroundState extends State<FlowingLightBackground>
-    with SingleTickerProviderStateMixin {
-  ui.Image? _coverImage;
-  ui.Image? _previousCoverImage;
-  Color _coverBaseColor = _kDarkNeutralBackground;
-  Color _previousCoverBaseColor = _kDarkNeutralBackground;
-  double _previousMotionTime = 0;
+class _FlowingLightBackgroundState extends State<FlowingLightBackground> {
+  _DecodedCover? _cover;
+  _DecodedCover? _previousCover;
   _DecodedCover? _pendingCover;
+  double _previousMotionTime = 0;
+  Size? _overscanSize;
+  Timer? _prefilterDebounce;
+  int _prefilterGeneration = 0;
 
   late final Stopwatch _transitionClock;
-  late final Ticker _ticker;
+  final Stopwatch _paintClock = Stopwatch();
+  Timer? _paintTimer;
   late final _FlowingLightPainter _painter;
   final _FlowMotionState _motion = _FlowMotionState();
-  Duration? _lastTickElapsed;
+  Duration _lastTickElapsed = Duration.zero;
+  Duration? _lastSpectrumElapsed;
 
   final ValueNotifier<int> _frameNotifier = ValueNotifier(0);
-  final AudioReactiveFlowEnvelope _envelope = AudioReactiveFlowEnvelope();
-  final AudioReactiveFlowNormalizer _normalizer = AudioReactiveFlowNormalizer();
+  final AudioReactiveFlowEngine _engine = AudioReactiveFlowEngine();
   final _FlowAudioState _audio = _FlowAudioState();
-  ui.FragmentShader? _gaussianHorizontal;
-  ui.FragmentShader? _gaussianVertical;
-  final _BlurFilterHandle _blurHandle = _BlurFilterHandle();
-  Size? _blurFilterSize;
   StreamSubscription<Float32List>? _spectrumSubscription;
   DateTime? _spectrumPausedAt;
   int _decodeGeneration = 0;
   bool _disposed = false;
   bool _tickerModeEnabled = true;
+  Animation<double>? _routeAnimation;
+  bool _routeTransitionSettled = true;
 
   static const double _kIdleSpeed = 0.0;
   static const double _kActiveSpeed = 1.0;
   static ui.FragmentProgram? _cachedGaussianProgram;
   static Future<ui.FragmentProgram?>? _gaussianProgramFuture;
 
+  /// 预模糊在解码封面时用着色器，启动时先把资产加载好。
   static Future<void> precache() async {
-    if (!ui.ImageFilter.isShaderFilterSupported) return;
     await _gaussianProgram();
   }
 
@@ -224,22 +243,13 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   void initState() {
     super.initState();
     _transitionClock = Stopwatch();
-    _ticker = createTicker(_onTick);
     _painter = _FlowingLightPainter(
       motion: _motion,
       transitionClock: _transitionClock,
       audio: _audio,
-      blurHandle: _blurHandle,
       repaint: _frameNotifier,
     );
-    _blurHandle.filter = _fallbackBlurFilter(_kBlurSigma);
     _scheduleCoverDecode();
-    final cachedProgram = _cachedGaussianProgram;
-    if (cachedProgram != null) {
-      _applyGaussianProgram(cachedProgram);
-    } else {
-      _loadGaussianFilters();
-    }
     _syncSpectrumSubscription();
     _bindPlayerStateListenable();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -250,6 +260,7 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _bindRouteAnimation();
     final tickerModeEnabled = TickerMode.valuesOf(context).enabled;
     if (_tickerModeEnabled == tickerModeEnabled) return;
     _tickerModeEnabled = tickerModeEnabled;
@@ -285,6 +296,12 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
         oldWidget.inputs.audioReactiveFlow) {
       _resetAudioResponse();
     }
+    if (widget.inputs.trackId != oldWidget.inputs.trackId) {
+      // 切歌只重建鼓点检测，慢电平和连续量程从上一首接续。
+      _engine.resetForTrackChange();
+      _audio.resetForTrackChange();
+      _lastSpectrumElapsed = null;
+    }
     final needsSync =
         !identical(
           widget.inputs.albumCoverBytes,
@@ -305,58 +322,95 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     final stream = widget.inputs.spectrumStream;
     final shouldListen =
         stream != null &&
+        _routeTransitionSettled &&
         _tickerModeEnabled &&
-        _coverImage != null &&
+        _cover != null &&
         widget.inputs.enableAnimation &&
         widget.inputs.audioReactiveFlow &&
         widget.inputs.isVisible &&
         widget.inputs.isPlaybackActive;
     if (shouldListen) {
       if (_spectrumSubscription == null) {
-        // 断订阅期间峰值基线会过期：超过 10 秒重置（用旧峰值归一化新频谱
-        // 会跳变），闲时短断开则保留基线，恢复第一帧包络就直接接上。
-        // 顺序注意：reset 会清 awaitingPlaybackSpectrum，必须先 reset 再 markListenStarted。
-        if (_spectrumPausedAt == null ||
-            DateTime.now().difference(_spectrumPausedAt!) >
-                const Duration(seconds: 10)) {
-          _normalizer.reset();
+        final pausedAt = _spectrumPausedAt;
+        final pausedFor = pausedAt == null
+            ? Duration.zero
+            : DateTime.now().difference(pausedAt);
+        // 断流恢复保留慢电平，并让脉冲按暂停时长退场；首次订阅才重置。
+        if (audioReactiveFlowShouldResetAfterPause(
+          pausedFor: pausedAt == null ? null : pausedFor,
+        )) {
+          _engine.reset();
           _resetAudioVisual();
         } else {
-          _normalizer.resumeFromPause();
+          _engine.resumeFromPause(
+            elapsedSeconds:
+                pausedFor.inMicroseconds / Duration.microsecondsPerSecond,
+          );
         }
+        _lastSpectrumElapsed = null;
         _audio.markListenStarted();
+        _spectrumPausedAt = null;
         _spectrumSubscription = stream.listen(_handleSpectrum);
       }
       return;
     }
-    _spectrumPausedAt = DateTime.now();
+    if (_spectrumSubscription != null || _spectrumPausedAt == null) {
+      _spectrumPausedAt = DateTime.now();
+    }
+    _lastSpectrumElapsed = null;
     _spectrumSubscription?.cancel();
     _spectrumSubscription = null;
+  }
+
+  void _bindRouteAnimation() {
+    final animation = ModalRoute.of(context)?.animation;
+    if (identical(animation, _routeAnimation)) return;
+    _routeAnimation?.removeStatusListener(_onRouteAnimationStatus);
+    _routeAnimation = animation;
+    _routeAnimation?.addStatusListener(_onRouteAnimationStatus);
+    final settled =
+        animation == null || animation.status == AnimationStatus.completed;
+    if (settled == _routeTransitionSettled) return;
+    _routeTransitionSettled = settled;
+    _syncAnimationState();
+  }
+
+  void _onRouteAnimationStatus(AnimationStatus status) {
+    if (!mounted) return;
+    final settled = status == AnimationStatus.completed;
+    if (settled == _routeTransitionSettled) return;
+    _routeTransitionSettled = settled;
+    // 离开播放页的同一帧断掉频谱，包络停在当前值；过渡结束才重新接。
+    _syncAnimationState();
   }
 
   void _handleSpectrum(Float32List bands) {
     if (_disposed) return;
     if (!widget.inputs.audioReactiveFlow) return;
     final response = AudioReactiveFlowResponse.fromBands(bands);
-    // 暂停/进出后先丢掉空频谱，避免把冻住的色场瞬间拉黑。
-    if (audioReactiveFlowShouldHoldEnvelope(
+    final elapsed = _transitionClock.elapsed;
+    final previous = _lastSpectrumElapsed;
+    _lastSpectrumElapsed = elapsed;
+    final dtSeconds = previous == null
+        ? null
+        : (elapsed - previous).inMicroseconds / Duration.microsecondsPerSecond;
+    // 离开播放页或过渡中不写色场，包络停在离开时的值。
+    _audio.awaitingPlaybackSpectrum = audioReactiveFlowWriteSpectrum(
+      pageSettled: _routeTransitionSettled,
       awaitingPlaybackSpectrum: _audio.awaitingPlaybackSpectrum,
       incoming: response,
-    )) {
-      return;
-    }
-    _audio.awaitingPlaybackSpectrum = false;
-    // 先把三频拉到可用幅度，再交给色场去推缩放/对比/饱和。
-    _envelope.update(_normalizer.update(response));
+      engine: _engine,
+      dtSeconds: dtSeconds,
+    );
   }
 
   void _resetAudioVisual() {
-    _envelope.reset();
     _audio.reset();
   }
 
   void _resetAudioResponse() {
-    _normalizer.reset();
+    _engine.reset();
+    _lastSpectrumElapsed = null;
     _resetAudioVisual();
   }
 
@@ -364,7 +418,7 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     if (_disposed) return;
     _syncSpectrumSubscription();
     final canMove =
-        _coverImage != null &&
+        _cover != null &&
         _tickerModeEnabled &&
         widget.inputs.enableAnimation &&
         widget.inputs.isVisible;
@@ -377,9 +431,7 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
             _playbackSpeedTransitionProgress < 1.0 ||
             _smoothedPlaybackSpeed > _kIdleSpeed);
     final shouldTransition =
-        _tickerModeEnabled &&
-        _previousCoverImage != null &&
-        widget.inputs.isVisible;
+        _tickerModeEnabled && _previousCover != null && widget.inputs.isVisible;
 
     if (shouldTransition) {
       _transitionClock.start();
@@ -388,12 +440,10 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     }
 
     final shouldTick = shouldMove || shouldTransition;
-    if (shouldTick && !_ticker.isActive) {
-      _lastTickElapsed = null;
-      _ticker.start();
-    } else if (!shouldTick && _ticker.isActive) {
-      _ticker.stop();
-      _lastTickElapsed = null;
+    if (shouldTick && _paintTimer == null) {
+      _startPaintTimer();
+    } else if (!shouldTick && _paintTimer != null) {
+      _stopPaintTimer();
     }
   }
 
@@ -428,15 +478,31 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     return (previousSpeed + _smoothedPlaybackSpeed) / 2;
   }
 
-  void _onTick(Duration elapsed) {
+  void _startPaintTimer() {
+    _paintClock
+      ..stop()
+      ..reset()
+      ..start();
+    _lastTickElapsed = Duration.zero;
+    // 按 15fps 出帧，避免空闲帧跟着屏幕刷新率空转。
+    _paintTimer = Timer.periodic(_kFrameInterval, (_) => _onPaintTick());
+  }
+
+  void _stopPaintTimer() {
+    _paintTimer?.cancel();
+    _paintTimer = null;
+    _paintClock.stop();
+    _lastTickElapsed = Duration.zero;
+  }
+
+  void _onPaintTick() {
     if (_disposed || !mounted) return;
 
-    final previousTick = _lastTickElapsed;
+    final elapsed = _paintClock.elapsed;
+    final deltaSeconds =
+        (elapsed - _lastTickElapsed).inMicroseconds /
+        Duration.microsecondsPerSecond;
     _lastTickElapsed = elapsed;
-    final deltaSeconds = previousTick == null
-        ? 0.0
-        : (elapsed - previousTick).inMicroseconds /
-              Duration.microsecondsPerSecond;
     final averageSpeed = _updatePlaybackSpeed(deltaSeconds);
     _updateAudio(deltaSeconds);
     final audioSpeed = widget.inputs.audioReactiveFlow
@@ -445,7 +511,7 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     _motion.time +=
         deltaSeconds * widget.inputs.flowSpeed * averageSpeed * audioSpeed;
 
-    if (_previousCoverImage != null &&
+    if (_previousCover != null &&
         _transitionClock.elapsed >= _kArtworkTransitionDuration) {
       _finishArtworkTransition();
       return;
@@ -464,11 +530,23 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
       _audio.reset();
       return;
     }
-    final env = _envelope.value;
-    _audio.low = audioReactiveFlowCurve(env.low);
-    _audio.mid = audioReactiveFlowCurve(env.mid);
-    _audio.high = audioReactiveFlowCurve(env.high);
+    final env = _engine.value;
+    _audio.low = audioReactiveFlowLevel(env.low);
+    _audio.mid = audioReactiveFlowLevel(env.mid);
+    _audio.high = audioReactiveFlowLevel(env.high);
+    _audio.followSlow(
+      low: audioReactiveFlowLevel(_engine.levelLow),
+      mid: audioReactiveFlowLevel(_engine.levelMid),
+      high: audioReactiveFlowLevel(_engine.levelHigh),
+      deltaSeconds: deltaSeconds,
+    );
+    _audio.beat = audioReactiveFlowFollowBeat(
+      current: _audio.beat,
+      target: _engine.beatPulse,
+      dtSeconds: deltaSeconds,
+    );
     _audio.followSpeed(deltaSeconds);
+    _audio.followFast(deltaSeconds);
   }
 
   Future<void> _scheduleCoverDecode() async {
@@ -501,24 +579,23 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
       final baseColor = pixels == null
           ? _kDarkNeutralBackground
           : flowingLightCoverBaseColor(pixels, image.width, image.height);
-      // 先抹掉封面细纹再旋转，避免三层叠在一起打出条纹。
+      // 把模糊烤进封面纹理，运行时不再对整屏做高斯。
       final source = image;
-      ui.Image filtered;
+      image = null;
+      final sigmas = flowingLightPrefilterSigmas(_overscanSize ?? Size.zero);
+      _CoverTextures textures;
       try {
-        filtered = await _prefilterCoverImage(source);
-        if (!identical(filtered, source)) {
-          source.dispose();
-        }
-        image = null;
+        textures = await _prefilterCoverTextures(source, sigmas);
       } catch (_) {
-        filtered = source;
-        image = null;
+        // 预模糊失败时退回未模糊封面，至少保留背景。
+        textures = _CoverTextures(source, source, padding: 0, owned: false);
       }
+      final decoded = _DecodedCover(source, textures, baseColor, sigmas);
       if (_disposed || !mounted || generation != _decodeGeneration) {
-        filtered.dispose();
+        decoded.dispose();
         return;
       }
-      _acceptDecodedCover(_DecodedCover(filtered, baseColor));
+      _acceptDecodedCover(decoded);
     } catch (_) {
       image?.dispose();
       if (!_disposed && mounted && generation == _decodeGeneration) {
@@ -526,6 +603,110 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
       }
     } finally {
       codec?.dispose();
+    }
+  }
+
+  Future<_CoverTextures> _prefilterCoverTextures(
+    ui.Image source,
+    _PrefilterSigmas sigmas,
+  ) async {
+    final primary = await _prefilterCoverImage(source, sigmas.primary);
+    ui.Image? softSource;
+    try {
+      softSource = await _downscaleCover(source);
+      final soft = await _prefilterCoverImage(softSource, sigmas.soft);
+      return _CoverTextures(primary, soft);
+    } catch (_) {
+      primary.dispose();
+      rethrow;
+    } finally {
+      softSource?.dispose();
+    }
+  }
+
+  Future<ui.Image> _downscaleCover(ui.Image source) async {
+    final width = max(1, source.width ~/ 2);
+    final height = max(1, source.height ~/ 2);
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImageRect(
+      source,
+      Rect.fromLTWH(0, 0, source.width.toDouble(), source.height.toDouble()),
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+    final picture = recorder.endRecording();
+    try {
+      return await picture.toImage(width, height);
+    } finally {
+      picture.dispose();
+    }
+  }
+
+  Future<ui.Image> _prefilterCoverImage(ui.Image source, double sigma) async {
+    final width = source.width + _kPrefilterPadding * 2;
+    final height = source.height + _kPrefilterPadding * 2;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    // 留出透明边，模糊后边缘自然淡出，和整屏模糊时的层间过渡一致。
+    canvas.drawImage(
+      source,
+      Offset(_kPrefilterPadding.toDouble(), _kPrefilterPadding.toDouble()),
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+    final padded = recorder.endRecording();
+    ui.Image? paddedImage;
+    ui.Image? blurred;
+    final program = ui.ImageFilter.isShaderFilterSupported
+        ? await _gaussianProgram()
+        : null;
+    final horizontal = program?.fragmentShader();
+    final vertical = program?.fragmentShader();
+    try {
+      paddedImage = await padded.toImage(width, height);
+      ui.ImageFilter filter;
+      if (horizontal != null && vertical != null) {
+        _configureSeparableBlurShader(
+          horizontal,
+          horizontal: true,
+          sigma: sigma,
+        );
+        _configureSeparableBlurShader(
+          vertical,
+          horizontal: false,
+          sigma: sigma,
+        );
+        filter = ui.ImageFilter.compose(
+          inner: ui.ImageFilter.shader(horizontal),
+          outer: ui.ImageFilter.shader(vertical),
+        );
+      } else {
+        filter = _fallbackBlurFilter(sigma);
+      }
+      final blurRecorder = ui.PictureRecorder();
+      final blurCanvas = Canvas(blurRecorder);
+      blurCanvas.drawImage(
+        paddedImage,
+        Offset.zero,
+        Paint()
+          ..filterQuality = FilterQuality.medium
+          ..imageFilter = filter,
+      );
+      final blurPicture = blurRecorder.endRecording();
+      try {
+        blurred = await blurPicture.toImage(width, height);
+      } finally {
+        blurPicture.dispose();
+      }
+      return blurred;
+    } catch (_) {
+      blurred?.dispose();
+      rethrow;
+    } finally {
+      padded.dispose();
+      paddedImage?.dispose();
+      horizontal?.dispose();
+      vertical?.dispose();
     }
   }
 
@@ -537,51 +718,10 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     );
   }
 
-  Future<void> _loadGaussianFilters() async {
-    if (!ui.ImageFilter.isShaderFilterSupported) return;
-    try {
-      final program = await _gaussianProgram();
-      if (program == null || _disposed) return;
-      _applyGaussianProgram(program);
-      if (mounted && _blurFilterSize != null) _frameNotifier.value++;
-    } catch (_) {
-      _gaussianHorizontal?.dispose();
-      _gaussianVertical?.dispose();
-      _gaussianHorizontal = null;
-      _gaussianVertical = null;
-    }
-  }
-
-  void _applyGaussianProgram(ui.FragmentProgram program) {
-    final horizontal = program.fragmentShader();
-    final vertical = program.fragmentShader();
-    if (_disposed) {
-      horizontal.dispose();
-      vertical.dispose();
-      return;
-    }
-    _configureSeparableBlurShader(horizontal, horizontal: true);
-    _configureSeparableBlurShader(vertical, horizontal: false);
-    final filter = ui.ImageFilter.compose(
-      inner: ui.ImageFilter.shader(horizontal),
-      outer: ui.ImageFilter.shader(vertical),
-    );
-    _gaussianHorizontal?.dispose();
-    _gaussianVertical?.dispose();
-    _gaussianHorizontal = horizontal;
-    _gaussianVertical = vertical;
-    _blurHandle.filter = filter;
-    final knownSize = _blurFilterSize;
-    _blurFilterSize = null;
-    if (knownSize != null) {
-      _blurFilterFor(knownSize);
-    }
-  }
-
   void _configureSeparableBlurShader(
     ui.FragmentShader shader, {
     required bool horizontal,
-    double sigma = _kBlurSigma,
+    required double sigma,
   }) {
     final inv2s2 = 1.0 / (2.0 * sigma * sigma);
     shader
@@ -591,36 +731,18 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
       ..setFloat(5, horizontal ? 1.0 : _kBlurChromaBoost);
   }
 
-  ui.ImageFilter _blurFilterFor(Size size) {
-    if (_blurFilterSize == size) return _blurHandle.filter;
-    final sigma = _flowingLightCompositeSigma(size);
-    final horizontal = _gaussianHorizontal;
-    final vertical = _gaussianVertical;
-    if (horizontal != null && vertical != null) {
-      _configureSeparableBlurShader(horizontal, horizontal: true, sigma: sigma);
-      _configureSeparableBlurShader(vertical, horizontal: false, sigma: sigma);
-    } else {
-      _blurHandle.filter = _fallbackBlurFilter(sigma);
-    }
-    _blurFilterSize = size;
-    return _blurHandle.filter;
-  }
-
   void _acceptDecodedCover(_DecodedCover decoded) {
-    if (_previousCoverImage != null) {
-      final oldPending = _pendingCover;
-      if (oldPending != null) {
-        _disposeImage(oldPending.image);
-      }
+    if (_previousCover != null) {
+      _pendingCover?.dispose();
       _pendingCover = decoded;
       return;
     }
-    if (_coverImage == null) {
+    if (_cover == null) {
       setState(() {
-        _coverImage = decoded.image;
-        _coverBaseColor = decoded.baseColor;
+        _cover = decoded;
       });
       _syncAnimationState();
+      _schedulePrefilterCheck();
       return;
     }
     _startArtworkTransition(decoded);
@@ -629,11 +751,9 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   void _startArtworkTransition(_DecodedCover decoded) {
     final currentTime = _motion.time;
     setState(() {
-      _previousCoverImage = _coverImage;
-      _previousCoverBaseColor = _coverBaseColor;
+      _previousCover = _cover;
       _previousMotionTime = currentTime;
-      _coverImage = decoded.image;
-      _coverBaseColor = decoded.baseColor;
+      _cover = decoded;
       _transitionClock
         ..stop()
         ..reset();
@@ -642,12 +762,12 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   }
 
   void _finishArtworkTransition() {
-    final completedPrevious = _previousCoverImage;
+    final completedPrevious = _previousCover;
     final pending = _pendingCover;
     _pendingCover = null;
     if (pending == null) {
       setState(() {
-        _previousCoverImage = null;
+        _previousCover = null;
         _transitionClock
           ..stop()
           ..reset();
@@ -655,76 +775,144 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
     } else {
       final currentTime = _motion.time;
       setState(() {
-        _previousCoverImage = _coverImage;
-        _previousCoverBaseColor = _coverBaseColor;
+        _previousCover = _cover;
         _previousMotionTime = currentTime;
-        _coverImage = pending.image;
-        _coverBaseColor = pending.baseColor;
+        _cover = pending;
         _transitionClock
           ..stop()
           ..reset();
       });
+      _schedulePrefilterCheck();
     }
-    _disposeImagesAfterFrame([completedPrevious]);
+    _disposeCoversAfterFrame([completedPrevious]);
     _syncAnimationState();
   }
 
   void _clearArtwork() {
-    final current = _coverImage;
-    final previous = _previousCoverImage;
+    final current = _cover;
+    final previous = _previousCover;
     final pending = _pendingCover;
-    _coverImage = null;
-    _previousCoverImage = null;
+    _cover = null;
+    _previousCover = null;
     _pendingCover = null;
-    _coverBaseColor = _kDarkNeutralBackground;
-    _previousCoverBaseColor = _kDarkNeutralBackground;
+    _prefilterGeneration++;
+    _prefilterDebounce?.cancel();
+    _prefilterDebounce = null;
     _transitionClock
       ..stop()
       ..reset();
     // 图片下一帧就销毁，先解除引用，避免淡出期间画到已释放的图。
     _painter
-      ..coverImage = null
-      ..previousCoverImage = null;
+      ..cover = null
+      ..previousCover = null;
     if (mounted && !_disposed) {
       setState(() {});
-      _disposeImagesAfterFrame([current, previous, pending?.image]);
+      _disposeCoversAfterFrame([current, previous, pending]);
     } else {
-      if (current != null) _disposeImage(current);
-      if (previous != null) _disposeImage(previous);
-      if (pending != null) _disposeImage(pending.image);
+      current?.dispose();
+      previous?.dispose();
+      pending?.dispose();
     }
     _syncAnimationState();
   }
 
-  void _disposeImagesAfterFrame(Iterable<ui.Image?> images) {
-    final disposable = images.whereType<ui.Image>().toList(growable: false);
+  void _disposeCoversAfterFrame(Iterable<_DecodedCover?> covers) {
+    final disposable = covers.whereType<_DecodedCover>().toList(
+      growable: false,
+    );
     if (disposable.isEmpty) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      for (final image in disposable) {
-        _disposeImage(image);
+      for (final cover in disposable) {
+        cover.dispose();
       }
     });
   }
 
-  void _disposeImage(ui.Image image) {
-    image.dispose();
+  void _disposeTexturesAfterFrame(Iterable<_CoverTextures?> textures) {
+    final disposable = textures.whereType<_CoverTextures>().toList(
+      growable: false,
+    );
+    if (disposable.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (final texture in disposable) {
+        texture.dispose();
+      }
+    });
+  }
+
+  void _schedulePrefilterCheck() {
+    if (_disposed) return;
+    _prefilterDebounce?.cancel();
+    _prefilterDebounce = Timer(const Duration(milliseconds: 200), () {
+      _prefilterDebounce = null;
+      _maybeReprefilter();
+    });
+  }
+
+  void _maybeReprefilter() {
+    if (_disposed || !mounted) return;
+    final cover = _cover;
+    final overscanSize = _overscanSize;
+    if (cover == null || overscanSize == null || overscanSize.isEmpty) return;
+    final sigmas = flowingLightPrefilterSigmas(overscanSize);
+    if (_sigmaCloseEnough(sigmas.primary, cover.sigmas.primary)) return;
+    _reprefilter(cover, sigmas);
+  }
+
+  static bool _sigmaCloseEnough(double a, double b) {
+    return (a - b).abs() <= b * 0.08;
+  }
+
+  Future<void> _reprefilter(
+    _DecodedCover cover,
+    _PrefilterSigmas sigmas,
+  ) async {
+    final generation = ++_prefilterGeneration;
+    try {
+      final textures = await _prefilterCoverTextures(cover.source, sigmas);
+      final overscanSize = _overscanSize;
+      if (_disposed ||
+          generation != _prefilterGeneration ||
+          !identical(_cover, cover) ||
+          overscanSize == null ||
+          !_sigmaCloseEnough(
+            flowingLightPrefilterSigmas(overscanSize).primary,
+            sigmas.primary,
+          )) {
+        textures.dispose();
+        return;
+      }
+      final oldTextures = cover.textures;
+      cover
+        ..textures = textures
+        ..sigmas = sigmas;
+      if (identical(_painter.cover, oldTextures)) {
+        _painter.cover = textures;
+      }
+      if (identical(_painter.previousCover, oldTextures)) {
+        _painter.previousCover = textures;
+      }
+      _disposeTexturesAfterFrame([oldTextures]);
+      _frameNotifier.value++;
+    } catch (_) {
+      // 预模糊失败时保留现有纹理。
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     _decodeGeneration++;
-    _ticker.dispose();
+    _prefilterGeneration++;
+    _prefilterDebounce?.cancel();
+    _stopPaintTimer();
     _transitionClock.stop();
-    _gaussianHorizontal?.dispose();
-    _gaussianHorizontal = null;
-    _gaussianVertical?.dispose();
-    _gaussianVertical = null;
-    _coverImage?.dispose();
-    _previousCoverImage?.dispose();
-    _pendingCover?.image.dispose();
+    _cover?.dispose();
+    _previousCover?.dispose();
+    _pendingCover?.dispose();
     _frameNotifier.dispose();
     _spectrumSubscription?.cancel();
+    _routeAnimation?.removeStatusListener(_onRouteAnimationStatus);
     widget.inputs.playerStateListenable?.removeListener(
       _onPlayerStateListenable,
     );
@@ -741,23 +929,25 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   }
 
   void _syncPainter({
-    required ui.Image coverImage,
+    required _DecodedCover cover,
     required _FlowingLightVisualStyle style,
     required bool audioReactiveFlow,
   }) {
+    final previous = _previousCover;
     final changed =
-        !identical(_painter.coverImage, coverImage) ||
-        !identical(_painter.previousCoverImage, _previousCoverImage) ||
-        _painter.coverBaseColor != _coverBaseColor ||
-        _painter.previousCoverBaseColor != _previousCoverBaseColor ||
+        !identical(_painter.cover, cover.textures) ||
+        !identical(_painter.previousCover, previous?.textures) ||
+        _painter.coverBaseColor != cover.baseColor ||
+        _painter.previousCoverBaseColor !=
+            (previous?.baseColor ?? _kDarkNeutralBackground) ||
         _painter.previousMotionTime != _previousMotionTime ||
         _painter.audioReactiveFlow != audioReactiveFlow ||
         _painter.style != style;
     _painter
-      ..coverImage = coverImage
-      ..previousCoverImage = _previousCoverImage
-      ..coverBaseColor = _coverBaseColor
-      ..previousCoverBaseColor = _previousCoverBaseColor
+      ..cover = cover.textures
+      ..previousCover = previous?.textures
+      ..coverBaseColor = cover.baseColor
+      ..previousCoverBaseColor = previous?.baseColor ?? _kDarkNeutralBackground
       ..previousMotionTime = _previousMotionTime
       ..audioReactiveFlow = audioReactiveFlow
       ..style = style;
@@ -772,14 +962,14 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).colorScheme.brightness == Brightness.dark;
-    final coverImage = _coverImage;
+    final cover = _cover;
     final style = isDark ? _kDarkFlowingLightStyle : _kLightFlowingLightStyle;
     final backgroundColor = isDark
         ? _kDarkNeutralBackground
         : _kLightNeutralBackground;
-    if (coverImage != null) {
+    if (cover != null) {
       _syncPainter(
-        coverImage: coverImage,
+        cover: cover,
         style: style,
         audioReactiveFlow: widget.inputs.audioReactiveFlow,
       );
@@ -798,29 +988,31 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
             if (cropSize.isEmpty || overscanSize.isEmpty) {
               return const SizedBox.shrink();
             }
+            if (overscanSize != _overscanSize) {
+              _overscanSize = overscanSize;
+              _schedulePrefilterCheck();
+            }
             // 无效/缺失封面立刻卸掉绘制层，避免还画着上一首的图。
-            if (coverImage == null) {
+            if (cover == null) {
               return const SizedBox.shrink();
             }
-            _blurFilterFor(overscanSize);
-            return FittedBox(
-              fit: BoxFit.fill,
-              child: RepaintBoundary(
-                // 先把小尺寸流光层光栅化，再由 FittedBox 放大，避免模糊按整窗分辨率执行。
-                child: SizedBox.fromSize(
-                  size: cropSize,
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.center,
-                      minWidth: overscanSize.width,
-                      maxWidth: overscanSize.width,
-                      minHeight: overscanSize.height,
-                      maxHeight: overscanSize.height,
-                      child: CustomPaint(painter: _painter, size: overscanSize),
-                    ),
-                  ),
+            final layer = SizedBox.fromSize(
+              size: cropSize,
+              child: ClipRect(
+                child: OverflowBox(
+                  alignment: Alignment.center,
+                  minWidth: overscanSize.width,
+                  maxWidth: overscanSize.width,
+                  minHeight: overscanSize.height,
+                  maxHeight: overscanSize.height,
+                  child: CustomPaint(painter: _painter, size: overscanSize),
                 ),
               ),
+            );
+            return FittedBox(
+              fit: BoxFit.fill,
+              // 小尺寸绘制后由 FittedBox 放大；不再单独成层（见 MEM_LOOP）
+              child: layer,
             );
           },
         ),
@@ -830,18 +1022,20 @@ class _FlowingLightBackgroundState extends State<FlowingLightBackground>
 }
 
 class _DecodedCover {
-  const _DecodedCover(this.image, this.baseColor);
+  _DecodedCover(this.source, this.textures, this.baseColor, this.sigmas);
 
-  final ui.Image image;
+  final ui.Image source;
+  _CoverTextures textures;
   final Color baseColor;
-}
+  _PrefilterSigmas sigmas;
 
-class _BlurFilterHandle {
-  ui.ImageFilter filter = ui.ImageFilter.blur(
-    sigmaX: _kBlurSigma,
-    sigmaY: _kBlurSigma,
-    tileMode: TileMode.clamp,
-  );
+  void dispose() {
+    final ownsTextures = textures.owned;
+    textures.dispose();
+    if (!ownsTextures || !identical(source, textures.primary)) {
+      source.dispose();
+    }
+  }
 }
 
 class _FlowMotionState {
@@ -853,42 +1047,85 @@ class _FlowAudioState {
   double mid = 0.0;
   double high = 0.0;
   double motionSpeed = 1.0;
-  double _onset = 0.0;
-  double _previousEnergy = 0.0;
-  bool _skipOnset = false;
+
+  /// 慢通道：几秒级平均，用来决定整体缩放、层位移和颜色；鼓点只加脉冲。
+  double slowLow = 0.0;
+  double slowMid = 0.0;
+  double slowHigh = 0.0;
+
+  /// 鼓点脉冲由引擎按事件算出，和显示帧率解耦。
+  double beat = 0.0;
+
+  /// 快通道：只推光带和副层这些柔性元素，主封面层不用它。
+  double fastLow = 0.0;
+  double fastMid = 0.0;
+  double fastHigh = 0.0;
+
+  bool _seedFast = false;
   bool awaitingPlaybackSpectrum = false;
 
-  double get onset => _onset;
-
   void markListenStarted() {
-    _skipOnset = true;
+    _seedFast = true;
     awaitingPlaybackSpectrum = true;
+  }
+
+  void followSlow({
+    required double low,
+    required double mid,
+    required double high,
+    required double deltaSeconds,
+  }) {
+    if (!deltaSeconds.isFinite || deltaSeconds <= 0) return;
+    slowLow = _follow(slowLow, low, deltaSeconds, .22, .45);
+    slowMid = _follow(slowMid, mid, deltaSeconds, .22, .45);
+    slowHigh = _follow(slowHigh, high, deltaSeconds, .22, .45);
   }
 
   void followSpeed(double deltaSeconds) {
     final energy = audioReactiveFlowBeatEnergy(
-      AudioReactiveFlowResponse(low, mid, high),
+      AudioReactiveFlowResponse(slowLow, slowMid, slowHigh),
     );
-    if (_skipOnset) {
-      _skipOnset = false;
-      _onset = 0;
-      _previousEnergy = energy;
-    } else {
-      _onset = audioReactiveFlowOnsetPulse(
-        currentEnergy: energy,
-        previousEnergy: _previousEnergy,
-        previousPulse: _onset,
-      );
-      _previousEnergy = energy;
-    }
     final target = audioReactiveFlowMotionSpeedTarget(
       energy: energy,
-      onset: _onset,
+      beat: beat,
+      energyGain: .20,
+      beatGain: .40,
     );
     if (!deltaSeconds.isFinite || deltaSeconds <= 0) return;
-    final timeConstant = target > motionSpeed ? 0.07 : 0.22;
+    final timeConstant = target > motionSpeed ? 0.07 : 0.18;
     final response = 1 - exp(-deltaSeconds / timeConstant);
     motionSpeed += (target - motionSpeed) * response;
+  }
+
+  /// 快通道用固定起音/回落，只给柔性元素；1% 级噪声到不了可见形变。
+  void followFast(double deltaSeconds) {
+    if (_seedFast) {
+      fastLow = low;
+      fastMid = mid;
+      fastHigh = high;
+      _seedFast = false;
+      return;
+    }
+    if (!deltaSeconds.isFinite || deltaSeconds <= 0) return;
+    fastLow = _follow(fastLow, low, deltaSeconds, .07, .28);
+    fastMid = _follow(fastMid, mid, deltaSeconds, .07, .28);
+    fastHigh = _follow(fastHigh, high, deltaSeconds, .07, .28);
+  }
+
+  static double _follow(
+    double current,
+    double target,
+    double deltaSeconds,
+    double attack,
+    double release,
+  ) {
+    final tau = target > current ? attack : release;
+    return current + (target - current) * (1 - exp(-deltaSeconds / tau));
+  }
+
+  /// 切歌保留慢电平、位移、速度和当前鼓点，只重建检测，避免画面从零重新爬。
+  void resetForTrackChange() {
+    awaitingPlaybackSpectrum = true;
   }
 
   void reset() {
@@ -896,9 +1133,13 @@ class _FlowAudioState {
     mid = 0.0;
     high = 0.0;
     motionSpeed = 1.0;
-    _onset = 0.0;
-    _previousEnergy = 0.0;
-    _skipOnset = false;
+    slowLow = 0.0;
+    slowMid = 0.0;
+    slowHigh = 0.0;
+    fastLow = 0.0;
+    fastMid = 0.0;
+    fastHigh = 0.0;
+    beat = 0.0;
     awaitingPlaybackSpectrum = false;
   }
 }
@@ -959,12 +1200,11 @@ class _FlowingLightPainter extends CustomPainter {
     required this.motion,
     required this.transitionClock,
     required this.audio,
-    required this.blurHandle,
     required ValueNotifier<int> repaint,
   }) : super(repaint: repaint);
 
-  ui.Image? coverImage;
-  ui.Image? previousCoverImage;
+  _CoverTextures? cover;
+  _CoverTextures? previousCover;
   Color coverBaseColor = _kDarkNeutralBackground;
   Color previousCoverBaseColor = _kDarkNeutralBackground;
   double previousMotionTime = 0;
@@ -973,7 +1213,6 @@ class _FlowingLightPainter extends CustomPainter {
   bool audioReactiveFlow = false;
   final _FlowAudioState audio;
   _FlowingLightVisualStyle style = _kDarkFlowingLightStyle;
-  final _BlurFilterHandle blurHandle;
 
   static const _artworkCurve = Cubic(0, 0, 0.3, 1);
   late final ui.Paint _coverPaint = ui.Paint()
@@ -1014,7 +1253,7 @@ class _FlowingLightPainter extends CustomPainter {
   double get _motionTime => motion.time;
 
   double get _transitionProgress {
-    if (previousCoverImage == null) return 1;
+    if (previousCover == null) return 1;
     final linear =
         transitionClock.elapsedMicroseconds /
         _kArtworkTransitionDuration.inMicroseconds;
@@ -1023,16 +1262,18 @@ class _FlowingLightPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    _compositePaint.imageFilter = blurHandle.filter;
-    final low = audioReactiveFlow ? audio.low : 0.0;
-    final high = audioReactiveFlow ? audio.high : 0.0;
+    final slowHigh = audioReactiveFlow ? audio.slowHigh : 0.0;
     _coverPaint.colorFilter = _colorFilterFor(
       style.artworkSaturation +
-          (audioReactiveFlow ? audioReactiveFlowSaturationBoost(high) : 0.0),
+          (audioReactiveFlow
+              ? audioReactiveFlowSaturationBoost(
+                  slowHigh * .6 + audio.fastHigh * .4,
+                )
+              : 0.0),
       style.blackScrim,
-      audioReactiveFlow ? audioReactiveFlowContrast(low) : 1.0,
+      audioReactiveFlow ? audioReactiveFlowContrast(audio.slowLow) : 1.0,
     );
-    final previous = previousCoverImage;
+    final previous = previousCover;
     if (previous != null) {
       _drawFrame(
         canvas,
@@ -1046,7 +1287,7 @@ class _FlowingLightPainter extends CustomPainter {
     _drawFrame(
       canvas,
       size,
-      coverImage,
+      cover,
       coverBaseColor,
       _motionTime,
       _transitionProgress,
@@ -1057,26 +1298,57 @@ class _FlowingLightPainter extends CustomPainter {
   void _drawFrame(
     Canvas canvas,
     Size size,
-    ui.Image? image,
+    _CoverTextures? textures,
     Color baseColor,
     double time,
     double opacity,
   ) {
-    if (image == null || opacity <= 0) return;
-    final low = audioReactiveFlow ? audio.low : 0.0;
-    final mid = audioReactiveFlow ? audio.mid : 0.0;
-    final high = audioReactiveFlow ? audio.high : 0.0;
+    if (textures == null || opacity <= 0) return;
+    final slowLow = audioReactiveFlow ? audio.slowLow : 0.0;
+    final slowMid = audioReactiveFlow ? audio.slowMid : 0.0;
+    final slowHigh = audioReactiveFlow ? audio.slowHigh : 0.0;
+    // 主封面层的位移走慢电平。
+    final motionLow = slowLow;
+    final motionMid = slowMid;
+    final motionHigh = slowHigh;
+    // 快通道只推柔性层，主封面层继续走慢电平。
+    final fastLow = audioReactiveFlow ? audio.fastLow : 0.0;
+    final fastMid = audioReactiveFlow ? audio.fastMid : 0.0;
+    final fastHigh = audioReactiveFlow ? audio.fastHigh : 0.0;
     final zoom = audioReactiveFlow
-        ? (audioReactiveFlowSpectrumScale(low, mid) + audio.onset * 0.08)
-              .clamp(1.0, 1.48)
-              .toDouble()
+        ? audioReactiveFlowZoom(
+            slowLow: slowLow,
+            slowMid: slowMid,
+            beat: audio.beat,
+          )
         : 1.0;
+    final localBeat = audioReactiveFlow ? audio.beat : 0.0;
+    // 主封面只吃很小的一下，给视觉焦点一点张力，不做整屏鼓点缩放。
+    final primaryBeatScale = audioReactiveFlowLayerScale(
+      beat: localBeat,
+      maximumIncrease: audioReactiveFlowPrimaryLayerMaxIncrease,
+    );
+    // 鼓点同时推两个柔性层的位移，和缩放一起把同一下铺开。
+    final secondaryBeatOffset = audioReactiveFlowBeatOffset(
+      beat: localBeat,
+      maximumOffset: audioReactiveFlowSecondaryLayerBeatOffset,
+    );
+    final lightBeatOffset = audioReactiveFlowBeatOffset(
+      beat: localBeat,
+      maximumOffset: audioReactiveFlowLightLayerBeatOffset,
+    );
     final cycle2 = time / _kCoverPeriod2 * 2 * pi;
     final secondaryOffset = Offset(
-      _kSecondaryOffset.dx + cos(-cycle2 * 0.5) * _kSecondaryOrbit - mid * 0.02,
+      _kSecondaryOffset.dx +
+          cos(-cycle2 * 0.5) * _kSecondaryOrbit -
+          motionMid * 0.02 -
+          fastMid * 0.006 +
+          secondaryBeatOffset,
       _kSecondaryOffset.dy +
           sin(-cycle2 * 0.5) * _kSecondaryOrbit +
-          low * 0.015,
+          motionLow * 0.015 +
+          fastLow * 0.006 -
+          secondaryBeatOffset * 0.8,
     );
     _compositePaint.color = const Color(
       0xFFFFFFFF,
@@ -1093,38 +1365,57 @@ class _FlowingLightPainter extends CustomPainter {
     _drawCoverLayer(
       canvas,
       size,
-      image,
+      textures.primary,
       time: time,
       period: _kCoverPeriod1,
       offset: Offset(
-        _kPrimaryOffset.dx + low * 0.01,
-        _kPrimaryOffset.dy - low * 0.008,
+        _kPrimaryOffset.dx + motionLow * 0.01,
+        _kPrimaryOffset.dy - motionLow * 0.008,
       ),
       alpha: _kPrimaryLayerAlpha,
-      scaleMul: _kPrimaryScaleMul,
+      scaleMul: _kPrimaryScaleMul * primaryBeatScale,
+      padding: textures.padding,
     );
     _drawCoverLayer(
       canvas,
       size,
-      image,
+      textures.soft,
       time: time,
       period: _kCoverPeriod2,
       offset: secondaryOffset,
       alpha: _kSecondaryLayerAlpha,
-      scaleMul: _kSecondaryScaleMul,
+      scaleMul:
+          _kSecondaryScaleMul *
+          audioReactiveFlowLayerScale(
+            beat: localBeat,
+            maximumIncrease: audioReactiveFlowSecondaryLayerMaxIncrease,
+          ),
+      padding: textures.padding,
     );
     _drawCoverLayer(
       canvas,
       size,
-      image,
+      textures.soft,
       time: time,
       period: _kCoverPeriod3,
       offset: Offset(
-        _kLightOffset.dx + high * 0.015,
-        _kLightOffset.dy - low * 0.02,
+        _kLightOffset.dx +
+            motionHigh * 0.015 +
+            fastHigh * 0.015 -
+            lightBeatOffset,
+        _kLightOffset.dy -
+            motionLow * 0.02 -
+            fastLow * 0.015 +
+            lightBeatOffset * 0.8,
       ),
       alpha: _kLightLayerAlpha,
-      scaleMul: _kLightScaleMul,
+      scaleMul:
+          _kLightScaleMul *
+          audioReactiveFlowLayerScale(
+            beat: localBeat,
+            maximumIncrease: audioReactiveFlowLightLayerMaxIncrease,
+          ),
+      padding: textures.padding,
       phase: pi,
     );
     canvas.restore();
@@ -1146,14 +1437,18 @@ class _FlowingLightPainter extends CustomPainter {
     required Offset offset,
     required int alpha,
     required double scaleMul,
+    required int padding,
     double phase = 0.0,
   }) {
     final cycle = time / period * 2 * pi;
     final imageW = image.width.toDouble();
     final imageH = image.height.toDouble();
+    // 纹理四周留了透明边，缩放要按去掉边距后的内容尺寸算。
+    final contentW = imageW - padding * 2;
+    final contentH = imageH - padding * 2;
     final longest = max(size.width, size.height);
     final coverScale =
-        longest / max(max(imageW, imageH), 1.0) * scaleMul * _kOverscan;
+        longest / max(max(contentW, contentH), 1.0) * scaleMul * _kOverscan;
     final center = Offset(
       size.width * 0.5 + size.width * offset.dx,
       size.height * 0.5 + size.height * offset.dy,
@@ -1186,15 +1481,14 @@ class _FlowingLightPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _FlowingLightPainter oldDelegate) {
-    return !identical(oldDelegate.coverImage, coverImage) ||
-        !identical(oldDelegate.previousCoverImage, previousCoverImage) ||
+    return !identical(oldDelegate.cover, cover) ||
+        !identical(oldDelegate.previousCover, previousCover) ||
         oldDelegate.coverBaseColor != coverBaseColor ||
         oldDelegate.previousCoverBaseColor != previousCoverBaseColor ||
         oldDelegate.previousMotionTime != previousMotionTime ||
         oldDelegate.audioReactiveFlow != audioReactiveFlow ||
         !identical(oldDelegate.audio, audio) ||
-        oldDelegate.style != style ||
-        !identical(oldDelegate.blurHandle, blurHandle);
+        oldDelegate.style != style;
   }
 
   @override
