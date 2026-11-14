@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:pure_music/component/settings_tile.dart';
 import 'package:pure_music/core/design_tokens.dart';
+import 'package:pure_music/core/enums.dart';
+import 'package:pure_music/core/preference.dart';
+import 'package:pure_music/core/log/app_log.dart';
 import 'package:pure_music/play_service/sleep_timer.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
@@ -76,6 +81,58 @@ class _SleepTimerDialogState extends State<SleepTimerDialog> {
         action: Switch(
           value: _timer.autoExtendNotifier.value,
           onChanged: (v) => setState(() => _timer.autoExtendNotifier.value = v),
+        ),
+      ),
+      const SizedBox(height: 8),
+      SettingsTile(
+        description: '到点后',
+        subtitle: '先淡出 8 秒再执行',
+        action: SegmentedButton<SleepTimerAction>(
+          showSelectedIcon: false,
+          segments: const [
+            ButtonSegment(
+              value: SleepTimerAction.pause,
+              label: Text('暂停'),
+            ),
+            ButtonSegment(
+              value: SleepTimerAction.stop,
+              label: Text('停止'),
+            ),
+            ButtonSegment(
+              value: SleepTimerAction.quit,
+              label: Text('退出'),
+            ),
+          ],
+          selected: {AppPreference.instance.playbackPref.sleepTimerAction},
+          onSelectionChanged: (selection) {
+            if (selection.isEmpty) return;
+            final value = selection.first;
+            try {
+              setState(() {
+                AppPreference.instance.playbackPref.sleepTimerAction = value;
+              });
+              unawaited(
+                AppPreference.instance.save().then(
+                  (_) {},
+                  onError: (Object err, StackTrace trace) {
+                    log.settings.warn(
+                      'sleep-timer',
+                      '保存睡眠定时到点动作失败 action=${value.name}',
+                      error: err,
+                      stackTrace: trace,
+                    );
+                  },
+                ),
+              );
+            } catch (err, trace) {
+              log.settings.warn(
+                'sleep-timer',
+                '设置睡眠定时到点动作失败 action=${value.name}',
+                error: err,
+                stackTrace: trace,
+              );
+            }
+          },
         ),
       ),
     ];

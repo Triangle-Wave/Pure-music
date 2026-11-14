@@ -24,6 +24,7 @@ class PlaybackPreference {
   TransitionMode transitionMode;
   int transitionFadeOutMs;
   int transitionFadeInMs;
+  SleepTimerAction sleepTimerAction;
   String dsdPlaybackMode;
   bool dsdPlaybackModeMigratedToDsf;
   int sacdPcmSampleRate;
@@ -85,6 +86,7 @@ class PlaybackPreference {
     this.transitionMode = TransitionMode.seamless,
     this.transitionFadeOutMs = 300,
     this.transitionFadeInMs = 200,
+    this.sleepTimerAction = SleepTimerAction.pause,
     this.dsdPlaybackMode = dsdPlaybackModeDsf,
     this.dsdPlaybackModeMigratedToDsf = true,
     this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
@@ -151,6 +153,7 @@ class PlaybackPreference {
     'transitionMode': transitionMode.name,
     'transitionFadeOutMs': transitionFadeOutMs,
     'transitionFadeInMs': transitionFadeInMs,
+    'sleepTimerAction': sleepTimerAction.name,
     'dsdPlaybackMode': dsdPlaybackMode,
     'dsdPlaybackModeMigratedToDsf': dsdPlaybackModeMigratedToDsf,
     'sacdPcmSampleRate': sacdPcmSampleRate,
@@ -199,6 +202,11 @@ class PlaybackPreference {
       transitionMode: transition.mode,
       transitionFadeOutMs: transition.fadeOutMs,
       transitionFadeInMs: transition.fadeInMs,
+      sleepTimerAction:
+          SleepTimerAction.fromString(
+            _normalizedString(map['sleepTimerAction']),
+          ) ??
+          SleepTimerAction.pause,
       dsdPlaybackMode: _dsdPlaybackModeFromMap(map),
       dsdPlaybackModeMigratedToDsf: true,
       sacdPcmSampleRate: _sacdPcmSampleRateFromStored(

@@ -418,6 +418,13 @@ class BassPlayer {
   double _pauseFadeGain = 1.0;
   static const int _pauseFadeMs = 150;
 
+  /// 睡眠定时到点前的输出增益，与暂停淡出的 [_pauseFadeGain] 独立，
+  /// 两者在 [_applyPlaybackGains] 中相乘合并。
+  double _sleepFadeGain = 1.0;
+  Timer? _sleepFadeTimer;
+  /// 取消淡出时把 [_sleepFadeGain] 平滑恢复到 1.0，避免增益突变产生爆音。
+  Timer? _sleepFadeRestoreTimer;
+
   /// 淡出旧流时延迟释放资源的定时器
   Timer? _fadeOutTimer;
   int? _fadeOutHandle;
@@ -1793,6 +1800,12 @@ class BassPlayer {
 
   void _resetBassHandles() {
     _cancelPendingPause();
+    _sleepFadeTimer?.cancel();
+    _sleepFadeTimer = null;
+    _sleepFadeRestoreTimer?.cancel();
+    _sleepFadeRestoreTimer = null;
+    // BASS_Free 后原生句柄失效，仅复位增益变量，不对失效句柄写入。
+    _sleepFadeGain = 1.0;
     _cancelOutputGainFade(keepTarget: true);
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
@@ -2942,18 +2955,19 @@ class BassPlayer {
   void _applyPlaybackGains() {
     final current = _fstream;
     if (current == null) return;
+    final fadeGain = _pauseFadeGain * _sleepFadeGain;
     if (_mixerStream == null || wasapiExclusive || _streamWasapiExclusive) {
       _bass.BASS_ChannelSetAttribute(
         current,
         bass.BASS_ATTRIB_VOLDSP,
-        _baseOutputVolume * _pauseFadeGain * _sourceGain(_replayGainDb),
+        _baseOutputVolume * fadeGain * _sourceGain(_replayGainDb),
       );
       return;
     }
     _bass.BASS_ChannelSetAttribute(
       _mixerStream!,
       bass.BASS_ATTRIB_VOLDSP,
-      _baseOutputVolume * _pauseFadeGain,
+      _baseOutputVolume * fadeGain,
     );
     _applySourceGain(current, _replayGainDb);
     final queued = _queuedStream;
@@ -4074,6 +4088,183 @@ class BassPlayer {
     _replayGainDb = replayGainDb;
     _applyPlaybackGains();
     return true;
+  }
+
+  /// 睡眠定时淡出：把输出增益在 [duration] 内线性降到 0，不改变用户音量。
+  void fadeOutForSleep(Duration duration) {
+    _sleepFadeTimer?.cancel();
+    _sleepFadeTimer = null;
+    _sleepFadeRestoreTimer?.cancel();
+    _sleepFadeRestoreTimer = null;
+    final totalMs = duration.inMilliseconds;
+    if (totalMs <= 0) {
+      try {
+        _sleepFadeGain = 0.0;
+        _applyPlaybackGains();
+      } catch (err, trace) {
+        log.bass.warn(
+          'sleep-timer',
+          '睡眠定时淡出增益写入失败',
+          error: err,
+          stackTrace: trace,
+        );
+      }
+      return;
+    }
+    const stepMs = 100;
+    final steps = (totalMs / stepMs).ceil().clamp(1, 1000);
+    var step = 0;
+    try {
+      _sleepFadeTimer = Timer.periodic(const Duration(milliseconds: stepMs), (
+        timer,
+      ) {
+        step++;
+        try {
+          _sleepFadeGain = (1.0 - step / steps).clamp(0.0, 1.0);
+          _applyPlaybackGains();
+        } catch (err, trace) {
+          log.bass.warn(
+            'sleep-timer',
+            '睡眠定时淡出步进失败 step=$step/$steps',
+            error: err,
+            stackTrace: trace,
+          );
+          timer.cancel();
+          _sleepFadeTimer = null;
+          return;
+        }
+        if (step < steps) return;
+        timer.cancel();
+        _sleepFadeTimer = null;
+      });
+    } catch (err, trace) {
+      log.bass.warn(
+        'sleep-timer',
+        '睡眠定时淡出定时器创建失败 duration=${duration.inMilliseconds}ms',
+        error: err,
+        stackTrace: trace,
+      );
+      _sleepFadeTimer = null;
+      try {
+        _sleepFadeGain = 0.0;
+        _applyPlaybackGains();
+      } catch (gainErr, gainTrace) {
+        log.bass.warn(
+          'sleep-timer',
+          '睡眠定时淡出降级写增益失败',
+          error: gainErr,
+          stackTrace: gainTrace,
+        );
+      }
+    }
+  }
+
+  /// 动作执行完成、音频已物理暂停无声后，复位睡眠淡出增益到满音量。
+  /// 同时停止淡出与恢复定时器，避免与 8 秒末帧同刻触发时残留步进再次写入增益；
+  /// 不改动其它播放状态，复位发生在无声状态，不产生音量突变。
+  void resetSleepFadeGain() {
+    _sleepFadeTimer?.cancel();
+    _sleepFadeTimer = null;
+    _sleepFadeRestoreTimer?.cancel();
+    _sleepFadeRestoreTimer = null;
+    try {
+      _sleepFadeGain = 1.0;
+      _applyPlaybackGains();
+    } catch (err, trace) {
+      log.bass.warn(
+        'sleep-timer',
+        '复位睡眠定时淡出增益失败',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+  }
+
+  /// 取消睡眠定时淡出并把输出增益在短时间内平滑恢复到用户音量，
+  /// 避免淡出进行中直接拉回满音量产生爆音。
+  void cancelSleepFade() {
+    _sleepFadeTimer?.cancel();
+    _sleepFadeTimer = null;
+    _sleepFadeRestoreTimer?.cancel();
+    _sleepFadeRestoreTimer = null;
+    final start = _sleepFadeGain.isFinite
+        ? _sleepFadeGain.clamp(0.0, 1.0)
+        : 1.0;
+    if (start >= 1.0) {
+      try {
+        _sleepFadeGain = 1.0;
+        _applyPlaybackGains();
+      } catch (err, trace) {
+        log.bass.warn(
+          'sleep-timer',
+          '取消睡眠定时淡出复位满增益失败',
+          error: err,
+          stackTrace: trace,
+        );
+      }
+      return;
+    }
+    const stepMs = 20;
+    const steps = 10;
+    var step = 0;
+    try {
+      _sleepFadeRestoreTimer = Timer.periodic(
+        const Duration(milliseconds: stepMs),
+        (timer) {
+          step++;
+          try {
+            if (step >= steps) {
+              _sleepFadeGain = 1.0;
+              timer.cancel();
+              _sleepFadeRestoreTimer = null;
+            } else {
+              _sleepFadeGain = (start + (1.0 - start) * (step / steps))
+                  .clamp(0.0, 1.0);
+            }
+            _applyPlaybackGains();
+          } catch (err, trace) {
+            log.bass.warn(
+              'sleep-timer',
+              '取消睡眠定时淡出时恢复增益步进失败 step=$step/$steps',
+              error: err,
+              stackTrace: trace,
+            );
+            timer.cancel();
+            _sleepFadeRestoreTimer = null;
+            try {
+              _sleepFadeGain = 1.0;
+              _applyPlaybackGains();
+            } catch (gainErr, gainTrace) {
+              log.bass.warn(
+                'sleep-timer',
+                '取消睡眠定时淡出降级复位增益失败',
+                error: gainErr,
+                stackTrace: gainTrace,
+              );
+            }
+          }
+        },
+      );
+    } catch (err, trace) {
+      log.bass.warn(
+        'sleep-timer',
+        '取消睡眠定时淡出恢复定时器创建失败',
+        error: err,
+        stackTrace: trace,
+      );
+      _sleepFadeRestoreTimer = null;
+      try {
+        _sleepFadeGain = 1.0;
+        _applyPlaybackGains();
+      } catch (gainErr, gainTrace) {
+        log.bass.warn(
+          'sleep-timer',
+          '取消睡眠定时淡出降级复位增益失败',
+          error: gainErr,
+          stackTrace: gainTrace,
+        );
+      }
+    }
   }
 
   /// true: 操作成功；false: 操作失败
@@ -5216,6 +5407,20 @@ class BassPlayer {
     }
   }
 
+  /// 睡眠定时动作专用同步暂停：淡出结束时输出已经静音，立即物理暂停，
+  /// 避免异步暂停淡出期间复位输出增益造成声音回弹；不启动 [_pauseFadeTimer]。
+  void pauseForSleepTimer() {
+    if (_fstream == null) return;
+    _cancelPendingPause();
+    if (wasapiExclusive) {
+      _logAudioState('pause(sleep-timer)');
+      _pauseWasapiExclusive();
+      return;
+    }
+    _logAudioState('pause(sleep-timer)');
+    _pauseSharedImmediate();
+  }
+
   void _startWasapiPauseFade() {
     _pauseFadeHandle = _fstream;
     _playerStateStreamController.add(PlayerState.paused);
@@ -5512,6 +5717,11 @@ class BassPlayer {
     _pendingOutputRestore = null;
     _cancelPendingPause();
     _cancelOutputGainFade(keepTarget: true);
+    _sleepFadeTimer?.cancel();
+    _sleepFadeTimer = null;
+    _sleepFadeRestoreTimer?.cancel();
+    _sleepFadeRestoreTimer = null;
+    _sleepFadeGain = 1.0;
     _fadeInTimer?.cancel();
     _fadeInTimer = null;
     _cancelEqSmoothing();

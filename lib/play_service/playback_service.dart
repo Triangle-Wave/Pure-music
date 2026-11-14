@@ -28,6 +28,7 @@ import 'package:pure_music/native/rust/api/tag_reader.dart' as rust_tag_reader;
 import 'package:pure_music/native/rust/api/library_db.dart' as rust_library_db;
 import 'package:pure_music/native/rust/api/smart_transition.dart' as rust_smart;
 import 'package:pure_music/core/sleep_blocker.dart';
+import 'package:pure_music/core/window_lifecycle.dart';
 import 'package:pure_music/core/log/playback_log.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/theme.dart';
@@ -93,6 +94,9 @@ class PlaybackService extends ChangeNotifier {
   int _lastNowPlayingChangedMs = 0;
   Timer? _smtcPositionTimer;
   Timer? _smtcKeepAliveTimer;
+  Timer? _sleepTimerActionTimer;
+  /// 睡眠定时淡出与待执行动作的有效期，避免动作自身的内部调用误取消。
+  bool _sleepTimerActionPending = false;
   final Set<Timer> _positionSyncBurstTimers = {};
   int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
@@ -385,7 +389,10 @@ class PlaybackService extends ChangeNotifier {
   }
 
   void _bindSleepTimer() {
-    SleepTimerService.instance.setOnExpired(_pauseForSleepTimer);
+    SleepTimerService.instance.setOnExpired(_handleSleepTimerExpired);
+    SleepTimerService.instance.stateNotifier.addListener(
+      _onSleepTimerStateChanged,
+    );
     SleepTimerService.instance.setOnEnterExtending(
       _abortQueuedTransitionsForSleepTimer,
     );
@@ -1293,13 +1300,136 @@ class PlaybackService extends ChangeNotifier {
     _pendingGaplessTransition = null;
   }
 
+  static const _sleepFadeDuration = Duration(seconds: 8);
+
+  void _handleSleepTimerExpired() {
+    if (_closed) return;
+    // 取值失败时以非破坏性的暂停动作降级，避免异常导致误退出应用。
+    var action = SleepTimerAction.pause;
+    try {
+      _abortQueuedTransitionsForSleepTimer();
+      action = _pref.sleepTimerAction;
+      final playing =
+          _player.playerState == PlayerState.playing ||
+          _player.playerState == PlayerState.stalled;
+      if (!playing) {
+        _applySleepTimerAction(action);
+        return;
+      }
+      _player.fadeOutForSleep(_sleepFadeDuration);
+      _sleepTimerActionTimer?.cancel();
+      _sleepTimerActionPending = true;
+      final pendingAction = action;
+      _sleepTimerActionTimer = Timer(_sleepFadeDuration, () {
+        _sleepTimerActionTimer = null;
+        _sleepTimerActionPending = false;
+        _applySleepTimerAction(pendingAction);
+      });
+    } catch (err, trace) {
+      log.playback.error(
+        'legacy',
+        '睡眠定时到点处理失败 action=${action.name}',
+        error: err,
+        stackTrace: trace,
+      );
+      try {
+        _applySleepTimerAction(action);
+      } catch (fallbackErr, fallbackTrace) {
+        log.playback.error(
+          'legacy',
+          '睡眠定时降级直接执行动作失败 action=${action.name}',
+          error: fallbackErr,
+          stackTrace: fallbackTrace,
+        );
+      }
+    }
+  }
+
+  void _applySleepTimerAction(SleepTimerAction action) {
+    if (_closed) return;
+    try {
+      switch (action) {
+        case SleepTimerAction.pause:
+          _pauseForSleepTimer();
+        case SleepTimerAction.stop:
+          _pauseForSleepTimer();
+          seek(0);
+        case SleepTimerAction.quit:
+          unawaited(WindowLifecycleService.instance.exitApp());
+      }
+    } catch (err, trace) {
+      log.playback.error(
+        'legacy',
+        '睡眠定时动作执行失败 action=${action.name}',
+        error: err,
+        stackTrace: trace,
+      );
+    } finally {
+      _resetSleepFadeGainForAction(action);
+    }
+  }
+
+  /// 动作完成、音频无声后复位睡眠淡出增益；退出动作不处理，应用即将关闭。
+  void _resetSleepFadeGainForAction(SleepTimerAction action) {
+    if (action == SleepTimerAction.quit) return;
+    try {
+      _player.resetSleepFadeGain();
+    } catch (err, trace) {
+      log.playback.warn(
+        'legacy',
+        '睡眠定时动作复位淡出增益失败 action=${action.name}',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+  }
+
+  /// 取消待执行的睡眠定时动作并平滑恢复淡出增益。仅在淡出与动作有效期内生效，
+  /// 淡出期外作为轻量空操作，避免用户常规操作触发多余的播放器跨层调用。
+  void _cancelSleepTimerAction() {
+    final hadPendingAction = _sleepTimerActionPending;
+    _sleepTimerActionTimer?.cancel();
+    _sleepTimerActionTimer = null;
+    _sleepTimerActionPending = false;
+    if (!hadPendingAction) return;
+    try {
+      _player.cancelSleepFade();
+    } catch (err, trace) {
+      log.playback.warn(
+        'legacy',
+        '取消睡眠定时淡出失败',
+        error: err,
+        stackTrace: trace,
+      );
+      try {
+        _player.resetSleepFadeGain();
+      } catch (resetErr, resetTrace) {
+        log.playback.error(
+          'legacy',
+          '取消睡眠定时淡出后兜底复位增益失败',
+          error: resetErr,
+          stackTrace: resetTrace,
+        );
+      }
+    }
+  }
+
+  /// 到点后的 idle/extending 转移不取消动作：[_handleSleepTimerExpired] 在 idle
+  /// 转移之后才触发，取消会误杀刚要执行的动作。淡出期内的用户主动暂停/切歌/停止
+  /// 在各自入口直接调用 [_cancelSleepTimerAction]；新定时 counting 转移仍取消残留动作。
+  void _onSleepTimerStateChanged() {
+    if (SleepTimerService.instance.state == SleepTimerState.counting) {
+      _cancelSleepTimerAction();
+    }
+  }
+
   void _pauseForSleepTimer() {
     try {
       log.playback.debug('legacy', '[action] pauseForSleepTimer');
       _abortQueuedTransitionsForSleepTimer();
       if (_player.playerState == PlayerState.playing ||
           _player.playerState == PlayerState.stalled) {
-        _player.pause();
+        _player.pauseForSleepTimer();
       }
       unawaited(_smtc.updateState(SMTCState.paused));
       playService.desktopLyricService.canSendMessage.then((canSend) {
@@ -1582,6 +1712,7 @@ class PlaybackService extends ChangeNotifier {
     bool reportFailure = true,
   }) async {
     if (audioIndex < 0 || audioIndex >= playlist.length) return false;
+    _cancelSleepTimerAction();
     final audio = playlist[audioIndex];
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
@@ -2439,6 +2570,7 @@ class PlaybackService extends ChangeNotifier {
   void clearQueue() {
     log.playback.debug('legacy', '[action] clearQueue');
     AudioEchoLogRecorder.instance.mark('clearQueue');
+    _cancelSleepTimerAction();
     _synchronizeGaplessTransition();
     _songChangeTasks.begin();
     _cancelSongChangeTasks();
@@ -2857,6 +2989,7 @@ class PlaybackService extends ChangeNotifier {
   void nextAudio() {
     log.playback.debug('legacy', '[action] nextAudio');
     AudioEchoLogRecorder.instance.mark('nextAudio');
+    _cancelSleepTimerAction();
     final origin = _captureOrigin();
     _nextAudioLoop(reason: 'user.next', origin: origin);
   }
@@ -2866,6 +2999,7 @@ class PlaybackService extends ChangeNotifier {
     log.playback.debug('legacy', '[action] lastAudio');
     AudioEchoLogRecorder.instance.mark('lastAudio');
     if (_playlistIndex == null) return;
+    _cancelSleepTimerAction();
     final origin = _captureOrigin();
     _synchronizeGaplessTransition();
 
@@ -2886,6 +3020,7 @@ class PlaybackService extends ChangeNotifier {
     try {
       log.playback.debug('legacy', '[action] pause');
       AudioEchoLogRecorder.instance.mark('pause');
+      _cancelSleepTimerAction();
       _synchronizeGaplessTransition();
       _player.pause();
       _rebuildGaplessPreparation();
@@ -2906,6 +3041,7 @@ class PlaybackService extends ChangeNotifier {
     try {
       log.playback.debug('legacy', '[action] start');
       AudioEchoLogRecorder.instance.mark('start');
+      _cancelSleepTimerAction();
       _synchronizeGaplessTransition();
       _player.start();
       _rebuildGaplessPreparation();
@@ -2981,6 +3117,9 @@ class PlaybackService extends ChangeNotifier {
 
   Future<void> close() async {
     _closed = true;
+    _sleepTimerActionTimer?.cancel();
+    _sleepTimerActionTimer = null;
+    _sleepTimerActionPending = false;
     _sacdPcmJobs.clear();
     _sacdPcmQueued.clear();
     SleepBlocker.instance.unblock();
@@ -3050,6 +3189,11 @@ class PlaybackService extends ChangeNotifier {
   }
 
   void _disposePlaybackNotifiers() {
+    _sleepTimerActionTimer?.cancel();
+    _sleepTimerActionTimer = null;
+    SleepTimerService.instance.stateNotifier.removeListener(
+      _onSleepTimerStateChanged,
+    );
     try {
       _wasapiExclusive.dispose();
     } catch (_) {}
