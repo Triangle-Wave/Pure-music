@@ -1685,7 +1685,18 @@ class PlaybackService extends ChangeNotifier {
     _resetListenAccumulator(audio.duration.toDouble());
     unawaited(audio.loadSmallCoverBytes());
     playService.desktopLyricService.sendNowPlayingMessage(audio);
-    playService.lyricService.updateLyric();
+    // 歌词刷新异常降级为告警，不影响歌曲发布结果。
+    try {
+      playService.lyricService.updateLyric();
+    } catch (err, trace) {
+      log.lyric.warn(
+        'lyric.refresh',
+        '刷新歌词失败',
+        fields: {'title': audio.title},
+        error: err,
+        stackTrace: trace,
+      );
+    }
     _playerState.value = state;
     unawaited(
       _smtc.updateDisplay(

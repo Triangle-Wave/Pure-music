@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:pure_music/core/log/app_log.dart' show log;
 import 'package:pure_music/services/online_lyric/api/lyric_request_scheduler.dart';
 
 const _kgSearchUrl = 'https://mobilecdn.kugou.com/api/v3/search/song';
@@ -36,28 +38,100 @@ const _kgApiHeaders = {
 final _networkRequestScopeKey = Object();
 const int _maxNetworkResponseBytes = 8 * 1024 * 1024;
 
-class _NetworkRequestScope {
-  final _clients = <HttpClient>{};
+/// 遍历客户端集合的快照并关闭；关闭期间对原集合的增删不影响本次迭代，
+/// 关闭异常与处理回调异常均降级后继续，集合在结束时清空。
+@visibleForTesting
+void closeNetworkClients<T>(
+  Set<T> clients, {
+  required void Function(T client) closeClient,
+  required void Function(Object error, StackTrace trace) onCloseError,
+}) {
+  try {
+    for (final client in clients.toList()) {
+      try {
+        closeClient(client);
+      } catch (error, trace) {
+        try {
+          onCloseError(error, trace);
+        } catch (callbackError, callbackTrace) {
+          log.onlineLyric.warn(
+            'isolate.client.close.error_handler',
+            '关闭网络客户端的错误处理回调失败',
+            fields: {'clientErrorType': error.runtimeType.toString()},
+            error: callbackError,
+            stackTrace: callbackTrace,
+          );
+        }
+      }
+    }
+  } finally {
+    clients.clear();
+  }
+}
+
+/// 在作用域生命周期内登记并统一关闭网络客户端。
+@visibleForTesting
+class NetworkRequestScope<T> {
+  NetworkRequestScope(this._closeClient, this._onCloseError);
+
+  final _clients = <T>{};
+  final void Function(T client) _closeClient;
+  final void Function(Object error, StackTrace trace) _onCloseError;
   var _closed = false;
 
-  void add(HttpClient client) {
+  void add(T client) {
     if (_closed) {
-      client.close(force: true);
+      try {
+        _closeClient(client);
+      } catch (error, trace) {
+        _onCloseError(error, trace);
+      }
       return;
     }
     _clients.add(client);
   }
 
-  void remove(HttpClient client) {
+  void remove(T client) {
     _clients.remove(client);
   }
 
   void close() {
+    if (_closed) return;
     _closed = true;
-    for (final client in _clients) {
-      client.close(force: true);
-    }
-    _clients.clear();
+    closeNetworkClients<T>(
+      _clients,
+      closeClient: _closeClient,
+      onCloseError: _onCloseError,
+    );
+  }
+}
+
+class _NetworkRequestScope {
+  _NetworkRequestScope()
+    : _scope = NetworkRequestScope<HttpClient>(
+        _closeHttpClient,
+        _onCloseHttpClientError,
+      );
+
+  final NetworkRequestScope<HttpClient> _scope;
+
+  void add(HttpClient client) => _scope.add(client);
+
+  void remove(HttpClient client) => _scope.remove(client);
+
+  void close() => _scope.close();
+
+  static void _closeHttpClient(HttpClient client) {
+    client.close(force: true);
+  }
+
+  static void _onCloseHttpClientError(Object error, StackTrace trace) {
+    log.onlineLyric.warn(
+      'isolate.client.close',
+      '关闭在线歌词网络客户端失败',
+      error: error,
+      stackTrace: trace,
+    );
   }
 }
 
