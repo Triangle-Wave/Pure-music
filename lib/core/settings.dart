@@ -325,6 +325,7 @@ class AppSettings {
   bool windowAlwaysOnTop = false;
   bool preventSleepOnNowPlaying = false;
   bool rememberPlaybackPosition = false;
+  String lastSearchQuery = '';
 
   ProxyMode proxyMode = ProxyMode.system;
   String proxyHost = '';
@@ -885,6 +886,8 @@ class AppSettings {
     _instance.midiSoundfontPath = normalizedPathSetting(
       settingsMap['MidiSoundfontPath'],
     );
+    _instance.lastSearchQuery =
+        normalizedStringSetting(settingsMap['LastSearchQuery']) ?? '';
   }
 
   static void _readDesktopLyricVisibilitySettings(
@@ -1328,6 +1331,7 @@ class AppSettings {
     'PreventSleepOnNowPlaying': preventSleepOnNowPlaying,
     'RememberPlaybackPosition': rememberPlaybackPosition,
     'MidiSoundfontPath': midiSoundfontPath,
+    'LastSearchQuery': lastSearchQuery,
   };
 
   Map<String, Object?> _networkProxySettingsMap() => {

@@ -154,4 +154,112 @@ void main() {
 
     expect(UnionSearchResult.search('告白').audios.length, 1);
   });
+
+  test('search without scope returns music artist and album together', () {
+    AudioLibrary.instance.audioCollection = [
+      _audio('告白', r'C:\Music\a.mp3'),
+    ];
+    AudioLibrary.instance.artistCollection = {
+      '告白': Artist(name: '告白'),
+    };
+    AudioLibrary.instance.albumCollection = {
+      '告白': Album(name: '告白'),
+    };
+
+    final result = UnionSearchResult.search('告白');
+    expect(result.audios, isNotEmpty);
+    expect(result.artists, isNotEmpty);
+    expect(result.album, isNotEmpty);
+  });
+
+  test('mixedItems merges three kinds into one list', () {
+    AudioLibrary.instance.audioCollection = [
+      _audio('告白', r'C:\Music\a.mp3'),
+    ];
+    AudioLibrary.instance.artistCollection = {
+      '告白': Artist(name: '告白'),
+    };
+    AudioLibrary.instance.albumCollection = {
+      '告白': Album(name: '告白'),
+    };
+
+    final items = UnionSearchResult.search('告白').mixedItems;
+    expect(items.length, 3);
+    expect(
+      items.map((item) => item.kind).toSet(),
+      <UnionSearchItemKind>{
+        UnionSearchItemKind.music,
+        UnionSearchItemKind.artist,
+        UnionSearchItemKind.album,
+      },
+    );
+  });
+
+  test('mixedItems returns empty for an empty query even with data', () {
+    final result = UnionSearchResult('');
+    result.audios = [_audio('告白', r'C:\Music\a.mp3')];
+    result.artists = [Artist(name: '告白')];
+    result.album = [Album(name: '告白')];
+
+    expect(result.mixedItems, isEmpty);
+    expect(
+      rankUnionSearchItems(
+        audios: result.audios,
+        artists: result.artists,
+        albums: result.album,
+        queryInLowerCase: '',
+      ),
+      isEmpty,
+    );
+  });
+
+  test('rankUnionSearchItems puts rank 0 before rank 1', () {
+    final items = rankUnionSearchItems(
+      audios: [
+        _audio('Instrumental', r'C:\Music\a.mp3', album: '告白'),
+      ],
+      artists: [Artist(name: '告白')],
+      albums: [Album(name: '精选告白')],
+      queryInLowerCase: '告白',
+    );
+
+    expect(items.length, 3);
+    final ranks = items.map((item) => item.rank).toList();
+    expect(ranks, <int>[0, 1, 1]);
+    expect(ranks.first, 0);
+    expect(ranks.last, 1);
+  });
+
+  test('rankUnionSearchItems breaks ties by sortKey then kind order', () {
+    final items = rankUnionSearchItems(
+      audios: [_audio('告白', r'C:\Music\a.mp3')],
+      artists: [Artist(name: '告白')],
+      albums: [Album(name: '告白')],
+      queryInLowerCase: '告白',
+    );
+
+    expect(
+      items.map((item) => item.kind).toList(),
+      <UnionSearchItemKind>[
+        UnionSearchItemKind.music,
+        UnionSearchItemKind.artist,
+        UnionSearchItemKind.album,
+      ],
+    );
+  });
+
+  test('rankUnionSearchItems keeps the original audio index', () {
+    final unmatched = _audio('Other', r'C:\Music\a.mp3', album: 'Nope');
+    final matched = _audio('告白', r'C:\Music\b.mp3');
+    final items = rankUnionSearchItems(
+      audios: [unmatched, matched],
+      artists: const <Artist>[],
+      albums: const <Album>[],
+      queryInLowerCase: '告白',
+    );
+
+    expect(items.length, 1);
+    expect(items.single.audioIndex, 1);
+    expect(identical(items.single.audio, matched), isTrue);
+  });
 }

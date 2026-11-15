@@ -9,6 +9,7 @@ import 'package:pure_music/component/search_dialog_layout.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/search_action_state.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/playlist.dart';
 import 'package:pure_music/library/union_search_result.dart';
@@ -54,12 +55,6 @@ class SearchDialog extends StatefulWidget {
   State<SearchDialog> createState() => _SearchDialogState();
 }
 
-class _SearchCategory {
-  final String label;
-  final IconData icon;
-  const _SearchCategory(this.label, this.icon);
-}
-
 class _SearchDialogState extends State<SearchDialog> {
   late final TextEditingController _searchController = TextEditingController();
   late final ValueNotifier<UnionSearchResult> _result = ValueNotifier(
@@ -67,32 +62,63 @@ class _SearchDialogState extends State<SearchDialog> {
   );
   late final ValueNotifier<bool> _isSearching = ValueNotifier(false);
   Timer? _debounce;
+  Timer? _persistDebounce;
   Timer? _queuedNextResetTimer;
+  Timer? _libraryReadyPoll;
   Audio? _queuedNextAudio;
   Audio? _addingAudioToPlaylist;
   Playlist? _addingTargetPlaylist;
-  int _currentIndex = 0;
-  int _searchVersion = 0;
+  late final ValueNotifier<bool> _awaitingLibraryReady = ValueNotifier(false);
+  String _lastPersistedQuery = '';
+  String _pendingPersistQuery = '';
+  Future<void> _persistChain = Future<void>.value();
+  int _libraryReadyPollsLeft = 0;
+  String _restoredQuery = '';
+  VoidCallback? _libraryVersionListener;
 
-  static const _tabs = [
-    _SearchCategory('音乐', Symbols.music_note),
-    _SearchCategory('艺术家', Symbols.person),
-    _SearchCategory('专辑', Symbols.album),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _restoreLastQuery();
+    WidgetsBinding.instance.addPostFrameCallback(_runRestoredSearch);
+  }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _persistDebounce?.cancel();
     _queuedNextResetTimer?.cancel();
+    _libraryReadyPoll?.cancel();
+    _libraryReadyPoll = null;
+    final listener = _libraryVersionListener;
+    if (listener != null) {
+      AudioLibrary.libraryVersion.removeListener(listener);
+      _libraryVersionListener = null;
+    }
+    try {
+      _persistLastQuery(normalizedSearchQuery(_searchController.text));
+    } catch (error, trace) {
+      log.settings.warn(
+        'search_query_persist_dispose_failed',
+        '关闭搜索框时落盘异常，保留内存值',
+        error: error,
+        stackTrace: trace,
+      );
+    }
     _searchController.dispose();
     _result.dispose();
     _isSearching.dispose();
+    _awaitingLibraryReady.dispose();
     super.dispose();
   }
 
   void _onQueryChanged(String raw) {
     final query = normalizedSearchQuery(raw);
     _debounce?.cancel();
+    _schedulePersist(query);
+    if (_awaitingLibraryReady.value) {
+      _stopLibraryReadyWait();
+    }
     if (query.isEmpty) {
       _result.value = UnionSearchResult('');
       _isSearching.value = false;
@@ -102,15 +128,220 @@ class _SearchDialogState extends State<SearchDialog> {
     _isSearching.value = true;
     _debounce = Timer(const Duration(milliseconds: 450), () {
       if (!mounted) return;
-      _searchVersion++;
-      _search(query);
-      _isSearching.value = false;
+      try {
+        _search(query);
+      } catch (error, trace) {
+        log.library.warn(
+          'union_search_debounce_failed',
+          '搜索防抖回调异常，按空结果降级',
+          error: error,
+          stackTrace: trace,
+        );
+        _result.value = UnionSearchResult(query);
+      } finally {
+        _isSearching.value = false;
+      }
     });
   }
 
   void _search(String query) {
-    final scope = SearchScope.values[_currentIndex];
-    _result.value = UnionSearchResult.search(query, scope: scope);
+    _result.value = UnionSearchResult.search(query);
+  }
+
+  void _restoreLastQuery() {
+    try {
+      final query = normalizedSearchQuery(AppSettings.instance.lastSearchQuery);
+      _lastPersistedQuery = query;
+      _pendingPersistQuery = query;
+      _restoredQuery = query;
+      if (query.isEmpty) return;
+      _searchController.text = query;
+    } catch (error, trace) {
+      log.library.warn(
+        'search_query_restore_failed',
+        '回显上次搜索词失败，按空关键词继续',
+        error: error,
+        stackTrace: trace,
+      );
+    }
+  }
+
+  void _runRestoredSearch(Duration _) {
+    if (!mounted || _restoredQuery.isEmpty) return;
+    if (normalizedSearchQuery(_searchController.text) != _restoredQuery) return;
+    try {
+      if (AudioLibrary.instance.audioCollection.isNotEmpty) {
+        _search(_restoredQuery);
+        return;
+      }
+      _result.value = UnionSearchResult(_restoredQuery);
+      _awaitingLibraryReady.value = true;
+      _isSearching.value = true;
+      _libraryReadyPollsLeft = 10;
+      final listener = _onLibraryVersionChanged;
+      _libraryVersionListener = listener;
+      AudioLibrary.libraryVersion.addListener(listener);
+      _pollLibraryReady();
+    } catch (error, trace) {
+      log.library.warn(
+        'search_query_restore_search_failed',
+        '首帧恢复搜索异常，按空结果降级',
+        error: error,
+        stackTrace: trace,
+      );
+      _awaitingLibraryReady.value = false;
+      _isSearching.value = false;
+    }
+  }
+
+  void _onLibraryVersionChanged() {
+    if (!mounted || !_awaitingLibraryReady.value) return;
+    if (AudioLibrary.instance.audioCollection.isEmpty) return;
+    _finishRestoredSearch();
+  }
+
+  void _pollLibraryReady() {
+    _libraryReadyPoll?.cancel();
+    _libraryReadyPoll = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted || !_awaitingLibraryReady.value) return;
+      try {
+        if (AudioLibrary.instance.audioCollection.isNotEmpty) {
+          _finishRestoredSearch();
+          return;
+        }
+        _libraryReadyPollsLeft--;
+        if (_libraryReadyPollsLeft > 0) {
+          _pollLibraryReady();
+        } else {
+          _stopLibraryReadyWait();
+          log.library.warn(
+            'search_query_restore_timeout',
+            '曲库就绪等待超时，保留回显词与中性提示',
+          );
+        }
+      } catch (error, trace) {
+        _stopLibraryReadyWait();
+        log.library.warn(
+          'search_query_restore_poll_failed',
+          '曲库就绪轮询异常，停止补搜',
+          error: error,
+          stackTrace: trace,
+        );
+      }
+    });
+  }
+
+  void _finishRestoredSearch() {
+    final listener = _libraryVersionListener;
+    if (listener != null) {
+      AudioLibrary.libraryVersion.removeListener(listener);
+      _libraryVersionListener = null;
+    }
+    _libraryReadyPoll?.cancel();
+    _libraryReadyPoll = null;
+    if (normalizedSearchQuery(_searchController.text) != _restoredQuery) {
+      _stopLibraryReadyWait();
+      return;
+    }
+    try {
+      _search(_restoredQuery);
+    } catch (error, trace) {
+      log.library.warn(
+        'search_query_restore_retry_failed',
+        '曲库就绪后补搜异常，按空结果降级',
+        error: error,
+        stackTrace: trace,
+      );
+      _result.value = UnionSearchResult(_restoredQuery);
+    } finally {
+      _awaitingLibraryReady.value = false;
+      _isSearching.value = false;
+    }
+  }
+
+  void _stopLibraryReadyWait() {
+    final listener = _libraryVersionListener;
+    if (listener != null) {
+      AudioLibrary.libraryVersion.removeListener(listener);
+      _libraryVersionListener = null;
+    }
+    _libraryReadyPoll?.cancel();
+    _libraryReadyPoll = null;
+    _awaitingLibraryReady.value = false;
+    _isSearching.value = false;
+  }
+
+  void _schedulePersist(String query) {
+    _persistDebounce?.cancel();
+    _persistDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (!mounted) return;
+      try {
+        _persistLastQuery(query);
+      } catch (error, trace) {
+        log.settings.warn(
+          'search_query_persist_debounce_failed',
+          '搜索词落盘防抖回调异常，保留内存值等待关闭时兜底',
+          error: error,
+          stackTrace: trace,
+        );
+      }
+    });
+  }
+
+  void _persistLastQuery(String query) {
+    if (query == _lastPersistedQuery && query == _pendingPersistQuery) return;
+    try {
+      AppSettings.instance.lastSearchQuery = query;
+      _pendingPersistQuery = query;
+    } catch (error, trace) {
+      log.settings.warn(
+        'search_query_persist_failed',
+        '更新上次搜索词异常，跳过本次落盘',
+        error: error,
+        stackTrace: trace,
+      );
+      return;
+    }
+    final previous = _persistChain;
+    _persistChain = _enqueuePersist(previous, query);
+    unawaited(_persistChain);
+  }
+
+  Future<void> _enqueuePersist(Future<void> previous, String query) async {
+    try {
+      await previous;
+    } catch (error, trace) {
+      log.settings.warn(
+        'search_query_persist_chain_failed',
+        '前一次落盘链异常，继续尝试写入最新搜索词',
+        error: error,
+        stackTrace: trace,
+      );
+    }
+    await _saveLastQuery(query);
+  }
+
+  Future<void> _saveLastQuery(String query) async {
+    try {
+      final saved = await AppSettings.instance.saveSettings();
+      if (!saved) {
+        log.settings.warn(
+          'search_query_persist_failed',
+          '保存上次搜索词未成功，去重基准保持旧值等待重试',
+        );
+        return;
+      }
+      if (query == _pendingPersistQuery) {
+        _lastPersistedQuery = query;
+      }
+    } catch (error, trace) {
+      log.settings.warn(
+        'search_query_persist_failed',
+        '保存上次搜索词异常，去重基准保持旧值等待重试',
+        error: error,
+        stackTrace: trace,
+      );
+    }
   }
 
   void _addSearchResultToNext(Audio audio) {
@@ -289,7 +520,6 @@ class _SearchDialogState extends State<SearchDialog> {
         children: [
           _searchField(Theme.of(context).colorScheme),
           _searchingIndicator(),
-          _categoryTabs(),
           Expanded(child: _resultBody()),
         ],
       ),
@@ -318,7 +548,9 @@ class _SearchDialogState extends State<SearchDialog> {
                   _debounce?.cancel();
                   _searchController.clear();
                   _result.value = UnionSearchResult('');
-                  _isSearching.value = false;
+                  _stopLibraryReadyWait();
+                  _persistDebounce?.cancel();
+                  _persistLastQuery('');
                 },
                 icon: const Icon(Symbols.close),
               );
@@ -349,138 +581,82 @@ class _SearchDialogState extends State<SearchDialog> {
   }
 
 
-  Widget _categoryTab(UnionSearchResult result, int i) {
-    final selected = _currentIndex == i;
-    final canSwitch = canSwitchTab(
-      currentIndex: _currentIndex,
-      targetIndex: i,
-    );
-    final count = switch (i) {
-      0 => result.audios.length,
-      1 => result.artists.length,
-      _ => result.album.length,
-    };
-    final query = normalizedSearchQuery(_searchController.text);
-    final showCount =
-        selected && result.query.isNotEmpty && result.query == query;
-    return SearchCategoryButton(
-      label: _tabs[i].label,
-      icon: _tabs[i].icon,
-      selected: selected,
-      count: showCount ? count : null,
-      onPressed: canSwitch ? () => _selectSearchTab(i, query) : null,
-    );
-  }
-
-  void _selectSearchTab(int i, String query) {
-    setState(() => _currentIndex = i);
-    if (query.isEmpty) return;
-    _searchVersion++;
-    _search(query);
-  }
-
-  Widget _categoryTabs() {
-    return ValueListenableBuilder(
-      valueListenable: _result,
-      builder: (context, result, _) {
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 12.0),
-          child: Wrap(
-            spacing: 8.0,
-            runSpacing: 8.0,
-            children: [
-              for (var i = 0; i < _tabs.length; i++)
-                _categoryTab(result, i),
-            ],
-          ),
+  Widget _resultBody() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _awaitingLibraryReady,
+      builder: (context, awaitingLibrary, _) {
+        return ValueListenableBuilder<UnionSearchResult>(
+          valueListenable: _result,
+          builder: (context, value, _) {
+            final query = value.query.trim();
+            if (query.isEmpty) {
+              return const _SearchEmptyState(
+                icon: Symbols.search,
+                title: '输入关键词开始搜索',
+                message: '支持搜索歌曲、艺术家、专辑。',
+              );
+            }
+            final items = value.mixedItems;
+            if (items.isEmpty) {
+              if (awaitingLibrary) {
+                return const _SearchEmptyState(
+                  icon: Symbols.library_music,
+                  title: '曲库加载中',
+                  message: '正在等待曲库就绪，将自动重新搜索上次关键词。',
+                );
+              }
+              return const _SearchEmptyState(
+                icon: Symbols.search,
+                title: '没有找到相关内容',
+                message: '换个关键词，或检查曲库是否已收录。',
+              );
+            }
+            return CustomScrollView(
+              slivers: [
+                SliverList.builder(
+                  itemCount: items.length,
+                  itemBuilder: (context, i) => _mixedTile(value, items[i]),
+                ),
+                const SliverPadding(padding: EdgeInsets.only(bottom: 12.0)),
+              ],
+            );
+          },
         );
       },
     );
   }
 
-  Widget _resultBody() {
-    return ValueListenableBuilder(
-      valueListenable: _result,
-      builder: (context, value, _) {
-        final query = value.query.trim();
-        if (query.isEmpty) {
-          return const _SearchEmptyState(
-            icon: Symbols.search,
-            title: '输入关键词开始搜索',
-            message: '支持搜索歌曲、艺术家、专辑。',
+  Widget _mixedTile(UnionSearchResult value, UnionSearchItem item) {
+    switch (item.kind) {
+      case UnionSearchItemKind.music:
+        {
+          final audio = item.audio;
+          if (audio == null) return const SizedBox.shrink();
+          return AudioTile(
+            key: ValueKey('music_${audio.path}'),
+            audioIndex: item.audioIndex,
+            playlist: value.audios,
+            action: _musicActionBar(audio),
           );
         }
-        return DirectionalTabView(
-          key: ValueKey('search_$_searchVersion'),
-          index: _currentIndex,
-          children: [
-            _buildMusicList(value),
-            _buildArtistList(value),
-            _buildAlbumList(value),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildMusicList(UnionSearchResult value) {
-    if (value.audios.isEmpty) {
-      return const _SearchEmptyState(
-        icon: Symbols.music_note,
-        title: '没有找到相关音乐',
-        message: '换个关键词，或者切到艺术家、专辑再看。',
-      );
+      case UnionSearchItemKind.artist:
+        {
+          final artist = item.artist;
+          if (artist == null) return const SizedBox.shrink();
+          return ArtistTile(
+            key: ValueKey('artist_${artist.name}'),
+            artist: artist,
+          );
+        }
+      case UnionSearchItemKind.album:
+        {
+          final album = item.album;
+          if (album == null) return const SizedBox.shrink();
+          return AlbumTile(
+            key: ValueKey('album_${album.name}'),
+            album: album,
+          );
+        }
     }
-    return CustomScrollView(
-      slivers: [
-        SliverList.builder(
-          itemCount: value.audios.length,
-          itemBuilder: (context, i) => AudioTile(
-            audioIndex: i,
-            playlist: value.audios,
-            action: _musicActionBar(value.audios[i]),
-          ),
-        ),
-        const SliverPadding(padding: EdgeInsets.only(bottom: 12.0)),
-      ],
-    );
-  }
-
-  Widget _buildArtistList(UnionSearchResult value) {
-    if (value.artists.isEmpty) {
-      return const _SearchEmptyState(
-        icon: Symbols.person,
-        title: '没有找到相关艺术家',
-        message: '换个关键词，或者回到音乐结果里找。',
-      );
-    }
-    return CustomScrollView(
-      slivers: [
-        SliverList.builder(
-          itemCount: value.artists.length,
-          itemBuilder: (context, i) => ArtistTile(artist: value.artists[i]),
-        ),
-        const SliverPadding(padding: EdgeInsets.only(bottom: 12.0)),
-      ],
-    );
-  }
-
-  Widget _buildAlbumList(UnionSearchResult value) {
-    if (value.album.isEmpty) {
-      return const _SearchEmptyState(
-        icon: Symbols.album,
-        title: '没有找到相关专辑',
-        message: '换个关键词，或者先从歌曲结果进入专辑。',
-      );
-    }
-    return CustomScrollView(
-      slivers: [
-        SliverList.builder(
-          itemCount: value.album.length,
-          itemBuilder: (context, i) => AlbumTile(album: value.album[i]),
-        ),
-        const SliverPadding(padding: EdgeInsets.only(bottom: 12.0)),
-      ],
-    );
   }
 }
