@@ -5,9 +5,20 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.33**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.34**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.34</strong></summary>
+
+**搜索**
+
+- 上方搜索框一次查找本地音乐、艺术家、专辑，结果按相关度混排展示，无需切换分类。
+- 搜索关键词在应用重启后保留，打开搜索框回显并自动重新搜索；曲库尚未就绪时等待就绪后补搜。
+- 结果按命中歌曲列表组织播放队列，混排顺序不影响播放次序。
+
+</details>
 
 <details>
 <summary><strong>2.3.33</strong></summary>
