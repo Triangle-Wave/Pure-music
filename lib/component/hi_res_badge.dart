@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:pure_music/library/audio_library.dart';
 
 /// 列表数据只有采样率、位深与码率：采样率高于 CD 的 44.1 kHz 即为 Hi-Res，
@@ -37,49 +38,57 @@ bool isDsdAudio(Audio audio) {
 /// 窄宽列表里徽章组可占用的最大宽度；超出时整体等比缩小，剩余宽度留给标题。
 const double compactBadgeGroupMaxWidth = 56.0;
 
-/// Hi-Res 金色小标签：高度 14，宽度按原图 35×15 比例。
+/// Hi-Res 金色方形矢量标签：高度 14，宽度与高度一致。
 class HiResBadge extends StatelessWidget {
   const HiResBadge({super.key});
 
   static const double height = 14.0;
-  static const double width = height * 35 / 15;
+  static const double width = height;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       label: 'Hi-Res',
       image: true,
-      child: Image.asset(
-        'assets/images/hr_logo2.png',
+      child: SvgPicture.asset(
+        'assets/images/hi_res_audio_logo.svg',
         width: width,
         height: height,
-        filterQuality: FilterQuality.medium,
+        fit: BoxFit.contain,
+        semanticsLabel: 'Hi-Res',
         excludeFromSemantics: true,
-        errorBuilder: (_, _, _) => const SizedBox(width: width, height: height),
+        placeholderBuilder: (_) =>
+            const SizedBox(width: width, height: height),
+        errorBuilder: (_, _, _) =>
+            const SizedBox(width: width, height: height),
       ),
     );
   }
 }
 
-/// DSD 白色小标签：高度 14，宽度按原图 48×24 比例。
+/// DSD 黑色矢量标签：高度 14，宽度按官方 SVG 500×253.76521 比例。
 class DsdBadge extends StatelessWidget {
   const DsdBadge({super.key});
 
   static const double height = 14.0;
-  static const double width = 28.0;
+  static const double width = height * 500 / 253.76521;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       label: 'DSD',
       image: true,
-      child: Image.asset(
-        'assets/images/dsd_logo.png',
+      child: SvgPicture.asset(
+        'assets/images/dsd_logo.svg',
         width: width,
         height: height,
-        filterQuality: FilterQuality.medium,
+        fit: BoxFit.contain,
+        semanticsLabel: 'DSD',
         excludeFromSemantics: true,
-        errorBuilder: (_, _, _) => const SizedBox(width: width, height: height),
+        placeholderBuilder: (_) =>
+            const SizedBox(width: width, height: height),
+        errorBuilder: (_, _, _) =>
+            const SizedBox(width: width, height: height),
       ),
     );
   }
