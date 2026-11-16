@@ -1,5 +1,7 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
+import 'package:pure_music/component/badge_raster_cache.dart';
 import 'package:pure_music/library/audio_library.dart';
 
 /// 列表数据只有采样率、位深与码率：采样率高于 CD 的 44.1 kHz 即为 Hi-Res，
@@ -36,60 +38,97 @@ bool isDsdAudio(Audio audio) {
 }
 
 /// 窄宽列表里徽章组可占用的最大宽度；超出时整体等比缩小，剩余宽度留给标题。
-const double compactBadgeGroupMaxWidth = 56.0;
+/// 取三处引用点中最宽的 audio_tile 徽标组自然宽度：
+/// DSD 39.41 + 间距 6 + Hi-Res 20 + 尾距 8 = 73.41，向上取整为 74。
+const double compactBadgeGroupMaxWidth = 74.0;
 
-/// Hi-Res 金色方形矢量标签：高度 14，宽度与高度一致。
-class HiResBadge extends StatelessWidget {
-  const HiResBadge({super.key});
+/// 预渲染位图徽标：首次使用时把 SVG 栅格化并全局缓存，滚动时只做位图 blit。
+/// 加载中或栅格化失败时按同尺寸占位，不影响列表布局。
+class _RasterBadge extends StatelessWidget {
+  const _RasterBadge({
+    required this.assetName,
+    required this.label,
+    required this.width,
+    required this.height,
+    required this.widthRatio,
+  });
 
-  static const double height = 14.0;
-  static const double width = height;
+  final String assetName;
+  final String label;
+  final double width;
+  final double height;
+  final double widthRatio;
 
   @override
   Widget build(BuildContext context) {
+    final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1.0;
+    final pixelSize = badgeRasterPixelSize(
+      logicalSize: height,
+      devicePixelRatio: dpr,
+      widthRatio: widthRatio,
+    );
+    // rasterizeBadge 是带首次填充的缓存查找，同一 key 返回同一个 Future。
+    final future = rasterizeBadge(assetName: assetName, size: pixelSize);
     return Semantics(
-      label: 'Hi-Res',
+      label: label,
       image: true,
-      child: SvgPicture.asset(
-        'assets/images/hi_res_audio_logo.svg',
-        width: width,
-        height: height,
-        fit: BoxFit.contain,
-        semanticsLabel: 'Hi-Res',
-        excludeFromSemantics: true,
-        placeholderBuilder: (_) =>
-            const SizedBox(width: width, height: height),
-        errorBuilder: (_, _, _) =>
-            const SizedBox(width: width, height: height),
+      child: FutureBuilder<ui.Image?>(
+        future: future,
+        builder: (_, snapshot) {
+          final image = snapshot.data;
+          if (image == null) {
+            return SizedBox(width: width, height: height);
+          }
+          return RawImage(
+            image: image,
+            width: width,
+            height: height,
+            fit: BoxFit.contain,
+          );
+        },
       ),
     );
   }
 }
 
-/// DSD 黑色矢量标签：高度 14，宽度按官方 SVG 500×253.76521 比例。
-class DsdBadge extends StatelessWidget {
-  const DsdBadge({super.key});
+/// Hi-Res 金色方形矢量标签：高度 20，宽度与高度一致。
+class HiResBadge extends StatelessWidget {
+  const HiResBadge({super.key});
 
-  static const double height = 14.0;
-  static const double width = height * 500 / 253.76521;
+  static const double height = 20.0;
+  static const double width = height;
+
+  static const String _asset = 'assets/images/hi_res_audio_logo.svg';
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
+    return const _RasterBadge(
+      assetName: _asset,
+      label: 'Hi-Res',
+      width: width,
+      height: height,
+      widthRatio: 1.0,
+    );
+  }
+}
+
+/// DSD 黑色矢量标签：高度 20，宽度按官方 SVG 500×253.76521 比例。
+class DsdBadge extends StatelessWidget {
+  const DsdBadge({super.key});
+
+  static const double height = 20.0;
+  static const double width = height * 500 / 253.76521;
+
+  static const String _asset = 'assets/images/dsd_logo.svg';
+
+  @override
+  Widget build(BuildContext context) {
+    return const _RasterBadge(
+      assetName: _asset,
       label: 'DSD',
-      image: true,
-      child: SvgPicture.asset(
-        'assets/images/dsd_logo.svg',
-        width: width,
-        height: height,
-        fit: BoxFit.contain,
-        semanticsLabel: 'DSD',
-        excludeFromSemantics: true,
-        placeholderBuilder: (_) =>
-            const SizedBox(width: width, height: height),
-        errorBuilder: (_, _, _) =>
-            const SizedBox(width: width, height: height),
-      ),
+      width: width,
+      height: height,
+      widthRatio: 500 / 253.76521,
     );
   }
 }
