@@ -6,6 +6,7 @@ import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
 import 'package:pure_music/component/search_dialog_layout.dart';
+import 'package:pure_music/core/detail_navigation.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/search_action_state.dart';
@@ -16,6 +17,7 @@ import 'package:pure_music/library/union_search_result.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 class _SearchEmptyState extends StatelessWidget {
@@ -75,16 +77,75 @@ class _SearchDialogState extends State<SearchDialog> {
   int _libraryReadyPollsLeft = 0;
   String _restoredQuery = '';
   VoidCallback? _libraryVersionListener;
+  GoRouterDelegate? _routeDelegate;
+  RouteMatchList? _baselineConfiguration;
+  VoidCallback? _routeListener;
 
   @override
   void initState() {
     super.initState();
     _restoreLastQuery();
     WidgetsBinding.instance.addPostFrameCallback(_runRestoredSearch);
+    _watchDetailNavigation();
+  }
+
+  /// 详情页跳转发生在对话框内部，DialogRoute 会盖住新页面。
+  ///
+  /// 监听路由委托并对比配置实例：跳转会产生新的 [RouteMatchList]，此时关闭
+  /// 对话框。监听只做 pop，不重复发起导航。
+  void _watchDetailNavigation() {
+    final router = GoRouter.maybeOf(context);
+    if (router == null) return;
+    final delegate = router.routerDelegate;
+    _routeDelegate = delegate;
+    _baselineConfiguration = delegate.currentConfiguration;
+    void listener() {
+      final current = delegate.currentConfiguration;
+      if (identical(current, _baselineConfiguration)) return;
+      _baselineConfiguration = current;
+      try {
+        if (!isDetailLocation(currentMatchedLocation(current))) return;
+      } catch (error, trace) {
+        log.app.warn(
+          'search_detail_navigation_location_failed',
+          '读取跳转后路由位置失败，跳过关闭搜索框',
+          fields: {'error': error.runtimeType.toString()},
+          error: error,
+          stackTrace: trace,
+        );
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final navigator = Navigator.maybeOf(context);
+        if (navigator == null || !navigator.canPop()) return;
+        try {
+          navigator.pop();
+        } catch (error, trace) {
+          log.app.warn(
+            'search_detail_navigation_dismiss_failed',
+            '详情页跳转后关闭搜索框失败，保留对话框但不影响已完成的跳转',
+            fields: {'error': error.runtimeType.toString()},
+            error: error,
+            stackTrace: trace,
+          );
+        }
+      });
+    }
+
+    _routeListener = listener;
+    delegate.addListener(listener);
   }
 
   @override
   void dispose() {
+    final delegate = _routeDelegate;
+    final routeListener = _routeListener;
+    if (delegate != null && routeListener != null) {
+      delegate.removeListener(routeListener);
+    }
+    _routeDelegate = null;
+    _routeListener = null;
     _debounce?.cancel();
     _persistDebounce?.cancel();
     _queuedNextResetTimer?.cancel();
