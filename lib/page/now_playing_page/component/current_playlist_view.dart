@@ -1,5 +1,6 @@
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/list_action_state.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/component/danger_confirm_dialog.dart';
 import 'package:pure_music/component/hi_res_badge.dart';
 import 'package:pure_music/component/motion.dart';
@@ -480,14 +481,17 @@ class _PlaylistViewItem extends StatelessWidget {
                   ),
                   if (isDsd || isHiRes)
                     compact
-                        ? ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              maxWidth: compactBadgeGroupMaxWidth,
-                            ),
-                            child: FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: Alignment.centerLeft,
-                              child: badgeGroup,
+                        ? ListenableBuilder(
+                            listenable: AppSettings.badgeSizeNotifier,
+                            builder: (context, _) => ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: compactBadgeGroupMaxWidth,
+                              ),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: badgeGroup,
+                              ),
                             ),
                           )
                         : badgeGroup,
@@ -600,14 +604,17 @@ class _ReorderItem extends StatelessWidget {
                   ),
                   if (isDsd || isHiRes)
                     compact
-                        ? ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              maxWidth: compactBadgeGroupMaxWidth,
-                            ),
-                            child: FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: Alignment.centerLeft,
-                              child: badgeGroup,
+                        ? ListenableBuilder(
+                            listenable: AppSettings.badgeSizeNotifier,
+                            builder: (context, _) => ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: compactBadgeGroupMaxWidth,
+                              ),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: badgeGroup,
+                              ),
                             ),
                           )
                         : badgeGroup,

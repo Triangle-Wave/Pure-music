@@ -359,14 +359,17 @@ class _RankedTabState extends State<RankedTab> {
                 ),
                 if (showDsd || showHiRes)
                   compact
-                      ? ConstrainedBox(
-                          constraints: const BoxConstraints(
-                            maxWidth: compactBadgeGroupMaxWidth,
-                          ),
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerLeft,
-                            child: badgeGroup,
+                      ? ListenableBuilder(
+                          listenable: AppSettings.badgeSizeNotifier,
+                          builder: (context, _) => ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: compactBadgeGroupMaxWidth,
+                            ),
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: badgeGroup,
+                            ),
                           ),
                         )
                       : badgeGroup,

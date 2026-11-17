@@ -26,6 +26,11 @@ export 'settings/settings_types.dart';
 
 const bool enableOnlineLyricWriting = true;
 
+/// 徽标尺寸设置边界与默认值；设置页滑块步进为 2px。
+const double defaultHiResBadgeSizePx = 30.0;
+const double minHiResBadgeSizePx = 14.0;
+const double maxHiResBadgeSizePx = 48.0;
+
 Future<Directory>? _appDataDirectoryFuture;
 
 Future<Directory> getAppDataDir() {
@@ -208,6 +213,8 @@ class AppSettings {
   static final rebuildNotifier = RebuildNotifier();
   static final backgroundNotifier = RebuildNotifier();
   static final listMotionNotifier = RebuildNotifier();
+  /// 徽标尺寸变化时通知引用页与徽标组件重建。
+  static final badgeSizeNotifier = RebuildNotifier();
   static const String version = String.fromEnvironment(
     'APP_VERSION',
     defaultValue: '2.3.20',
@@ -312,6 +319,8 @@ class AppSettings {
   bool appWindowTransparent = false;
   double appWindowOpacity = 1.0;
   double appWindowBlur = 0;
+  /// Hi-Res / DSD 徽标显示高度（像素），全项目徽标组共用。
+  double hiResBadgeSizePx = defaultHiResBadgeSizePx;
   bool enableTitleBarFrostedGlass = false;
   bool enableSidebarFrostedGlass = false;
   Size windowSize = const Size(1280, 756);
@@ -432,6 +441,7 @@ class AppSettings {
     _readLyricPreferenceSettings(settingsMap);
     _readWindowPlaybackSettings(settingsMap);
     _readNetworkProxySettings(settingsMap);
+    _readBadgeSettings(settingsMap);
   }
 
   static void _readLegacyArtistSeparator(Map<String, dynamic> settingsMap) {
@@ -446,6 +456,11 @@ class AppSettings {
   static Future<void> readFromSettingsMapForTest(
     Map<String, dynamic> settingsMap,
   ) => _readFromSettingsMap(settingsMap);
+
+  /// 仅解析徽标尺寸，避免测试触碰其它全局设置字段。
+  @visibleForTesting
+  static void readBadgeSettingsForTest(Map<String, dynamic> settingsMap) =>
+      _readBadgeSettings(settingsMap);
 
   static Future<void> _readFromSettingsMap(
     Map<String, dynamic> settingsMap,
@@ -468,6 +483,7 @@ class AppSettings {
     _readDesktopLyricColorSettings(settingsMap);
     _readFontSettings(settingsMap);
     _readNetworkProxySettings(settingsMap);
+    _readBadgeSettings(settingsMap);
   }
 
   static void _readThemeMotionHotkeySettings(Map<String, dynamic> settingsMap) {
@@ -1205,6 +1221,15 @@ class AppSettings {
         normalizedPathSetting(settingsMap['CacheDirectory']) ?? '';
   }
 
+  /// 徽标尺寸非法或缺失时按默认值降级，保证设置读取不会崩溃。
+  static void _readBadgeSettings(Map<String, dynamic> settingsMap) {
+    if (!settingsMap.containsKey('HiResBadgeSizePx')) return;
+    final value = settingsMap['HiResBadgeSizePx'];
+    _instance.hiResBadgeSizePx = value is num && value.isFinite
+        ? value.clamp(minHiResBadgeSizePx, maxHiResBadgeSizePx).toDouble()
+        : defaultHiResBadgeSizePx;
+  }
+
   static Future<void> readFromJson() async {
     try {
       final dir = await getSettingsDir();
@@ -1317,6 +1342,7 @@ class AppSettings {
     'AppWindowBlur': appWindowBlur,
     'EnableTitleBarFrostedGlass': enableTitleBarFrostedGlass,
     'EnableSidebarFrostedGlass': enableSidebarFrostedGlass,
+    'HiResBadgeSizePx': hiResBadgeSizePx,
   };
 
   Map<String, Object?> _windowFontPlaybackSettingsMap() => {

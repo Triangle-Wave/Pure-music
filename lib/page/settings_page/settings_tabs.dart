@@ -3950,7 +3950,63 @@ class _AppearanceListGroup extends StatelessWidget {
         _MotionEffectSwitch(effect: _MotionEffect.detailHeaderCollapse),
         SizedBox(height: 16.0),
         _MotionEffectSwitch(effect: _MotionEffect.dataTransition),
+        SizedBox(height: 16.0),
+        SettingsSectionHeader('徽标'),
+        SizedBox(height: 4.0),
+        _BadgeSizeSlider(),
       ],
+    );
+  }
+}
+
+/// 徽标大小滑块：拖动实时预览，松手持久化；保存失败回滚到拖动前的值。
+class _BadgeSizeSlider extends StatefulWidget {
+  const _BadgeSizeSlider();
+
+  @override
+  State<_BadgeSizeSlider> createState() => _BadgeSizeSliderState();
+}
+
+class _BadgeSizeSliderState extends State<_BadgeSizeSlider> {
+  final settings = AppSettings.instance;
+  double? _dragStartValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = settings.hiResBadgeSizePx;
+    final label = '${size.toStringAsFixed(0)}px';
+    return SettingsTile(
+      description: '徽标大小',
+      subtitle: 'Hi-Res / DSD 徽标的显示高度，$label',
+      action: SizedBox(
+        width: 180,
+        child: Slider(
+          value: size,
+          min: minHiResBadgeSizePx,
+          max: maxHiResBadgeSizePx,
+          divisions: (maxHiResBadgeSizePx - minHiResBadgeSizePx) ~/ 2,
+          label: label,
+          onChanged: (v) {
+            _dragStartValue ??= settings.hiResBadgeSizePx;
+            setState(() => settings.hiResBadgeSizePx = v);
+            AppSettings.badgeSizeNotifier.rebuild();
+          },
+          onChangeEnd: (v) async {
+            final start = _dragStartValue;
+            _dragStartValue = null;
+            setState(() => settings.hiResBadgeSizePx = v);
+            AppSettings.badgeSizeNotifier.rebuild();
+            final saved = await settings.saveSettings();
+            if (!saved && mounted) {
+              if (start != null) {
+                setState(() => settings.hiResBadgeSizePx = start);
+                AppSettings.badgeSizeNotifier.rebuild();
+              }
+              showTextOnSnackBar('徽标大小保存失败', variant: ToastVariant.error);
+            }
+          },
+        ),
+      ),
     );
   }
 }

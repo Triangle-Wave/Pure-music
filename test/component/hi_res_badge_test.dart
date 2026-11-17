@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/component/badge_raster_cache.dart';
 import 'package:pure_music/component/hi_res_badge.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
 
 Audio _audio({
@@ -119,6 +122,104 @@ void main() {
         badgeRasterCacheKey('assets/images/a.svg', 20, 20),
         isNot(badgeRasterCacheKey('assets/images/a.svg', 20, 40)),
       );
+    });
+  });
+
+  group('徽标尺寸设置', () {
+    test('默认徽标尺寸为 30px', () {
+      expect(AppSettings.instance.hiResBadgeSizePx, 30.0);
+    });
+
+    test('读取徽标尺寸时夹取到 14~48', () async {
+      final settings = AppSettings.instance;
+      final previous = settings.hiResBadgeSizePx;
+      try {
+        AppSettings.readBadgeSettingsForTest({
+          'HiResBadgeSizePx': 10,
+        });
+        expect(settings.hiResBadgeSizePx, 14.0);
+
+        AppSettings.readBadgeSettingsForTest({
+          'HiResBadgeSizePx': 60,
+        });
+        expect(settings.hiResBadgeSizePx, 48.0);
+
+        AppSettings.readBadgeSettingsForTest({
+          'HiResBadgeSizePx': 36,
+        });
+        expect(settings.hiResBadgeSizePx, 36.0);
+      } finally {
+        settings.hiResBadgeSizePx = previous;
+      }
+    });
+
+    test('非法徽标尺寸按 30px 降级', () async {
+      final settings = AppSettings.instance;
+      final previous = settings.hiResBadgeSizePx;
+      try {
+        for (final invalid in <Object?>[
+          'not-a-number',
+          double.nan,
+          <int>[],
+          null,
+        ]) {
+          AppSettings.readBadgeSettingsForTest({
+            'HiResBadgeSizePx': invalid,
+          });
+          expect(settings.hiResBadgeSizePx, 30.0);
+        }
+      } finally {
+        settings.hiResBadgeSizePx = previous;
+      }
+    });
+
+    test('徽标尺寸可经 json 往返', () async {
+      final settings = AppSettings.instance;
+      final previous = settings.hiResBadgeSizePx;
+      try {
+        final encoded = json.encode({
+          'HiResBadgeSizePx': 42,
+        });
+        final decoded = json.decode(encoded) as Map<String, dynamic>;
+        AppSettings.readBadgeSettingsForTest(decoded);
+        expect(settings.hiResBadgeSizePx, 42.0);
+      } finally {
+        settings.hiResBadgeSizePx = previous;
+      }
+    });
+  });
+
+  group('compactBadgeGroupMaxWidthFor', () {
+    test('20px 口径回归为 74', () {
+      expect(compactBadgeGroupMaxWidthFor(20), 74.0);
+    });
+
+    test('按 DSD 宽加间距计算各尺寸', () {
+      expect(
+        compactBadgeGroupMaxWidthFor(14),
+        (14 * 500 / 253.76521 + 6 + 14 + 8).ceil().toDouble(),
+      );
+      expect(
+        compactBadgeGroupMaxWidthFor(30),
+        (30 * 500 / 253.76521 + 6 + 30 + 8).ceil().toDouble(),
+      );
+      expect(
+        compactBadgeGroupMaxWidthFor(48),
+        (48 * 500 / 253.76521 + 6 + 48 + 8).ceil().toDouble(),
+      );
+    });
+
+    test('动态上限跟随当前设置', () async {
+      final settings = AppSettings.instance;
+      final previous = settings.hiResBadgeSizePx;
+      try {
+        settings.hiResBadgeSizePx = 30;
+        expect(compactBadgeGroupMaxWidth, compactBadgeGroupMaxWidthFor(30));
+        settings.hiResBadgeSizePx = 48;
+        expect(compactBadgeGroupMaxWidth, compactBadgeGroupMaxWidthFor(48));
+      } finally {
+        settings.hiResBadgeSizePx = previous;
+      }
     });
   });
 }

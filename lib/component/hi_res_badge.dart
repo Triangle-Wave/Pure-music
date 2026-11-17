@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:pure_music/component/badge_raster_cache.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
 
 /// 列表数据只有采样率、位深与码率：采样率高于 CD 的 44.1 kHz 即为 Hi-Res，
@@ -37,10 +38,22 @@ bool isDsdAudio(Audio audio) {
   return sourcePath.endsWith('.dsf') || sourcePath.endsWith('.dff');
 }
 
-/// 窄宽列表里徽章组可占用的最大宽度；超出时整体等比缩小，剩余宽度留给标题。
-/// 取三处引用点中最宽的 audio_tile 徽标组自然宽度：
-/// DSD 39.41 + 间距 6 + Hi-Res 20 + 尾距 8 = 73.41，向上取整为 74。
-const double compactBadgeGroupMaxWidth = 74.0;
+/// DSD 徽标官方矢量宽高比。
+const double dsdBadgeWidthRatio = 500 / 253.76521;
+
+/// 徽标组紧凑布局的间距口径：DSD 宽 + 徽标间距 6 + Hi-Res 宽 + 尾距 8。
+int compactBadgeGroupMaxWidthValueFor(double height) =>
+    (height * dsdBadgeWidthRatio + 6 + height + 8).ceil();
+
+/// 紧凑布局下徽标组可占用的最大宽度；超出时整体等比缩小，剩余宽度留给标题。
+/// 数值随当前徽标尺寸设置动态计算，20px 时为 74。
+double get compactBadgeGroupMaxWidth =>
+    compactBadgeGroupMaxWidthValueFor(AppSettings.instance.hiResBadgeSizePx)
+        .toDouble();
+
+/// 供测试和引用页按显式高度计算紧凑布局上限。
+double compactBadgeGroupMaxWidthFor(double height) =>
+    compactBadgeGroupMaxWidthValueFor(height).toDouble();
 
 /// 预渲染位图徽标：首次使用时把 SVG 栅格化并全局缓存，滚动时只做位图 blit。
 /// 加载中或栅格化失败时按同尺寸占位，不影响列表布局。
@@ -48,55 +61,59 @@ class _RasterBadge extends StatelessWidget {
   const _RasterBadge({
     required this.assetName,
     required this.label,
-    required this.width,
-    required this.height,
     required this.widthRatio,
   });
 
   final String assetName;
   final String label;
-  final double width;
-  final double height;
   final double widthRatio;
 
   @override
   Widget build(BuildContext context) {
-    final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1.0;
-    final pixelSize = badgeRasterPixelSize(
-      logicalSize: height,
-      devicePixelRatio: dpr,
-      widthRatio: widthRatio,
-    );
-    // rasterizeBadge 是带首次填充的缓存查找，同一 key 返回同一个 Future。
-    final future = rasterizeBadge(assetName: assetName, size: pixelSize);
-    return Semantics(
-      label: label,
-      image: true,
-      child: FutureBuilder<ui.Image?>(
-        future: future,
-        builder: (_, snapshot) {
-          final image = snapshot.data;
-          if (image == null) {
-            return SizedBox(width: width, height: height);
-          }
-          return RawImage(
-            image: image,
-            width: width,
-            height: height,
-            fit: BoxFit.contain,
-          );
-        },
-      ),
+    return ListenableBuilder(
+      listenable: AppSettings.badgeSizeNotifier,
+      builder: (context, _) {
+        final badgeHeight = AppSettings.instance.hiResBadgeSizePx;
+        final badgeWidth = badgeHeight * widthRatio;
+        final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1.0;
+        final pixelSize = badgeRasterPixelSize(
+          logicalSize: badgeHeight,
+          devicePixelRatio: dpr,
+          widthRatio: widthRatio,
+        );
+        // rasterizeBadge 是带首次填充的缓存查找，同一 key 返回同一个 Future。
+        final future = rasterizeBadge(assetName: assetName, size: pixelSize);
+        return Semantics(
+          label: label,
+          image: true,
+          child: FutureBuilder<ui.Image?>(
+            future: future,
+            builder: (_, snapshot) {
+              final image = snapshot.data;
+              if (image == null) {
+                return SizedBox(width: badgeWidth, height: badgeHeight);
+              }
+              return RawImage(
+                image: image,
+                width: badgeWidth,
+                height: badgeHeight,
+                fit: BoxFit.contain,
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
 
-/// Hi-Res 金色方形矢量标签：高度 20，宽度与高度一致。
+/// Hi-Res 金色方形矢量标签：高度跟随徽标尺寸设置，宽度与高度一致。
 class HiResBadge extends StatelessWidget {
   const HiResBadge({super.key});
 
-  static const double height = 20.0;
-  static const double width = height;
+  /// 当前显示高度，跟随全局徽标尺寸设置。
+  static double get height => AppSettings.instance.hiResBadgeSizePx;
+  static double get width => height;
 
   static const String _asset = 'assets/images/hi_res_audio_logo.svg';
 
@@ -105,19 +122,18 @@ class HiResBadge extends StatelessWidget {
     return const _RasterBadge(
       assetName: _asset,
       label: 'Hi-Res',
-      width: width,
-      height: height,
       widthRatio: 1.0,
     );
   }
 }
 
-/// DSD 黑色矢量标签：高度 20，宽度按官方 SVG 500×253.76521 比例。
+/// DSD 黑色矢量标签：高度跟随徽标尺寸设置，宽度按官方 SVG 500×253.76521 比例。
 class DsdBadge extends StatelessWidget {
   const DsdBadge({super.key});
 
-  static const double height = 20.0;
-  static const double width = height * 500 / 253.76521;
+  /// 当前显示高度，跟随全局徽标尺寸设置。
+  static double get height => AppSettings.instance.hiResBadgeSizePx;
+  static double get width => height * dsdBadgeWidthRatio;
 
   static const String _asset = 'assets/images/dsd_logo.svg';
 
@@ -126,9 +142,7 @@ class DsdBadge extends StatelessWidget {
     return const _RasterBadge(
       assetName: _asset,
       label: 'DSD',
-      width: width,
-      height: height,
-      widthRatio: 500 / 253.76521,
+      widthRatio: dsdBadgeWidthRatio,
     );
   }
 }

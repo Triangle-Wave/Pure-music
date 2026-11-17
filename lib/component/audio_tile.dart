@@ -10,6 +10,7 @@ import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/menu_styles.dart';
+import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/hidden_songs.dart';
 import 'package:pure_music/page/uni_page.dart';
@@ -691,14 +692,17 @@ class _AudioTileState extends State<AudioTile> {
             const SizedBox(width: 8.0),
             if (isDsd || isHiRes)
               compact
-                  ? ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        maxWidth: compactBadgeGroupMaxWidth,
-                      ),
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerRight,
-                        child: badgeGroup,
+                  ? ListenableBuilder(
+                      listenable: AppSettings.badgeSizeNotifier,
+                      builder: (context, _) => ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: compactBadgeGroupMaxWidth,
+                        ),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerRight,
+                          child: badgeGroup,
+                        ),
                       ),
                     )
                   : badgeGroup,
