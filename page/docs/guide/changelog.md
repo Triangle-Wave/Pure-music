@@ -5,9 +5,22 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.34**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.36**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.36</strong></summary>
+
+**界面**
+
+- Hi-Res 与 DSD 徽标显示尺寸调整为 20px，列表中更醒目。
+
+**性能**
+
+- 徽标采用预渲染位图缓存，音乐库列表快速滑动保持流畅。
+
+</details>
 
 <details>
 <summary><strong>2.3.34</strong></summary>
