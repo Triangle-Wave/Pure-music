@@ -101,7 +101,7 @@ void main() {
   });
 
   group('国内歌手响应解析', () {
-    test('网易歌手搜索保留头像地址', () {
+    test('网易歌手搜索头像追加最高分辨率参数', () {
       final artists = CnMusicClient.parseNeteaseArtists({
         'result': {
           'artists': [
@@ -117,11 +117,30 @@ void main() {
       expect(artists, hasLength(1));
       final artist = artists.single;
       expect(artist.name, '周杰伦');
-      expect(artist.picUrl, 'https://p1.music.126.net/artist.jpg');
+      expect(artist.picUrl, 'https://p1.music.126.net/artist.jpg?param=1200y1200');
       expect(artist.albumCount, 38);
     });
 
-    test('QQ 歌手搜索兼容 camelCase 并用 mid 生成头像', () {
+    test('网易歌手头像已有 query 时用 & 拼接并支持 img1v1Url 兜底', () {
+      final artists = CnMusicClient.parseNeteaseArtists({
+        'result': {
+          'artists': [
+            {
+              'id': 6453,
+              'name': '测试歌手',
+              'img1v1Url': 'http://p1.music.126.net/fallback.jpg?x=1',
+            },
+          ],
+        },
+      });
+      expect(artists, hasLength(1));
+      expect(
+        artists.single.picUrl,
+        'https://p1.music.126.net/fallback.jpg?x=1&param=1200y1200',
+      );
+    });
+
+    test('QQ 歌手搜索兼容 camelCase 并用 mid 生成 800 头像', () {
       final artists = CnMusicClient.parseQqArtists({
         'req_0': {
           'data': {
@@ -138,17 +157,36 @@ void main() {
       expect(artists, hasLength(1));
       expect(
         artists.single.picUrl,
-        'https://y.gtimg.cn/music/photo_new/T001R300x300M000singer-mid.jpg',
+        'https://y.gtimg.cn/music/photo_new/T001R800x800M000singer-mid.jpg',
       );
     });
 
-    test('酷狗歌手搜索解析头像', () {
+    test('酷狗歌手头像把 {size} 占位符替换为 800', () {
       final artists = CnMusicClient.parseKugouArtists({
         'data': {
           'info': [
             {
               'singerid': 1,
               'singername': '周杰伦',
+              'imgurl': 'http://imge.kugou.com/singer/{size}/avatar.jpg',
+            },
+          ],
+        },
+      });
+      expect(artists, hasLength(1));
+      expect(
+        artists.single.picUrl,
+        'https://imge.kugou.com/singer/800/avatar.jpg',
+      );
+    });
+
+    test('酷狗歌手头像无 {size} 占位符时原样保留并升级 https', () {
+      final artists = CnMusicClient.parseKugouArtists({
+        'data': {
+          'info': [
+            {
+              'singerid': 2,
+              'singername': '测试歌手',
               'imgurl': 'http://imge.kugou.com/singer.jpg',
             },
           ],

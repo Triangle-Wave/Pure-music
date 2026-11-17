@@ -693,7 +693,9 @@ class CnMusicClient {
           source: CnMusicSource.netease,
           id: id,
           name: name,
-          picUrl: _httpsUrl(_text(item['picUrl']) ?? _text(item['img1v1Url'])),
+          picUrl: _neteaseHiResPicUrl(
+            _text(item['picUrl']) ?? _text(item['img1v1Url']),
+          ),
           albumCount: _integer(item['albumSize'] ?? item['albumSizeValue']),
         ),
       );
@@ -864,7 +866,9 @@ class CnMusicClient {
               _text(item['id']) ??
               name,
           name: name,
-          picUrl: _httpsUrl(_text(item['imgurl']) ?? _text(item['img_url'])),
+          picUrl: _kugouHiResPicUrl(
+            _text(item['imgurl']) ?? _text(item['img_url']),
+          ),
           albumCount: _integer(
             item['albumcount'] ?? item['album_count'] ?? item['album_num'],
           ),
@@ -973,6 +977,22 @@ class CnMusicClient {
     return trimmed;
   }
 
+  /// 网易歌手头像统一追加最高分辨率参数，已带 query 时用 & 拼接。
+  @visibleForTesting
+  static String? _neteaseHiResPicUrl(String? raw) {
+    final url = _httpsUrl(raw);
+    if (url == null) return null;
+    final separator = url.contains('?') ? '&' : '?';
+    return '$url${separator}param=1200y1200';
+  }
+
+  /// 酷狗歌手头像把 {size} 占位符替换为最高分辨率档位。
+  @visibleForTesting
+  static String? _kugouHiResPicUrl(String? raw) {
+    if (raw == null) return null;
+    return _httpsUrl(raw.replaceFirst('{size}', '800'));
+  }
+
   static String? _kugouCover(Map<String, dynamic> item) {
     final raw = _text(item['imgurl']) ??
         _text(item['img_url']) ??
@@ -992,7 +1012,7 @@ String? qqAlbumCover(String? albumMid) {
 String? qqArtistCover(String? singerMid) {
   final mid = singerMid?.trim();
   if (mid == null || mid.isEmpty) return null;
-  return 'https://y.gtimg.cn/music/photo_new/T001R300x300M000$mid.jpg';
+  return 'https://y.gtimg.cn/music/photo_new/T001R800x800M000$mid.jpg';
 }
 
 double scoreCnAlbumCandidate({
