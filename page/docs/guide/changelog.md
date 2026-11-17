@@ -5,26 +5,9 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.35**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.34**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
-
-<details>
-<summary><strong>2.3.35</strong></summary>
-
-**搜索**
-
-- 搜索结果中的歌手、专辑条目可正常点击进入详情页；跳转后搜索框自动收起，不再遮挡新页面。
-
-**媒体信息**
-
-- 音乐列表与播放页的 Hi-Res、DSD 徽标采用官方矢量标识，高分辨率屏幕下清晰不模糊。
-
-**歌词**
-
-- 在线歌词加载期间关闭页面或切换歌曲，偶发的异常与歌词错乱不再出现。
-
-</details>
 
 <details>
 <summary><strong>2.3.34</strong></summary>
