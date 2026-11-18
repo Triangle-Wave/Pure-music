@@ -40,6 +40,10 @@ import 'package:pure_music/services/lastfm/lastfm_service.dart';
 import 'package:pure_music/play_service/sleep_timer.dart';
 import 'package:flutter/foundation.dart';
 
+/// 恢复播放队列时等待曲库就绪的最长时间。实际曲库加载通常十秒级，
+/// 120 秒仅作为异常兜底，避免启动流程被永久阻塞。
+const Duration libraryReadyWaitTimeout = Duration(seconds: 120);
+
 final class _NowPlayingNotifier extends ValueNotifier<Audio?> {
   _NowPlayingNotifier() : super(null);
 
@@ -274,6 +278,16 @@ class PlaybackService extends ChangeNotifier {
       '[restore] will seek to position=$restored (saved=$savedPosition, length=$length)',
     );
     return restored;
+  }
+
+  /// 是否允许恢复上次会话。曲库已有正在播放内容或非空队列时跳过恢复，
+  /// 避免覆盖用户已手动开始的播放。
+  @visibleForTesting
+  static bool shouldRestoreSession({
+    required Audio? nowPlaying,
+    required bool playlistNotEmpty,
+  }) {
+    return nowPlaying == null && !playlistNotEmpty;
   }
 
   PlaybackService(this.playService) {
@@ -2780,36 +2794,97 @@ class PlaybackService extends ChangeNotifier {
   Future<void> _restoreLastSession() async {
     var session = _sessionStore.snapshot;
     var lastPath = session.lastAudioPath;
-    if (lastPath.isEmpty) return;
-    if (!await _waitForLibraryAudios()) return;
+    if (lastPath.isEmpty) {
+      log.playback.info('legacy', '[restore] 无上次播放记录，跳过恢复');
+      return;
+    }
+    // 等待前先查一次：用户此时已手动开始播放则直接跳过，无需等待曲库。
+    if (!shouldRestoreSession(
+      nowPlaying: nowPlaying,
+      playlistNotEmpty: _playlist.value.isNotEmpty,
+    )) {
+      log.playback.info(
+        'legacy',
+        '[restore] 进入时已有播放内容，跳过恢复',
+      );
+      return;
+    }
+    if (!await _waitForLibraryAudios()) {
+      // 具体超时/错误原因已由 waitForAudioCollectionReady 记录 WARN。
+      return;
+    }
     session = _sessionStore.snapshot;
     lastPath = session.lastAudioPath;
-    if (lastPath.isEmpty) return;
+    if (lastPath.isEmpty) {
+      log.playback.info('legacy', '[restore] 曲库就绪后无播放记录，跳过恢复');
+      return;
+    }
+    // 等待期间曲库加载耗时较长，用户可能已开始播放，复查避免覆盖。
+    if (!shouldRestoreSession(
+      nowPlaying: nowPlaying,
+      playlistNotEmpty: _playlist.value.isNotEmpty,
+    )) {
+      log.playback.info(
+        'legacy',
+        '[restore] 等待曲库期间用户已开始播放，跳过恢复',
+      );
+      return;
+    }
     final pathToAudio = <String, Audio>{
       for (final audio in AudioLibrary.instance.audioCollection)
         audio.path: audio,
     };
-    final restoredPlaylist = _playlistFromSessionPaths(
+    final restoredPlaylist = playlistFromSessionPaths(
       session.lastPlaylistPaths,
       pathToAudio,
       lastPath,
     );
-    if (restoredPlaylist.isEmpty) return;
+    if (restoredPlaylist.isEmpty) {
+      log.playback.warn(
+        'legacy',
+        '[restore] 保存的队列路径均未匹配到曲库，放弃恢复，'
+            'session 队列长度=${session.lastPlaylistPaths.length}',
+      );
+      return;
+    }
     _installRestoredSession(session, restoredPlaylist, pathToAudio, lastPath);
     await _restorePlayerAndSmtc(session, lastPath);
   }
 
-  Future<bool> _waitForLibraryAudios() async {
-    for (int i = 0; i < 10; i++) {
-      if (AudioLibrary.instance.audioCollection.isNotEmpty) {
-        return true;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+  Future<bool> _waitForLibraryAudios() =>
+      waitForAudioCollectionReady(timeout: libraryReadyWaitTimeout);
+
+  /// 等待曲库首次就绪。曲库非空立即返回 true；否则挂起等待就绪信号。
+  /// 信号在首次加载成功时完成；这里仍复查 audioCollection，是防御曲库
+  /// 运行期重建/清空等边界导致信号已完成但当前库为空的保守放行。
+  @visibleForTesting
+  static Future<bool> waitForAudioCollectionReady({Duration? timeout}) async {
+    if (AudioLibrary.instance.audioCollection.isNotEmpty) return true;
+    final waitTimeout = timeout ?? libraryReadyWaitTimeout;
+    try {
+      await AudioLibrary.libraryReady.timeout(waitTimeout);
+    } on TimeoutException catch (_) {
+      log.playback.warn(
+        'legacy',
+        '[restore] 等待曲库就绪超时（${waitTimeout.inSeconds}s），放弃恢复',
+      );
+      return false;
+    } catch (err, trace) {
+      log.playback.warn(
+        'legacy',
+        '[restore] 等待曲库就绪失败，error=$err',
+        error: err,
+        stackTrace: trace,
+      );
+      return false;
     }
     return AudioLibrary.instance.audioCollection.isNotEmpty;
   }
 
-  List<Audio> _playlistFromSessionPaths(
+  /// 从保存的路径还原播放队列：保留命中曲库的原始顺序；
+  /// 全部未命中时回退到 lastPath 对应单曲。
+  @visibleForTesting
+  static List<Audio> playlistFromSessionPaths(
     List<String> paths,
     Map<String, Audio> pathToAudio,
     String lastPath,

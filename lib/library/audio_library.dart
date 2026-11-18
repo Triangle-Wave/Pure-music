@@ -915,6 +915,25 @@ class AudioLibrary {
 
   static AudioLibrary? _instance;
 
+  /// 曲库首次就绪信号：audioCollection 非空时 libraryReady 立即完成；
+  /// 否则挂起，直到 initFromIndex 成功装入曲库后完成一次（持久，不置空）。
+  /// initFromIndex 失败不完成本信号，由等待方超时兜底。
+  /// 运行期曲库重建的清空窗口内信号保持已完成，等待方靠复查 audioCollection
+  /// 保守放行（空库则不恢复）；冷启动与曲库重建几乎不重叠。
+  static final Completer<void> _libraryReadyCompleter = Completer<void>();
+
+  /// 曲库首次就绪：曲库非空时立即完成，否则挂起到首次加载成功。
+  /// 恢复等待方需在 signal 后复查 audioCollection 确认曲库真正可用。
+  static Future<void> get libraryReady => instance.audioCollection.isNotEmpty
+      ? Future<void>.value()
+      : _libraryReadyCompleter.future;
+
+  /// 仅用于测试驱动曲库就绪信号，生产路径由 initFromIndex 成功时调用。
+  @visibleForTesting
+  static void signalLibraryReadyForTesting() {
+    if (!_libraryReadyCompleter.isCompleted) _libraryReadyCompleter.complete();
+  }
+
   /// Incremented when the core library objects are installed.
   static final libraryVersion = ValueNotifier<int>(0);
 
@@ -1039,6 +1058,7 @@ class AudioLibrary {
 
   static Future<void> initFromIndex() async {
     final stopwatch = Stopwatch()..start();
+    var loaded = false;
     try {
       final supportPath = (await getAppDataDir()).path;
       final indexPath = p.join(supportPath, 'index.json');
@@ -1069,6 +1089,7 @@ class AudioLibrary {
         totalStopwatch: stopwatch,
       );
       if (loadedFromSqlite) {
+        loaded = true;
         await _applyTrackOverrides();
         return;
       }
@@ -1079,10 +1100,17 @@ class AudioLibrary {
         objectBatchSize: objectBatchSize,
         totalStopwatch: stopwatch,
       );
+      loaded = true;
       await _applyTrackOverrides();
     } catch (err, trace) {
       log.library.error('legacy', err.toString(), stackTrace: trace);
       rethrow;
+    } finally {
+      // 仅成功装入曲库才完成就绪信号；失败路径不完成，
+      // 由等待方（恢复流程）的 120s 超时兜底，避免误报就绪。
+      if (loaded && !_libraryReadyCompleter.isCompleted) {
+        _libraryReadyCompleter.complete();
+      }
     }
   }
 
