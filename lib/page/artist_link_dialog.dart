@@ -2,7 +2,7 @@ import 'package:pure_music/core/artist_alias_groups.dart';
 import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/log/app_log.dart';
-import 'package:pure_music/core/search_action_state.dart';
+import 'package:pure_music/core/search_text_normalizer.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
@@ -80,13 +80,13 @@ class _ArtistLinkDialogState extends State<_ArtistLinkDialog> {
   }
 
   List<String> get _visibleNames {
-    final query = normalizedSearchQuery(_searchController.text).toLowerCase();
+    final query = normalizeSearchText(_searchController.text);
     if (query.isEmpty) return _pool;
     return _pool.where((name) {
-      final normalized = normalizedSearchQuery(name).toLowerCase();
-      return normalized.contains(query) ||
-          name.getPinyinInitials().toLowerCase().contains(query) ||
-          name.getPinyin().toLowerCase().contains(query);
+      final simplified = normalizeSearchText(name);
+      return simplified.contains(query) ||
+          simplified.getPinyinInitials().toLowerCase().contains(query) ||
+          simplified.getPinyin().toLowerCase().contains(query);
     }).toList();
   }
 

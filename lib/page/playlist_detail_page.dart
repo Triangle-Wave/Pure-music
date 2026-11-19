@@ -5,6 +5,7 @@ import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/mouse_back_exit.dart';
 import 'package:pure_music/core/settings.dart';
+import 'package:pure_music/core/search_text_normalizer.dart';
 import 'package:pure_music/core/utils.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/library/audio_sort.dart';
@@ -396,13 +397,14 @@ class _PlaylistDetailPageState extends State<PlaylistDetailPage> {
 
   List<Audio> _filteredAudios(List<Audio> allAudios) {
     if (_searchQuery.isEmpty) return List<Audio>.from(allAudios);
-    final q = _searchQuery.toLowerCase();
+    final q = normalizeSearchText(_searchQuery);
+    if (q.isEmpty) return List<Audio>.from(allAudios);
     return allAudios
         .where(
           (audio) =>
-              audio.title.toLowerCase().contains(q) ||
-              audio.artist.toLowerCase().contains(q) ||
-              audio.album.toLowerCase().contains(q),
+              audio.normalizedSearchTitle.contains(q) ||
+              audio.normalizedSearchArtist.contains(q) ||
+              audio.normalizedSearchAlbum.contains(q),
         )
         .toList();
   }

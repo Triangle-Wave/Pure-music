@@ -31,7 +31,7 @@ class AppPreference {
   );
 
   var artistDetailPagePref = PagePreference(
-    0,
+    1,
     SortOrder.ascending,
     ContentView.list,
   );

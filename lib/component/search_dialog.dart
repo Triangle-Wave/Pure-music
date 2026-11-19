@@ -6,7 +6,9 @@ import 'package:pure_music/component/audio_tile.dart';
 import 'package:pure_music/component/motion.dart';
 import 'package:pure_music/component/quiet_empty_state.dart';
 import 'package:pure_music/component/search_dialog_layout.dart';
+import 'package:pure_music/core/design_tokens.dart';
 import 'package:pure_music/core/detail_navigation.dart';
+import 'package:pure_music/core/search_result_group.dart';
 import 'package:pure_music/core/hotkeys.dart';
 import 'package:pure_music/core/list_action_state.dart';
 import 'package:pure_music/core/search_action_state.dart';
@@ -38,6 +40,35 @@ class _SearchEmptyState extends StatelessWidget {
       title: title,
       message: message,
       maxWidth: 380.0,
+    );
+  }
+}
+
+class _SearchSectionHeader extends StatelessWidget {
+  const _SearchSectionHeader({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        Spacing.md,
+        Spacing.lg,
+        Spacing.md,
+        Spacing.sm,
+      ),
+      child: Text(
+        title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: AppType.sectionTitle,
+          fontWeight: AppType.weightSemibold,
+          color: scheme.onSurfaceVariant,
+        ),
+      ),
     );
   }
 }
@@ -672,12 +703,19 @@ class _SearchDialogState extends State<SearchDialog> {
                 message: '换个关键词，或检查曲库是否已收录。',
               );
             }
+            final groups = groupSearchItems(items);
             return CustomScrollView(
               slivers: [
-                SliverList.builder(
-                  itemCount: items.length,
-                  itemBuilder: (context, i) => _mixedTile(value, items[i]),
-                ),
+                for (final group in groups) ...[
+                  SliverToBoxAdapter(
+                    child: _SearchSectionHeader(title: group.title),
+                  ),
+                  SliverList.builder(
+                    itemCount: group.items.length,
+                    itemBuilder:
+                        (context, i) => _mixedTile(value, group.items[i]),
+                  ),
+                ],
                 const SliverPadding(padding: EdgeInsets.only(bottom: 12.0)),
               ],
             );

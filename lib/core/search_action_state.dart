@@ -1,16 +1,8 @@
-final _searchWhitespacePattern = RegExp(r'\s+');
-
-String normalizedSearchQuery(String value) =>
-    value.trim().replaceAll(_searchWhitespacePattern, '');
-
-bool canSubmitChangedSearchQuery({
-  required String currentQuery,
-  required String nextQuery,
-}) {
-  final normalizedCurrent = normalizedSearchQuery(currentQuery);
-  final normalizedNext = normalizedSearchQuery(nextQuery);
-  return normalizedNext.isNotEmpty && normalizedNext != normalizedCurrent;
-}
-
-bool canShowSearchClearAction(String value) =>
-    normalizedSearchQuery(value).isNotEmpty;
+/// 搜索动作状态与归一化入口，实现位于 search_text_normalizer.dart。
+/// 保留此文件以兼容既有 import 路径。
+export 'package:pure_music/core/search_text_normalizer.dart'
+    show
+        normalizedSearchQuery,
+        normalizeSearchText,
+        canSubmitChangedSearchQuery,
+        canShowSearchClearAction;

@@ -3417,10 +3417,11 @@ class _SearchTextCache {
 
   factory _SearchTextCache.of(String value) {
     if (value.isEmpty) return const _SearchTextCache('', '', '');
+    final simplified = normalizeSearchText(value);
     return _SearchTextCache(
-      normalizedSearchQuery(value).toLowerCase(),
-      value.getPinyinInitials().toLowerCase(),
-      value.getPinyin().toLowerCase(),
+      simplified,
+      simplified.getPinyinInitials().toLowerCase(),
+      simplified.getPinyin().toLowerCase(),
     );
   }
 
@@ -3636,8 +3637,9 @@ class Audio {
   int get segmentEndMs => cueSegment?.endMs ?? 0;
 
   void _primeSearchCache(_AudioLoadPool pool) {
-    _searchNorm = pool.text(normalizedSearchQuery(title).toLowerCase());
-    _searchPinyin = pool.text(title.getPinyinInitials().toLowerCase());
+    final simplifiedTitle = normalizeSearchText(title);
+    _searchNorm = pool.text(simplifiedTitle);
+    _searchPinyin = pool.text(simplifiedTitle.getPinyinInitials().toLowerCase());
   }
 
   /// 把本地覆盖值合并到当前曲目；null 字段保留原值。
@@ -3661,10 +3663,30 @@ class Audio {
     _searchArtist = null;
   }
 
+  /// 标题的归一化文本（去空白、小写、转简体），供列表内筛选复用缓存。
+  String get normalizedSearchTitle => _searchNorm ??= normalizeSearchText(title);
+
+  /// 艺术家的归一化文本，供列表内筛选复用缓存。
+  String get normalizedSearchArtist =>
+      (_searchArtist ??= _SearchTextCache.of(artist)).normalized;
+
+  /// 专辑的归一化文本，供列表内筛选复用缓存。
+  String get normalizedSearchAlbum =>
+      (_searchAlbum ??= _SearchTextCache.of(album)).normalized;
+
   bool matchesSearchQuery(String queryInLowerCase) {
-    final norm = _searchNorm ??= normalizedSearchQuery(title).toLowerCase();
+    final norm = _searchNorm;
+    if (norm == null) {
+      final simplified = normalizeSearchText(title);
+      _searchNorm = simplified;
+      final pinyin = simplified.getPinyinInitials().toLowerCase();
+      _searchPinyin = pinyin;
+      return simplified.contains(queryInLowerCase) ||
+          pinyin.contains(queryInLowerCase);
+    }
     if (norm.contains(queryInLowerCase)) return true;
-    final pinyin = _searchPinyin ??= title.getPinyinInitials().toLowerCase();
+    final pinyin = _searchPinyin ??=
+        normalizeSearchText(title).getPinyinInitials().toLowerCase();
     return pinyin.contains(queryInLowerCase);
   }
 

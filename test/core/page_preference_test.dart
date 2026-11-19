@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/core/page_preference.dart';
+import 'package:pure_music/core/preference.dart';
 
 void main() {
   test('page preference keeps legacy enum and bounded sort decoding', () {
@@ -22,5 +23,9 @@ void main() {
       PagePreference.fromMap(preference.toMap()).toMap(),
       preference.toMap(),
     );
+  });
+
+  test('artist detail page defaults to album sort method', () {
+    expect(AppPreference().artistDetailPagePref.sortMethod, 1);
   });
 }

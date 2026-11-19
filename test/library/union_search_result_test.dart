@@ -207,7 +207,7 @@ void main() {
         audios: result.audios,
         artists: result.artists,
         albums: result.album,
-        queryInLowerCase: '',
+        query: '',
       ),
       isEmpty,
     );
@@ -220,7 +220,7 @@ void main() {
       ],
       artists: [Artist(name: '告白')],
       albums: [Album(name: '精选告白')],
-      queryInLowerCase: '告白',
+      query: '告白',
     );
 
     expect(items.length, 3);
@@ -235,7 +235,7 @@ void main() {
       audios: [_audio('告白', r'C:\Music\a.mp3')],
       artists: [Artist(name: '告白')],
       albums: [Album(name: '告白')],
-      queryInLowerCase: '告白',
+      query: '告白',
     );
 
     expect(
@@ -255,11 +255,58 @@ void main() {
       audios: [unmatched, matched],
       artists: const <Artist>[],
       albums: const <Album>[],
-      queryInLowerCase: '告白',
+      query: '告白',
     );
 
     expect(items.length, 1);
     expect(items.single.audioIndex, 1);
     expect(identical(items.single.audio, matched), isTrue);
+  });
+
+  test('simplified query matches traditional title artist and album', () {
+    AudioLibrary.instance.audioCollection = [
+      _audio('再見', r'C:\Music\a.mp3',
+          artist: '鄧紫棋', album: '我的電台'),
+    ];
+    AudioLibrary.instance.artistCollection = {
+      '鄧紫棋': Artist(name: '鄧紫棋'),
+    };
+    AudioLibrary.instance.albumCollection = {
+      '我的電台': Album(name: '我的電台'),
+    };
+
+    final result = UnionSearchResult.search('再见');
+    expect(result.audios.single.title, '再見');
+    expect(result.artists.single.name, '鄧紫棋');
+    expect(result.album.single.name, '我的電台');
+  });
+
+  test('traditional query matches simplified title', () {
+    AudioLibrary.instance.audioCollection = [
+      _audio('再见', r'C:\Music\a.mp3'),
+    ];
+
+    expect(UnionSearchResult.search('再見').audios.single.title, '再见');
+  });
+
+  test('simplified query rank equals traditional title rank', () {
+    final items = rankUnionSearchItems(
+      audios: [_audio('再見', r'C:\Music\a.mp3')],
+      artists: const <Artist>[],
+      albums: const <Album>[],
+      query: '再见',
+    );
+
+    expect(items.single.rank, 0);
+    expect(items.single.sortKey, '再见');
+  });
+
+  test('traditional title supports pinyin search', () {
+    AudioLibrary.instance.audioCollection = [
+      _audio('再見', r'C:\Music\a.mp3'),
+    ];
+
+    expect(UnionSearchResult.search('zaijian').audios.single.title, '再見');
+    expect(UnionSearchResult.search('zj').audios.single.title, '再見');
   });
 }

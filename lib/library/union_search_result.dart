@@ -1,6 +1,6 @@
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/core/artist_alias_groups.dart';
-import 'package:pure_music/core/search_action_state.dart';
+import 'package:pure_music/core/search_text_normalizer.dart';
 import 'package:pure_music/core/settings.dart';
 import 'package:pure_music/core/utils.dart';
 
@@ -31,12 +31,9 @@ class UnionSearchItem {
 }
 
 /// 名字完全匹配或前缀命中归 0；其余包含、别名与拼音命中归 1。
-int unionSearchRank(String name, String queryInLowerCase) {
-  final normalized = normalizedSearchQuery(name).toLowerCase();
-  return normalized == queryInLowerCase ||
-          normalized.startsWith(queryInLowerCase)
-      ? 0
-      : 1;
+int unionSearchRank(String name, String query) {
+  final normalized = normalizeSearchText(name);
+  return normalized == query || normalized.startsWith(query) ? 0 : 1;
 }
 
 /// 把三类命中按统一档位合成为一个有序列表，供搜索框混排展示。
@@ -46,11 +43,12 @@ List<UnionSearchItem> rankUnionSearchItems({
   required List<Audio> audios,
   required List<Artist> artists,
   required List<Album> albums,
-  required String queryInLowerCase,
+  required String query,
   Map<String, List<String>>? artistAliasGroups,
   bool Function(String text, String query)? matchesQuery,
 }) {
-  if (queryInLowerCase.isEmpty) return const <UnionSearchItem>[];
+  final normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.isEmpty) return const <UnionSearchItem>[];
   final matches = matchesQuery ?? _matchesQuery;
   final groups =
       artistAliasGroups ??
@@ -59,13 +57,13 @@ List<UnionSearchItem> rankUnionSearchItems({
 
   for (int i = 0; i < audios.length; i++) {
     final audio = audios[i];
-    final rank = audio.searchMatchRank(queryInLowerCase);
+    final rank = audio.searchMatchRank(normalizedQuery);
     if (rank != 0 && rank != 1) continue;
     items.add(
       UnionSearchItem(
         kind: UnionSearchItemKind.music,
         rank: rank,
-        sortKey: normalizedSearchQuery(audio.title).toLowerCase(),
+        sortKey: normalizeSearchText(audio.title),
         audioIndex: i,
         audio: audio,
       ),
@@ -75,7 +73,7 @@ List<UnionSearchItem> rankUnionSearchItems({
   for (final artist in artists) {
     final rank = _artistRank(
       artist,
-      queryInLowerCase,
+      normalizedQuery,
       groups,
       matches,
     );
@@ -84,7 +82,7 @@ List<UnionSearchItem> rankUnionSearchItems({
       UnionSearchItem(
         kind: UnionSearchItemKind.artist,
         rank: rank,
-        sortKey: normalizedSearchQuery(artist.name).toLowerCase(),
+        sortKey: normalizeSearchText(artist.name),
         audioIndex: -1,
         artist: artist,
       ),
@@ -92,12 +90,12 @@ List<UnionSearchItem> rankUnionSearchItems({
   }
 
   for (final album in albums) {
-    if (!matches(album.name, queryInLowerCase)) continue;
+    if (!matches(album.name, normalizedQuery)) continue;
     items.add(
       UnionSearchItem(
         kind: UnionSearchItemKind.album,
-        rank: unionSearchRank(album.name, queryInLowerCase),
-        sortKey: normalizedSearchQuery(album.name).toLowerCase(),
+        rank: unionSearchRank(album.name, normalizedQuery),
+        sortKey: normalizeSearchText(album.name),
         audioIndex: -1,
         album: album,
       ),
@@ -115,28 +113,29 @@ List<UnionSearchItem> rankUnionSearchItems({
 }
 
 /// 文本、拼音首字母与完整拼音共用同一套规范化匹配。
-bool _matchesQuery(String text, String queryInLowerCase) {
-  if (normalizedSearchQuery(text).toLowerCase().contains(queryInLowerCase)) {
-    return true;
-  }
-  return text.getPinyinInitials().toLowerCase().contains(queryInLowerCase) ||
-      text.getPinyin().toLowerCase().contains(queryInLowerCase);
+/// 繁体文本先转简体再取拼音，避免繁体字拼音库无结果。
+bool _matchesQuery(String text, String query) {
+  if (query.isEmpty) return false;
+  final simplified = normalizeSearchText(text);
+  if (simplified.contains(query)) return true;
+  return simplified.getPinyinInitials().toLowerCase().contains(query) ||
+      simplified.getPinyin().toLowerCase().contains(query);
 }
 
 int? _artistRank(
   Artist artist,
-  String queryInLowerCase,
+  String query,
   Map<String, List<String>> groups,
   bool Function(String text, String query) matches,
 ) {
-  final nameMatches = matches(artist.name, queryInLowerCase);
+  final nameMatches = matches(artist.name, query);
   final members = groups[artist.name] ?? const <String>[];
   final aliasMatches = members.any(
-    (name) => matches(name, queryInLowerCase),
+    (name) => matches(name, query),
   );
   if (!nameMatches && !aliasMatches) return null;
   if (!nameMatches) return 1;
-  return unionSearchRank(artist.name, queryInLowerCase);
+  return unionSearchRank(artist.name, query);
 }
 
 class UnionSearchResult {
@@ -155,7 +154,7 @@ class UnionSearchResult {
         audios: audios,
         artists: artists,
         albums: album,
-        queryInLowerCase: normalizedSearchQuery(query).toLowerCase(),
+        query: normalizeSearchText(query),
       );
     } catch (error, trace) {
       log.library.warn(
@@ -169,10 +168,9 @@ class UnionSearchResult {
   }
 
   static UnionSearchResult search(String query, {SearchScope? scope}) {
-    final normalizedQuery = normalizedSearchQuery(query);
+    final normalizedQuery = normalizeSearchText(query);
     final result = UnionSearchResult(normalizedQuery);
 
-    final queryInLowerCase = normalizedQuery.toLowerCase();
     final library = AudioLibrary.instance;
 
     if (scope == null || scope == SearchScope.music) {
@@ -180,7 +178,7 @@ class UnionSearchResult {
       final metadataMatches = <Audio>[];
       for (int i = 0; i < library.audioCollection.length; i++) {
         final audio = library.audioCollection[i];
-        final rank = audio.searchMatchRank(queryInLowerCase);
+        final rank = audio.searchMatchRank(normalizedQuery);
         if (rank == 0) {
           titleMatches.add(audio);
         } else if (rank == 1) {
@@ -196,8 +194,8 @@ class UnionSearchResult {
       final groups = groupArtistAliases(AppSettings.instance.artistAliases);
       for (Artist item in library.artistCollection.values) {
         final members = groups[item.name] ?? const <String>[];
-        if (_matchesQuery(item.name, queryInLowerCase) ||
-            members.any((name) => _matchesQuery(name, queryInLowerCase))) {
+        if (_matchesQuery(item.name, normalizedQuery) ||
+            members.any((name) => _matchesQuery(name, normalizedQuery))) {
           result.artists.add(item);
         }
       }
@@ -205,7 +203,7 @@ class UnionSearchResult {
 
     if (scope == null || scope == SearchScope.album) {
       for (Album item in library.albumCollection.values) {
-        if (_matchesQuery(item.name, queryInLowerCase)) {
+        if (_matchesQuery(item.name, normalizedQuery)) {
           result.album.add(item);
         }
       }
