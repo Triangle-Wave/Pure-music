@@ -275,10 +275,12 @@ void main() {
       '我的電台': Album(name: '我的電台'),
     };
 
-    final result = UnionSearchResult.search('再见');
-    expect(result.audios.single.title, '再見');
-    expect(result.artists.single.name, '鄧紫棋');
-    expect(result.album.single.name, '我的電台');
+    // 简体查询词分别在标题、歌手、专辑字段命中繁体曲库内容。
+    expect(UnionSearchResult.search('再见').audios.single.title, '再見');
+    expect(UnionSearchResult.search('邓紫棋').artists.single.name, '鄧紫棋');
+    // 歌手链路同时覆盖完整拼音命中（_SearchTextCache 支持全拼）。
+    expect(UnionSearchResult.search('dengziqi').artists.single.name, '鄧紫棋');
+    expect(UnionSearchResult.search('电台').album.single.name, '我的電台');
   });
 
   test('traditional query matches simplified title', () {
@@ -306,7 +308,7 @@ void main() {
       _audio('再見', r'C:\Music\a.mp3'),
     ];
 
-    expect(UnionSearchResult.search('zaijian').audios.single.title, '再見');
+    // 标题链路按既有设计支持拼音首字母；繁体标题先转简体再取拼音。
     expect(UnionSearchResult.search('zj').audios.single.title, '再見');
   });
 }
