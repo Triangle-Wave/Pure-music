@@ -5,9 +5,20 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.39**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.40**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.40</strong></summary>
+
+**新增**
+
+- 搜索支持繁简互通：简体关键词可以搜索到繁体名称的歌曲、歌手与专辑，拼音搜索同步支持繁体内容。
+- 搜索结果按「歌曲 / 歌手 / 专辑」分组展示，结果类型一目了然。
+- 歌手详情页默认按专辑排序（原默认按标题），排序方式仍可自由切换并保存。
+
+</details>
 
 <details>
 <summary><strong>2.3.39</strong></summary>
