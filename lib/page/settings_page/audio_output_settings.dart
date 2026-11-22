@@ -445,12 +445,12 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
             showSelectedIcon: false,
             segments: const [
               ButtonSegment(
-                value: PlaybackPreference.dsdPlaybackModeDsf,
-                label: Text('DSF 直解'),
-              ),
-              ButtonSegment(
                 value: PlaybackPreference.dsdPlaybackModePcm,
                 label: Text('实时 PCM'),
+              ),
+              ButtonSegment(
+                value: PlaybackPreference.dsdPlaybackModeDsf,
+                label: Text('DSF 直解'),
               ),
             ],
             selected: {_pref.dsdPlaybackMode},
