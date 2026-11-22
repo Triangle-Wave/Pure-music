@@ -158,7 +158,7 @@ fn validate_request(sample_rate: u32, bit_depth: u16) -> Result<(), SacdError> {
 /// 头写成 48kHz，导致音调与时长错误。48kHz 请求统一回退到 44100Hz。
 /// 192000 原样返回：`compute_decim_and_upsample` 对 DSD64 给出 L=10、M=147，
 /// 由 `LMResampler` 的 ×10 → ÷21 → ÷7 两级通路输出 192kHz。
-fn effective_sample_rate(requested: u32) -> u32 {
+pub(crate) fn effective_sample_rate(requested: u32) -> u32 {
     if requested == 48_000 {
         log::warn!("rdsd2pcm 不支持 48kHz 输出，回退到 44100Hz");
         44_100

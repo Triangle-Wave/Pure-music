@@ -13,7 +13,7 @@ use super::reader::ImageReader;
 use super::types::{SacdAreaKind, SacdError, SacdFrameFormat, SACD_LSN_SIZE};
 
 /// 单批读取的逻辑扇区数，与镜像读取器的单次读取上限一致。
-const SECTORS_PER_BATCH: u16 = 128;
+pub(crate) const SECTORS_PER_BATCH: u16 = 128;
 
 /// 每处理多少批就让出一次 CPU 时间片（约 2MB 音频）。
 const BATCHES_PER_YIELD: u32 = 8;
@@ -50,7 +50,7 @@ fn batch_pause(batch_index: u32) -> BatchPause {
 }
 
 /// 按批次序号执行让出动作，降低持续读盘对前台操作的干扰。
-fn apply_batch_pause(batch_index: u32) {
+pub(crate) fn apply_batch_pause(batch_index: u32) {
     match batch_pause(batch_index) {
         BatchPause::None => {}
         BatchPause::Yield => std::thread::yield_now(),
@@ -178,7 +178,7 @@ pub(crate) fn extract_track_to_dsf(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::api::sacd::dsf::DSF_BLOCK_SIZE_PER_CHANNEL;
     use std::fs;
@@ -186,29 +186,29 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const PLAIN_SECTOR_SIZE: usize = 2048;
-    const HEADERED_SECTOR_SIZE: usize = 2064;
-    const HEADERED_SECTOR_HEADER: usize = 12;
-    const MASTER_TOC_LSN: usize = 510;
-    const AUDIO_START_LSN: usize = 512;
-    const IMAGE_SECTORS: usize = 520;
+    pub(crate) const PLAIN_SECTOR_SIZE: usize = 2048;
+    pub(crate) const HEADERED_SECTOR_SIZE: usize = 2064;
+    pub(crate) const HEADERED_SECTOR_HEADER: usize = 12;
+    pub(crate) const MASTER_TOC_LSN: usize = 510;
+    pub(crate) const AUDIO_START_LSN: usize = 512;
+    pub(crate) const IMAGE_SECTORS: usize = 520;
 
     /// 单扇区音频负载：2048 - 1 字节扇区头 - 2 字节包信息 - 3 字节帧信息。
-    const AUDIO_PAYLOAD_SIZE: usize = PLAIN_SECTOR_SIZE - 6;
+    pub(crate) const AUDIO_PAYLOAD_SIZE: usize = PLAIN_SECTOR_SIZE - 6;
 
     /// 测试结束后自动删除的临时文件。
-    struct TempFile {
+    pub(crate) struct TempFile {
         path: PathBuf,
     }
 
     impl TempFile {
-        fn create(suffix: &str, data: &[u8]) -> Self {
+        pub(crate) fn create(suffix: &str, data: &[u8]) -> Self {
             let path = unique_temp_path(suffix);
             fs::write(&path, data).expect("写入临时文件失败");
             Self { path }
         }
 
-        fn unused(suffix: &str) -> Self {
+        pub(crate) fn unused(suffix: &str) -> Self {
             Self {
                 path: unique_temp_path(suffix),
             }
@@ -221,7 +221,7 @@ mod tests {
         }
     }
 
-    fn unique_temp_path(suffix: &str) -> PathBuf {
+    pub(crate) fn unique_temp_path(suffix: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -239,7 +239,7 @@ mod tests {
     }
 
     /// 构造一个只含扇区头的裸 DSD 音频扇区。
-    fn write_audio_sector(target: &mut [u8], payload: &[u8], frame_start: bool) {
+    pub(crate) fn write_audio_sector(target: &mut [u8], payload: &[u8], frame_start: bool) {
         let needed = 6 + payload.len();
         assert!(needed <= target.len(), "测试音频负载超出扇区");
         target.fill(0);
@@ -252,7 +252,7 @@ mod tests {
     }
 
     /// 构造最小 ISO：Master TOC 签名 + 两个裸 DSD 音频扇区。
-    fn build_image(headered: bool) -> Vec<u8> {
+    pub(crate) fn build_image(headered: bool) -> Vec<u8> {
         let (stride, header_len) = if headered {
             (HEADERED_SECTOR_SIZE, HEADERED_SECTOR_HEADER)
         } else {
@@ -276,12 +276,12 @@ mod tests {
         image
     }
 
-    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         let target = bytes.get(offset..offset + 4).expect("读取 u32 越界");
         u32::from_le_bytes(target.try_into().expect("u32 长度错误"))
     }
 
-    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
         let target = bytes.get(offset..offset + 8).expect("读取 u64 越界");
         u64::from_le_bytes(target.try_into().expect("u64 长度错误"))
     }
@@ -343,11 +343,11 @@ mod tests {
     ///
     /// `frame_001.dst` 解码后得到 `frame_001.dsd`：每帧每通道 4704 字节，
     /// 两通道共 9408 字节。
-    const DST_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dst");
-    const DST_DSD_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dsd");
+    pub(crate) const DST_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dst");
+    pub(crate) const DST_DSD_FIXTURE: &[u8] = include_bytes!("testdata/frame_001.dsd");
 
     /// 构造一个只含一个 DST 音频包的扇区。
-    fn write_dst_audio_sector(target: &mut [u8], payload: &[u8], sector_count: u8) {
+    pub(crate) fn write_dst_audio_sector(target: &mut [u8], payload: &[u8], sector_count: u8) {
         let needed = 7 + payload.len();
         assert!(needed <= target.len(), "测试 DST 负载超出扇区");
         target.fill(0);
@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// 构造最小 DST ISO：Master TOC 签名 + 一个 DST 音频扇区。
-    fn build_dst_image() -> Vec<u8> {
+    pub(crate) fn build_dst_image() -> Vec<u8> {
         let mut image = vec![0u8; IMAGE_SECTORS * PLAIN_SECTOR_SIZE];
 
         let master_offset = MASTER_TOC_LSN * PLAIN_SECTOR_SIZE;

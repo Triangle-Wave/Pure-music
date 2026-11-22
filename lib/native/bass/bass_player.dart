@@ -243,6 +243,79 @@ final class SmartTransitionPreparation {
   final double? replayGainDb;
 }
 
+/// Rust 提供的自定义流描述。
+///
+/// [user] 是 Rust 侧的流会话指针，另外四项是 Rust 导出的 BASS 文件回调地址，
+/// 一起交给 `BASS_StreamCreateFileUser`。`BASS_StreamFree` 释放流时会触发
+/// [closeProc]，由 Rust 侧回收会话。
+class ExternalStreamSpec {
+  const ExternalStreamSpec({
+    required this.user,
+    required this.closeProc,
+    required this.lengthProc,
+    required this.readProc,
+    required this.seekProc,
+    this.flags = 0,
+    this.discard,
+  });
+
+  final int user;
+  final int closeProc;
+  final int lengthProc;
+  final int readProc;
+  final int seekProc;
+
+  /// 追加到 BASS_SAMPLE_FLOAT | BASS_STREAM_DECODE 之上的标志。
+  final int flags;
+
+  /// 流创建失败时释放 Rust 会话。
+  final void Function(int user)? discard;
+}
+
+/// 解析外部流；返回 null 表示该路径走普通文件流。
+typedef ExternalStreamResolver = ExternalStreamSpec? Function(String path);
+
+/// 外部流实际使用的 BASS 标志。
+///
+/// file-user 不接受 Unicode 路径与异步文件读取，这两项必须去掉；采样一律按
+/// float 请求，缺省时 DSD 解码会输出全零数据。
+int externalStreamFlags(int baseFlags) =>
+    (baseFlags & ~bass.BASS_ASYNCFILE & ~bass.BASS_UNICODE) |
+    bass.BASS_SAMPLE_FLOAT;
+
+ffi.Pointer<bass.BassFileProcs>? _sharedExternalProcs;
+
+/// 外部流回调结构。
+///
+/// 所有外部源共用同一组 Rust 回调地址，进程内只分配一次。BASS 在流存活期间
+/// 可能随时取用该结构，释放流时不回收它，进程退出时随进程释放。
+ffi.Pointer<bass.BassFileProcs> _externalProcs() {
+  final cached = _sharedExternalProcs;
+  if (cached != null) return cached;
+  final procs = calloc<bass.BassFileProcs>();
+  _sharedExternalProcs = procs;
+  return procs;
+}
+
+/// 外部流没有建成时的收尾：释放 Rust 会话并返回表示"无外部流"的 0。
+///
+/// [BassPlayer._createExternalStreamIfAny] 的失败路径共用此函数，释放回调自身
+/// 抛错时只记日志，不打断调用方的回退流程。
+int discardExternalStream(ExternalStreamSpec? spec) {
+  if (spec == null) return 0;
+  try {
+    spec.discard?.call(spec.user);
+  } catch (err, trace) {
+    log.bass.warn(
+      'legacy',
+      '[bass] external stream discard failed',
+      error: err,
+      stackTrace: trace,
+    );
+  }
+  return 0;
+}
+
 class BassPlayer {
   static const _eqFxPriority = 1000;
   static const _highPassFxPriority = 900;
@@ -266,6 +339,9 @@ class BassPlayer {
   ffi.NativeCallable<BassSyncProc>? _queueSyncCallback;
   ffi.NativeCallable<BassSyncProc>? _posSyncCallback;
   bool get isBassFxLoaded => _bassFx != null;
+
+  /// 外部流解析器。返回 null 的路径按普通文件流打开。
+  ExternalStreamResolver? externalStreamResolver;
 
   late final String _bassDir;
 
@@ -2998,6 +3074,98 @@ class BassPlayer {
     }
   }
 
+  /// 用外部源创建流；返回 0 表示"不是外部源"或"创建失败"。
+  ///
+  /// 解析抛异常、BASS 创建失败与建流过程中抛异常三种情况都会释放 Rust 会话，
+  /// 让调用方继续走普通文件流。回调结构由 [_externalProcs] 进程内共享，不随
+  /// 单个流释放。
+  int _createExternalStreamIfAny(String path, int baseFlags) {
+    final resolver = externalStreamResolver;
+    if (resolver == null) return 0;
+    ExternalStreamSpec? resolved;
+    try {
+      resolved = resolver(path);
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] external stream resolve failed',
+        error: err,
+        stackTrace: trace,
+      );
+      return 0;
+    }
+    if (resolved == null) return 0;
+
+    final spec = resolved;
+    final flags = externalStreamFlags(baseFlags | spec.flags);
+    final procs = _externalProcs();
+    var handle = 0;
+    try {
+      // 每次建流都重写四个地址：它们来自 Rust 导出的固定回调，覆盖不影响已建的流。
+      procs.ref
+        ..close = ffi.Pointer<ffi.Void>
+            .fromAddress(spec.closeProc)
+            .cast<
+              ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>
+            >()
+        ..length = ffi.Pointer<ffi.Void>
+            .fromAddress(spec.lengthProc)
+            .cast<
+              ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<ffi.Void>)>
+            >()
+        ..read = ffi.Pointer<ffi.Void>
+            .fromAddress(spec.readProc)
+            .cast<
+              ffi.NativeFunction<
+                ffi.Uint32 Function(
+                  ffi.Pointer<ffi.Void>,
+                  ffi.Uint32,
+                  ffi.Pointer<ffi.Void>,
+                )
+              >
+            >()
+        ..seek = ffi.Pointer<ffi.Void>
+            .fromAddress(spec.seekProc)
+            .cast<
+              ffi.NativeFunction<
+                ffi.Int32 Function(ffi.Uint64, ffi.Pointer<ffi.Void>)
+              >
+            >();
+      handle = _bass.BASS_StreamCreateFileUser(
+        bass.STREAMFILE_NOBUFFER,
+        flags,
+        procs,
+        ffi.Pointer<ffi.Void>.fromAddress(spec.user),
+      );
+    } catch (err, trace) {
+      log.bass.warn(
+        'legacy',
+        '[bass] external stream setup failed',
+        error: err,
+        stackTrace: trace,
+      );
+      return discardExternalStream(spec);
+    }
+
+    final userText = '0x${(spec.user & 0xFF).toRadixString(16)}';
+    final flagsText = '0x${flags.toRadixString(16)}';
+    if (handle == 0) {
+      final code = _bass.BASS_ErrorGetCode();
+      log.bass.warn(
+        'legacy',
+        '[bass] external stream create failed: user=$userText '
+            'flags=$flagsText error=$code(${bassErrorText(code)})',
+      );
+      return discardExternalStream(spec);
+    }
+    log.bass.debug(
+      'legacy',
+      '[bass] external stream created: handle=$handle user=$userText '
+          'flags=$flagsText',
+    );
+    return handle;
+  }
+
   int _createSharedSource(String audioPath) {
     _applyDsdFreqConfig();
     const flags =
@@ -3005,12 +3173,18 @@ class BassPlayer {
         bass.BASS_SAMPLE_FLOAT |
         bass.BASS_ASYNCFILE |
         bass.BASS_STREAM_DECODE;
-    var handle = _isUrl(audioPath)
-        ? _createUrlStream(
-            audioPath,
-            flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
-          )
-        : _createFileStream(audioPath, flags);
+    var handle = _createExternalStreamIfAny(
+      audioPath,
+      bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+    );
+    if (handle == 0) {
+      handle = _isUrl(audioPath)
+          ? _createUrlStream(
+              audioPath,
+              flags: bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+            )
+          : _createFileStream(audioPath, flags);
+    }
     if (handle == 0) return 0;
 
     // 默认速率与音高下不套 tempo：少一层 DSP，整轨文件定位更快。
@@ -3103,6 +3277,13 @@ class BassPlayer {
     if (_isUrl(audioPath)) {
       return _createUrlStream(audioPath, flags: bass.BASS_SAMPLE_FLOAT);
     }
+
+    // 外部源在 tempo 分支已由 _createDecodeStream 建过；这里负责可播放流。
+    final externalHandle = _createExternalStreamIfAny(
+      audioPath,
+      bass.BASS_SAMPLE_FLOAT,
+    );
+    if (externalHandle != 0) return externalHandle;
 
     const playableFlags =
         bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
@@ -4611,6 +4792,11 @@ class BassPlayer {
 
   int _createDecodeStream(String path) {
     _applyDsdFreqConfig();
+    final externalHandle = _createExternalStreamIfAny(
+      path,
+      bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
+    );
+    if (externalHandle != 0) return externalHandle;
     if (_isUrl(path)) {
       return _createUrlStream(
         path,

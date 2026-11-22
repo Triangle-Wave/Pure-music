@@ -1,9 +1,6 @@
-import 'dart:async';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
-import 'package:pure_music/play_service/sacd_source_cache.dart';
 
 Audio _sacdAudio(String track, {int endMs = 90333}) {
   return Audio(
@@ -40,85 +37,6 @@ Audio _plainAudio(String path) {
 }
 
 void main() {
-  group('SACD 提取去重', () {
-    test('同一轨并发提取共享同一个 Future 且只执行一次', () async {
-      final cache = SacdSourceCache();
-      var calls = 0;
-      final gate = Completer<void>();
-
-      Future<String> load() async {
-        calls++;
-        await gate.future;
-        return r'D:\cache\track01.dsf';
-      }
-
-      final first = cache.extract('sacd:d:/music/sacd/album.iso#2ch#01', load);
-      final second = cache.extract(
-        'sacd:d:/music/sacd/album.iso#2ch#01',
-        load,
-      );
-      gate.complete();
-
-      expect(identical(first, second), isTrue);
-      expect(await first, r'D:\cache\track01.dsf');
-      expect(calls, 1);
-      expect(cache.inFlightCount, 0);
-    });
-
-    test('不同轨各自执行提取', () async {
-      final cache = SacdSourceCache();
-      final calls = <String>[];
-
-      Future<String> load(String key) async {
-        calls.add(key);
-        return '$key.dsf';
-      }
-
-      final first = cache.extract('track01', () => load('track01'));
-      final second = cache.extract('track02', () => load('track02'));
-
-      expect(await first, 'track01.dsf');
-      expect(await second, 'track02.dsf');
-      expect(calls, <String>['track01', 'track02']);
-      expect(cache.inFlightCount, 0);
-    });
-
-    test('提取失败后移除在途记录，下一次调用重新提取', () async {
-      final cache = SacdSourceCache();
-      var calls = 0;
-
-      Future<String> load() async {
-        calls++;
-        if (calls == 1) throw StateError('extract failed');
-        return r'D:\cache\track01.dsf';
-      }
-
-      await expectLater(
-        cache.extract('track01', load),
-        throwsA(isA<StateError>()),
-      );
-      expect(cache.inFlightCount, 0);
-      expect(await cache.extract('track01', load), r'D:\cache\track01.dsf');
-      expect(calls, 2);
-    });
-
-    test('提取完成后再次调用重新进入提取流程', () async {
-      final cache = SacdSourceCache();
-      var calls = 0;
-
-      Future<String> load() async {
-        calls++;
-        return r'D:\cache\track01.dsf';
-      }
-
-      await cache.extract('track01', load);
-      await cache.extract('track01', load);
-
-      expect(calls, 2);
-      expect(cache.inFlightCount, 0);
-    });
-  });
-
   group('SACD 无缝预建的二次校验', () {
     final target = _sacdAudio('01');
     final other = _sacdAudio('02');

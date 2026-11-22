@@ -43,6 +43,12 @@ const int BASS_ERROR_SPEAKER = 42;
 
 const int BASS_ASYNCFILE = 1073741824;
 
+/// `BASS_StreamCreateFileUser` 的 system 参数：不额外缓冲，直接调用文件回调。
+const int STREAMFILE_NOBUFFER = 0;
+
+/// `BASS_StreamCreateFileUser` 的 system 参数：由 BASS 缓冲文件回调。
+const int STREAMFILE_BUFFER = 1;
+
 const int BASS_ERROR_CODEC = 44;
 
 const int BASS_ERROR_INIT = 8;
@@ -288,6 +294,29 @@ final class HWND__ extends ffi.Struct {
 
 typedef HWND = ffi.Pointer<HWND__>;
 
+/// `BASS_FILEPROCS`：`BASS_StreamCreateFileUser` 读取数据的四个回调。
+///
+/// 字段顺序与 `bass.h` 的 `BASS_FILEPROCS` 一致：close、length、read、seek。
+final class BassFileProcs extends ffi.Struct {
+  external ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>
+  close;
+
+  external ffi.Pointer<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<ffi.Void>)>>
+  length;
+
+  external ffi.Pointer<
+    ffi.NativeFunction<
+      ffi.Uint32 Function(ffi.Pointer<ffi.Void>, ffi.Uint32, ffi.Pointer<ffi.Void>)
+    >
+  >
+  read;
+
+  external ffi.Pointer<
+    ffi.NativeFunction<ffi.Int32 Function(ffi.Uint64, ffi.Pointer<ffi.Void>)>
+  >
+  seek;
+}
+
 class Bass {
   /// Holds the symbol lookup function.
   final ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName)
@@ -502,6 +531,31 @@ class Bass {
   late final _BASS_StreamCreateFile =
       _BASS_StreamCreateFilePtr.asFunction<
         int Function(int, ffi.Pointer<ffi.Void>, int, int, int)
+      >();
+
+  int BASS_StreamCreateFileUser(
+    int system,
+    int flags,
+    ffi.Pointer<BassFileProcs> procs,
+    ffi.Pointer<ffi.Void> user,
+  ) {
+    return _BASS_StreamCreateFileUser(system, flags, procs, user);
+  }
+
+  late final _BASS_StreamCreateFileUserPtr =
+      _lookup<
+        ffi.NativeFunction<
+          HSTREAM Function(
+            DWORD,
+            DWORD,
+            ffi.Pointer<BassFileProcs>,
+            ffi.Pointer<ffi.Void>,
+          )
+        >
+      >('BASS_StreamCreateFileUser');
+  late final _BASS_StreamCreateFileUser = _BASS_StreamCreateFileUserPtr
+      .asFunction<
+        int Function(int, int, ffi.Pointer<BassFileProcs>, ffi.Pointer<ffi.Void>)
       >();
 
   int BASS_PluginLoad(ffi.Pointer<ffi.Char> file, int flags) {

@@ -115,6 +115,64 @@ impl PcmWriter {
         })
     }
 
+    /// Create a PCM sink that keeps packed PCM in `stdout_buf` so callers can
+    /// take it in memory. Used by [`crate::StreamingPcm`]; no file is opened.
+    /// * `out_bits` - output bit depth (16, 20, 24 or 32)
+    /// * `out_rate` - output sample rate in Hz
+    /// * `dither` - dither instance to apply
+    /// * `out_frames_capacity` - number of frames to allocate buffer for
+    /// * `channels_num` - number of channels
+    /// * `upsample_ratio` - upsample ratio (1 when not fractional)
+    pub(crate) fn new_memory(
+        out_bits: usize,
+        out_rate: u32,
+        dither: Dither,
+        out_frames_capacity: usize,
+        channels_num: usize,
+        upsample_ratio: u32,
+    ) -> Result<Self, Box<dyn Error>> {
+        if ![16, 20, 24, 32].contains(&out_bits) {
+            return Err("Unsupported bit depth".into());
+        }
+        if channels_num == 0 {
+            return Err("Channel count must be greater than zero".into());
+        }
+        if out_frames_capacity == 0 {
+            return Err("Frame capacity must be greater than zero".into());
+        }
+
+        let bytes_per_sample = if out_bits == 20 { 3 } else { out_bits / 8 };
+        let mut ctx = Self {
+            bits: out_bits,
+            output: OutputType::Memory,
+            bytes_per_sample,
+            channels_num,
+            rate: out_rate,
+            peak_level: 0,
+            scale_factor: 1.0,
+            stdout_buf: vec![0u8; out_frames_capacity * channels_num * bytes_per_sample],
+            path: None,
+            last_samps_clipped_low: 0,
+            last_samps_clipped_high: 0,
+            clips: 0,
+            dither,
+            float_data: vec![0.0; out_frames_capacity],
+            stream_writer: None,
+        };
+
+        ctx.set_scaling(0.0, upsample_ratio);
+        Ok(ctx)
+    }
+
+    /// Copy the first `pcm_bytes` bytes of the internal packing buffer.
+    ///
+    /// Only meaningful for `OutputType::Memory`, where `write_to_buffer`
+    /// interleaves into this buffer and no writer consumes it.
+    pub(crate) fn take_memory(&mut self, pcm_bytes: usize) -> Vec<u8> {
+        let len = pcm_bytes.min(self.stdout_buf.len());
+        self.stdout_buf[..len].to_vec()
+    }
+
     pub fn new(
         out_bits: usize,
         out_type: OutputType,
@@ -235,6 +293,8 @@ impl PcmWriter {
                 tag,
             )?),
             OutputType::Stdout => return Ok(()),
+            // In-memory output never opens a stream; samples stay in `stdout_buf`.
+            OutputType::Memory => return Ok(()),
         };
         self.stream_writer = Some(writer);
         Ok(())
@@ -349,7 +409,7 @@ impl PcmWriter {
         chan: usize,
     ) {
         // Output / packing for channel
-        if self.output == OutputType::Stdout {
+        if matches!(self.output, OutputType::Stdout | OutputType::Memory) {
             // Interleave into pcm_data (handle float vs integer separately)
             let bps = self.bytes_per_sample; // 4 for 32-bit float
             let mut pcm_pos = chan * bps;
