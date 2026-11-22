@@ -4,6 +4,8 @@
 //! 字节直接送 [`StreamingPcm`] 转成 PCM，而非编码成 DSF。seek 后必须重置
 //! 转换器并丢弃 0.2 秒预滚，避免滤波器起始瞬态被听到。
 
+use flutter_rust_bridge::frb;
+
 use rdsd2pcm::{DitherType, FilterType, StreamingPcm};
 
 use super::dsd_source::IsoDsfReader;
@@ -15,6 +17,7 @@ use super::TrackInfo;
 
 /// 预滚时长对应的 DSD 字节在 seek 时从目标位置向前多解，保证丢弃预滚后正好
 /// 落在目标附近。
+#[frb(ignore)]
 pub(super) struct PcmSource {
     feed: IsoDsfReader,
     converter: StreamingPcm,

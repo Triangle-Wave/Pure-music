@@ -4,6 +4,8 @@
 //! 实时 PCM 模式包装成虚拟 WAV（44 字节头 + 交织 PCM）。两种头部字段都与
 //! 现有文件写入器保持一致，BASS 才能正确换算长度与 seek。
 
+use flutter_rust_bridge::frb;
+
 use super::super::dsf::{channel_type, DSF_BLOCK_SIZE_PER_CHANNEL};
 
 /// DSF 固定头长度：DSD chunk 28 字节 + fmt chunk 52 字节 + data chunk 头 12 字节。
@@ -24,6 +26,7 @@ const DATA_CHUNK_HEADER_SIZE: u64 = 12;
 pub(super) const SACD_FRAMES_PER_SECOND: u64 = 75;
 
 /// 把一段字节写入 `header` 的当前位置并推进偏移；越界时保持原样（不会 panic）。
+#[frb(ignore)]
 fn put_bytes(header: &mut [u8], offset: &mut usize, bytes: &[u8]) {
     let end = offset.saturating_add(bytes.len());
     if let Some(target) = header.get_mut(*offset..end) {
@@ -36,6 +39,7 @@ fn put_bytes(header: &mut [u8], offset: &mut usize, bytes: &[u8]) {
 ///
 /// `per_channel = ceil(duration_ms * sample_rate / 8 / 1000)`。时长或采样率为
 /// 0 时返回 0。
+#[frb(ignore)]
 pub(super) fn dsf_valid_bytes_per_channel(duration_ms: u64, sample_rate: u32) -> u64 {
     if duration_ms == 0 || sample_rate == 0 {
         return 0;
@@ -48,6 +52,7 @@ pub(super) fn dsf_valid_bytes_per_channel(duration_ms: u64, sample_rate: u32) ->
 ///
 /// `per_channel = ceil(duration_ms * sample_rate / 8 / 1000)`，再对齐到
 /// 4096 字节。返回对齐后的每通道字节数。时长或采样率为 0 时返回 0。
+#[frb(ignore)]
 pub(super) fn dsf_bytes_per_channel(duration_ms: u64, sample_rate: u32) -> u64 {
     let valid = dsf_valid_bytes_per_channel(duration_ms, sample_rate);
     if valid == 0 {
@@ -59,6 +64,7 @@ pub(super) fn dsf_bytes_per_channel(duration_ms: u64, sample_rate: u32) -> u64 {
 }
 
 /// 虚拟 DSF 的 data 字节数：对齐后的每通道字节数乘以声道数。
+#[frb(ignore)]
 pub(super) fn dsf_data_bytes(duration_ms: u64, channels: u32, sample_rate: u32) -> u64 {
     if channels == 0 {
         return 0;
@@ -70,6 +76,7 @@ pub(super) fn dsf_data_bytes(duration_ms: u64, channels: u32, sample_rate: u32) 
 ///
 /// `sample_count` 是每通道样本数（位），`data_bytes` 是 data chunk 的音频字节数
 /// （已按块对齐）。总文件大小与 data chunk 长度直接写入确定值，不占位。
+#[frb(ignore)]
 pub(super) fn dsf_header(
     channels: u32,
     sample_rate: u32,
@@ -121,6 +128,7 @@ pub(super) fn dsf_header(
 /// 按毫秒时长估算虚拟 WAV 的 data 字节数。
 ///
 /// 帧数按 `duration_ms * out_rate / 1000` 向下取整，再乘以声道数与每样本字节数。
+#[frb(ignore)]
 pub(super) fn wav_data_bytes(
     duration_ms: u64,
     out_rate: u32,
@@ -140,6 +148,7 @@ pub(super) fn wav_data_bytes(
 ///
 /// RIFF 与 data 长度字段是 32 位，超过 4 GiB 时按上限截断并记录警告；调用方
 /// 应把截断视为格式限制，播放会在 4 GiB 处提前结束。
+#[frb(ignore)]
 pub(super) fn wav_header(
     channels: u32,
     sample_rate: u32,
@@ -197,6 +206,7 @@ pub(super) fn wav_header(
 ///
 /// 返回 `(block, within)`：`block` 是 DSF 块序号（每块 `4096 * channels` 字节），
 /// `within` 是块内字节偏移。
+#[frb(ignore)]
 pub(super) fn dsf_block_position(data_offset: u64, channels: u32) -> (u64, u64) {
     if channels == 0 {
         return (0, 0);
@@ -206,11 +216,13 @@ pub(super) fn dsf_block_position(data_offset: u64, channels: u32) -> (u64, u64) 
 }
 
 /// 每帧每通道的 DSD 字节数（SACD 时间码一帧为 1/75 秒）。
+#[frb(ignore)]
 pub(super) fn frame_bytes_per_channel(sample_rate: u32) -> u64 {
     u64::from(sample_rate) / SACD_FRAMES_PER_SECOND / 8
 }
 
 /// 帧数估算：`ceil(duration_ms * 75 / 1000)`，至少 1。
+#[frb(ignore)]
 pub(super) fn frame_count(duration_ms: u64) -> u64 {
     let frames = u128::from(duration_ms) * u128::from(SACD_FRAMES_PER_SECOND) / 1_000;
     let frames = u64::try_from(frames).unwrap_or(u64::MAX);
@@ -223,6 +235,7 @@ pub(super) fn frame_count(duration_ms: u64) -> u64 {
 /// `dsd_bytes = frames * (dsd_rate / 8) / out_rate`（向下取整）。每通道的 DSD
 /// 字节率是采样率除以 8，所以换算结果与 `length_lsn` 估算的字节数同量级；
 /// 与滤波器实际产出可能有一帧以内的出入，尾部以真实 EOF 为准。
+#[frb(ignore)]
 pub(super) fn pcm_offset_to_dsd_bytes(
     data_offset: u64,
     channels: u32,
@@ -240,12 +253,14 @@ pub(super) fn pcm_offset_to_dsd_bytes(
 }
 
 /// 0.2 秒预滚对应的每通道 DSD 字节数。
+#[frb(ignore)]
 pub(super) fn preroll_dsd_bytes(sample_rate: u32) -> u64 {
     // 0.2 秒 = 1/5 秒；每通道每秒 sample_rate / 8 字节。
     u64::from(sample_rate) / 8 / 5
 }
 
 /// 0.2 秒预滚对应的输出 PCM 帧数。
+#[frb(ignore)]
 pub(super) fn preroll_pcm_frames(out_rate: u32) -> u64 {
     u64::from(out_rate) / 5
 }

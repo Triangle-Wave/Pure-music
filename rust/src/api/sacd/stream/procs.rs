@@ -7,6 +7,8 @@
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use flutter_rust_bridge::frb;
+
 /// `FILECLOSEPROC`: `void (CALLBACK *)(void *user)`。
 ///
 /// 只置停止标志、唤醒等待者并把会话交给回收线程，不 join、不做磁盘 IO。
@@ -15,6 +17,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 ///
 /// `user` 必须是 [`super::open_stream`] 返回的会话地址，且 BASS 之后不再使用
 /// 该指针。
+#[frb(ignore)]
 pub(super) unsafe extern "system" fn sacd_proc_close(user: *mut c_void) {
     let ptr = user as usize;
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -44,6 +47,7 @@ pub(super) unsafe extern "system" fn sacd_proc_close(user: *mut c_void) {
 /// # Safety
 ///
 /// 同 [`sacd_proc_close`]。
+#[frb(ignore)]
 pub(super) unsafe extern "system" fn sacd_proc_length(user: *mut c_void) -> u64 {
     let ptr = user as usize;
     if ptr == 0 {
@@ -75,6 +79,7 @@ pub(super) unsafe extern "system" fn sacd_proc_length(user: *mut c_void) -> u64 
 /// # Safety
 ///
 /// `buffer` 必须可写至少 `length` 字节；`user` 同 [`sacd_proc_close`]。
+#[frb(ignore)]
 pub(super) unsafe extern "system" fn sacd_proc_read(
     buffer: *mut c_void,
     length: u32,
@@ -110,6 +115,7 @@ pub(super) unsafe extern "system" fn sacd_proc_read(
 /// # Safety
 ///
 /// 同 [`sacd_proc_close`]。
+#[frb(ignore)]
 pub(super) unsafe extern "system" fn sacd_proc_seek(
     offset: u64,
     user: *mut c_void,
@@ -135,6 +141,7 @@ pub(super) unsafe extern "system" fn sacd_proc_seek(
 }
 
 /// 提取 panic 负载中的可读消息。
+#[frb(ignore)]
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_owned();

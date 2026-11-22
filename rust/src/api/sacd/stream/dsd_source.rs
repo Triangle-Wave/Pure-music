@@ -6,6 +6,8 @@
 //! 整数倍，因此从帧起点重新解码就能得到与从头读取一致的通道相位，误差最多
 //! 一帧。
 
+use flutter_rust_bridge::frb;
+
 use super::super::audio::{
     AudioFrameHeader, AudioPacketInfo, AudioSectorParser, DATA_TYPE_AUDIO,
 };
@@ -26,6 +28,7 @@ const FRAME_SCAN_BATCH: u16 = 64;
 const MAX_DST_WINDOW_SECTORS: u32 = 2_048;
 
 /// 顺序读取：ISO → 交织、MSB-first 的 DSD 字节流。
+#[frb(ignore)]
 pub(super) struct IsoDsfReader {
     image: ImageReader,
     parser: AudioSectorParser,
@@ -355,6 +358,7 @@ impl IsoDsfReader {
 }
 
 /// 判断一个音频扇区是否包含带帧起点标志的音频包。
+#[frb(ignore)]
 pub(super) fn sector_has_frame_start(sector: &[u8]) -> bool {
     let first = match sector.first() {
         Some(first) => *first,
@@ -381,6 +385,7 @@ pub(super) fn sector_has_frame_start(sector: &[u8]) -> bool {
 }
 
 /// 直解数据源：交付虚拟 DSF 的完整字节流（92 字节头 + 编码后的 data）。
+#[frb(ignore)]
 pub(super) struct DsdSource {
     feed: IsoDsfReader,
     encoder: DsfStreamEncoder,
