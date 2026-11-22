@@ -4,7 +4,6 @@ import 'dart:convert';
 
 import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/cache.dart';
-import 'package:pure_music/core/cache_paths.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/play_service/play_service.dart';
@@ -15,9 +14,7 @@ import 'package:pure_music/play_service/playback_listen_tracker.dart';
 import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
-import 'package:pure_music/play_service/sacd_pcm_cache_probe.dart';
-import 'package:pure_music/play_service/sacd_source_cache.dart';
-import 'package:pure_music/play_service/sacd_source_resolver.dart';
+import 'package:pure_music/play_service/sacd_stream_request.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
@@ -66,27 +63,6 @@ final class _PendingGaplessTransition {
   final Audio audio;
 }
 
-/// 单次后台 PCM 转换任务的全部参数。
-final class _SacdPcmJob {
-  const _SacdPcmJob({
-    required this.trackUid,
-    required this.isoPath,
-    required this.area,
-    required this.trackNumber,
-    required this.cacheRoot,
-    required this.sampleRate,
-    required this.bitDepth,
-  });
-
-  final String trackUid;
-  final String isoPath;
-  final String area;
-  final int trackNumber;
-  final String cacheRoot;
-  final int sampleRate;
-  final int bitDepth;
-}
-
 /// 只通知 now playing 变更
 class PlaybackService extends ChangeNotifier {
   final PlayService playService;
@@ -104,13 +80,6 @@ class PlaybackService extends ChangeNotifier {
   final Set<Timer> _positionSyncBurstTimers = {};
   int _seekDeferRevision = 0;
   final PlaybackSongChangeTasks _songChangeTasks = PlaybackSongChangeTasks();
-  final SacdSourceCache _sacdSourceCache = SacdSourceCache();
-  final List<_SacdPcmJob> _sacdPcmJobs = <_SacdPcmJob>[];
-  final Set<String> _sacdPcmQueued = <String>{};
-  final Set<String> _sacdPcmFailed = <String>{};
-  Future<void>? _sacdPcmRunner;
-  String? _lastSacdPreparingUid;
-  int _lastSacdPreparingMs = 0;
   int? _listenRecordingToken;
   String? _supportPath;
   bool _closed = false;
@@ -295,6 +264,7 @@ class PlaybackService extends ChangeNotifier {
     _player.setMidiSoundfontPath(AppSettings.instance.midiSoundfontPath);
     audioTagWriteScheduler.bindPathCheck(_player.isAudioFileOpen);
     _player.onAudioFilesChanged = audioTagWriteScheduler.onAudioFilesChanged;
+    _player.externalStreamResolver = _resolveSacdExternalStream;
     _bindExclusiveMode();
     _bindPlayerState();
     _bindSmtcControls();
@@ -1505,19 +1475,18 @@ class PlaybackService extends ChangeNotifier {
     _applyGaplessReplayGain(pending);
   }
 
-  /// SACD 轨先解析可播放缓存路径，再预建无缝衔接；PCM 未就绪时使用 DSF。
+  /// SACD 轨用虚拟路径预建无缝衔接，建流由外部流解析器完成。
   ///
-  /// 提取期间用户可能切歌或切换列表，恢复后必须通过二次校验才操作播放器。
+  /// 快速连切时 pending 会被替换，让出后必须通过二次校验才操作播放器。
   Future<void> _prepareSacdGaplessSource(
     _PendingGaplessTransition pending,
   ) async {
     final trackUid = pending.audio.cueSegment?.trackUid ?? pending.audio.path;
     try {
-      // 快速连切时 pending 很快被替换，先让出这段窗口再提取，避免为已失效的目标读盘。
+      // 快速连切时 pending 很快被替换，先让出这段窗口，避免为已失效的目标开流。
       await Future<void>.delayed(const Duration(milliseconds: 200));
       if (!_isGaplessPreparationCurrent(pending)) return;
-      final sourcePath = await _ensureSacdSource(pending.audio, prefetch: true);
-      if (!_isGaplessPreparationCurrent(pending)) return;
+      final sourcePath = pending.audio.path;
       if (!_player.prepareGaplessSource(sourcePath, transitionId: pending.id)) {
         if (identical(_pendingGaplessTransition, pending)) {
           _pendingGaplessTransition = null;
@@ -1746,7 +1715,8 @@ class PlaybackService extends ChangeNotifier {
       var startMs = audio.segmentStartMs;
       var endMs = audio.segmentEndMs;
       if (audio.isSacdTrack) {
-        sourcePath = await _ensureSacdSource(audio);
+        // SACD 交虚拟路径，由外部流解析器打开 ISO 会话；段边界由会话自身给出。
+        sourcePath = audio.path;
         startMs = 0;
         endMs = 0;
       }
@@ -1775,7 +1745,7 @@ class PlaybackService extends ChangeNotifier {
       );
       if (reportFailure) {
         _reportPlaybackLoadFailure(
-          audio.isSacdTrack ? 'SACD 轨道提取或播放失败，请查看日志' : '播放失败，请查看日志',
+          audio.isSacdTrack ? 'SACD 轨道打开失败，请查看日志' : '播放失败，请查看日志',
         );
       }
       return false;
@@ -1784,188 +1754,35 @@ class PlaybackService extends ChangeNotifier {
     }
   }
 
-  /// 把 SACD 轨道解析为可播放的缓存文件路径。
+  /// 把 SACD 虚拟轨解析为 Rust 流会话；非 SACD 路径返回 null。
   ///
-  /// PCM 模式下 PCM 缓存已就绪时直接返回 WAV；尚未就绪时先返回 DSF 立即起播，
-  /// 再把该轨排入后台转换队列。DSF 模式只提取 DSF。同一轨道的并发解析共享
-  /// 同一个 Future，快速连切时不会重复转换同一轨。
-  Future<String> _ensureSacdSource(Audio audio, {bool prefetch = false}) {
-    final segment = audio.cueSegment;
-    final area = segment?.sacdArea;
-    if (segment == null || area == null) {
-      return Future<String>.error(
-        const FormatException('无效的 SACD 虚拟轨路径'),
-      );
-    }
-    final trackUid = segment.trackUid;
-    final isoPath = segment.sourcePath;
-    final trackNumber = segment.trackNumber;
-    final sacdArea = area;
-    return _sacdSourceCache.extract(trackUid, () async {
-      final cacheRoot = (await getSacdCacheDirectory()).path;
-      final settings = _sacdPlaybackSettings();
-      final source = await SacdSourceResolver.resolve(
-        trackUid: trackUid,
-        preferPcm: settings.preferPcm,
-        sampleRate: settings.sampleRate,
-        bitDepth: settings.bitDepth,
-        loadDsf: () => _ensureSacdDsf(
-          trackUid: trackUid,
-          isoPath: isoPath,
-          area: sacdArea,
-          trackNumber: trackNumber,
-          cacheRoot: cacheRoot,
-          showHint: !prefetch,
-        ),
-        isPcmCached: (dsfPath) => SacdPcmCacheProbe.isReady(
-          dsfPath: dsfPath,
-          sampleRate: settings.sampleRate,
-          bitDepth: settings.bitDepth,
-        ),
-        loadPcm: () => rust_sacd.ensureSacdTrackPcm(
-          isoPath: isoPath,
-          area: sacdArea,
-          trackNumber: trackNumber,
-          cacheRoot: cacheRoot,
-          sampleRate: settings.sampleRate,
-          bitDepth: settings.bitDepth,
-        ),
-      );
-      if (source.pcmPending) {
-        _scheduleSacdPcmConversion(
-          _SacdPcmJob(
-            trackUid: trackUid,
-            isoPath: isoPath,
-            area: sacdArea,
-            trackNumber: trackNumber,
-            cacheRoot: cacheRoot,
-            sampleRate: settings.sampleRate,
-            bitDepth: settings.bitDepth,
-          ),
-          urgent: !prefetch,
-        );
-      }
-      return source.path;
-    });
-  }
-
-  /// 提取轨道 DSF 缓存。
-  ///
-  /// 前台播放等待超过提示阈值时通知界面，让首次播放的等待有可见反馈；
-  /// 命中缓存通常在阈值内返回，不会弹提示。后台预取不提示。
-  Future<String> _ensureSacdDsf({
-    required String trackUid,
-    required String isoPath,
-    required String area,
-    required int trackNumber,
-    required String cacheRoot,
-    required bool showHint,
-  }) async {
-    final hintTimer = showHint
-        ? Timer(const Duration(milliseconds: 400), () {
-            _showSacdPreparingHint(trackUid);
-          })
-        : null;
-    try {
-      return await rust_sacd.ensureSacdTrackExtracted(
-        isoPath: isoPath,
-        area: area,
-        trackNumber: trackNumber,
-        cacheRoot: cacheRoot,
-      );
-    } finally {
-      hintTimer?.cancel();
-    }
-  }
-
-  void _showSacdPreparingHint(String trackUid) {
-    if (_closed) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (_lastSacdPreparingUid == trackUid &&
-        now - _lastSacdPreparingMs < 10000) {
-      return;
-    }
-    _lastSacdPreparingUid = trackUid;
-    _lastSacdPreparingMs = now;
-    showTextOnSnackBar('首次播放，正在准备缓存…');
-  }
-
-  /// 把轨道排入后台 PCM 转换队列。
-  ///
-  /// 同一轨只排一次；当前播放轨插到队首，预取轨排在队尾。队列串行执行，
-  /// 避免多轨同时转换造成磁盘与 CPU 峰值。转换失败过的轨道本次进程内不再
-  /// 重试，继续使用 DSF 播放。
-  void _scheduleSacdPcmConversion(_SacdPcmJob job, {required bool urgent}) {
-    if (_closed) return;
-    if (_sacdPcmFailed.contains(_sacdPcmJobKey(job))) return;
-    if (!_sacdPcmQueued.add(job.trackUid)) return;
-    if (urgent) {
-      _sacdPcmJobs.insert(0, job);
-    } else {
-      _sacdPcmJobs.add(job);
-    }
-    _drainSacdPcmConversions();
-  }
-
-  /// 失败抑制按轨道与转换参数区分，设置变化后允许重新尝试。
-  String _sacdPcmJobKey(_SacdPcmJob job) =>
-      '${job.trackUid}|${job.sampleRate}|${job.bitDepth}';
-
-  void _drainSacdPcmConversions() {
-    if (_closed || _sacdPcmRunner != null || _sacdPcmJobs.isEmpty) return;
-    final job = _sacdPcmJobs.removeAt(0);
-    final runner = _runSacdPcmConversion(job);
-    _sacdPcmRunner = runner;
-    unawaited(
-      runner
-          .whenComplete(() {
-            if (identical(_sacdPcmRunner, runner)) {
-              _sacdPcmRunner = null;
-            }
-            _drainSacdPcmConversions();
-          })
-          .catchError((Object err, StackTrace trace) {
-            log.playback.warn(
-              'sacd.pcm',
-              'SACD 后台转换队列异常',
-              error: err,
-              stackTrace: trace,
-            );
-          }),
+  /// Rust 侧直接从 ISO 读数据，播放链路不再经过任何缓存文件。
+  ExternalStreamSpec? _resolveSacdExternalStream(String path) {
+    final settings = _sacdPlaybackSettings();
+    final request = buildSacdStreamRequest(
+      path: path,
+      preferPcm: settings.preferPcm,
+      sampleRate: settings.sampleRate,
+      bitDepth: settings.bitDepth,
     );
-  }
-
-  Future<void> _runSacdPcmConversion(_SacdPcmJob job) async {
-    try {
-      await rust_sacd.ensureSacdTrackPcm(
-        isoPath: job.isoPath,
-        area: job.area,
-        trackNumber: job.trackNumber,
-        cacheRoot: job.cacheRoot,
-        sampleRate: job.sampleRate,
-        bitDepth: job.bitDepth,
-      );
-      log.playback.debug(
-        'sacd.pcm',
-        'SACD 后台 PCM 转换完成',
-        fields: {'uid': job.trackUid},
-      );
-    } catch (err, trace) {
-      _sacdPcmFailed.add(_sacdPcmJobKey(job));
-      log.playback.warn(
-        'sacd.pcm',
-        'SACD 后台 PCM 转换失败，继续使用 DSF 播放',
-        fields: {
-          'uid': job.trackUid,
-          'sampleRate': job.sampleRate,
-          'bitDepth': job.bitDepth,
-        },
-        error: err,
-        stackTrace: trace,
-      );
-    } finally {
-      _sacdPcmQueued.remove(job.trackUid);
-    }
+    if (request == null) return null;
+    final descriptor = rust_sacd.sacdStreamOpen(
+      isoPath: request.isoPath,
+      area: request.area,
+      trackNumber: request.trackNumber,
+      mode: request.mode,
+      sampleRate: request.sampleRate,
+      bitDepth: request.bitDepth,
+    );
+    // FRB 2.12 把 Rust usize 映射为 BigInt；BASS 与 Pointer 只接受 int。
+    return ExternalStreamSpec(
+      user: descriptor.user.toInt(),
+      closeProc: descriptor.procs.close.toInt(),
+      lengthProc: descriptor.procs.length.toInt(),
+      readProc: descriptor.procs.read.toInt(),
+      seekProc: descriptor.procs.seek.toInt(),
+      discard: (value) => rust_sacd.sacdStreamDiscard(user: BigInt.from(value)),
+    );
   }
 
   /// 读取 SACD 播放设置；读取异常时退回 DSF、44.1kHz、24bit。
@@ -2183,34 +2000,9 @@ class PlaybackService extends ChangeNotifier {
       CoverImageCache.instance.preload(next.filePath, modified: next.modified);
       CoverImageCache.instance.preloadNowPlayingCover(next);
       playService.lyricService.prefetchLyric(next);
-      if (next.isSacdTrack) {
-        unawaited(_prefetchSacdSource(next));
-      }
       if (audioIndex + 2 < playlist.length) {
         playService.lyricService.prefetchLyric(playlist[audioIndex + 2]);
       }
-    }
-  }
-
-  /// 后台准备下一首 SACD 轨道；DSF 直接提取，PCM 转换排入后台队列，
-  /// 失败只记 WARN，不影响当前播放与界面。
-  Future<void> _prefetchSacdSource(Audio audio) async {
-    final trackUid = audio.cueSegment?.trackUid ?? audio.path;
-    try {
-      await _ensureSacdSource(audio, prefetch: true);
-      log.playback.debug(
-        'sacd.prefetch',
-        'SACD 预提取完成',
-        fields: {'uid': trackUid},
-      );
-    } catch (err, trace) {
-      log.playback.warn(
-        'sacd.prefetch',
-        'SACD 预提取失败',
-        fields: {'uid': trackUid},
-        error: err,
-        stackTrace: trace,
-      );
     }
   }
 
@@ -2960,7 +2752,8 @@ class PlaybackService extends ChangeNotifier {
       var startMs = restored.segmentStartMs;
       var endMs = restored.segmentEndMs;
       if (restored.isSacdTrack) {
-        sourcePath = await _ensureSacdSource(restored);
+        // 与播放路径一致：SACD 交虚拟路径，由外部流解析器打开 ISO 会话。
+        sourcePath = restored.path;
         startMs = 0;
         endMs = 0;
       }
@@ -3206,8 +2999,6 @@ class PlaybackService extends ChangeNotifier {
     _sleepTimerActionTimer?.cancel();
     _sleepTimerActionTimer = null;
     _sleepTimerActionPending = false;
-    _sacdPcmJobs.clear();
-    _sacdPcmQueued.clear();
     SleepBlocker.instance.unblock();
     SleepTimerService.instance.cancel();
     _songChangeTasks.begin();
