@@ -27,11 +27,10 @@ use super::{
     modified_secs, parse_area, read_sacd_toc_cached, SacdFileProcs, SacdStreamDescriptor,
     SACD_SAMPLE_RATE_HZ,
 };
-use dsd_source::DsdSource;
-use layout::{dsf_data_bytes, SACD_FRAMES_PER_SECOND};
-use pcm_source::PcmSource;
+use layout::{dsf_data_bytes, DSF_HEADER_LEN, SACD_FRAMES_PER_SECOND, WAV_HEADER_LEN};
+use pcm_source::pcm_data_bytes;
 use procs::{sacd_proc_close, sacd_proc_length, sacd_proc_read, sacd_proc_seek};
-use reader_thread::{Source, spawn as spawn_reader};
+use reader_thread::{spawn as spawn_reader, DsdConfig, PcmConfig, SourceConfig};
 use session::{SessionMeta, StreamSession};
 
 /// 缓冲硬上限（8 MiB）。
@@ -54,6 +53,29 @@ static SESSIONS: Mutex<Vec<(usize, Arc<StreamSession>)>> = Mutex::new(Vec::new()
 
 /// 回收队列；首次使用时创建专用线程。
 static RECLAIM: OnceLock<Sender<Arc<StreamSession>>> = OnceLock::new();
+
+/// DST 帧数缓存容量，与 TOC 缓存一致。
+const DST_FRAME_CACHE_CAPACITY: usize = 4;
+
+/// 进程内 DST 帧数缓存，最近使用的条目排在末尾。
+static DST_FRAME_CACHE: Mutex<Vec<DstFrameCacheEntry>> = Mutex::new(Vec::new());
+
+/// DST 帧数缓存条目。
+#[frb(ignore)]
+struct DstFrameCacheEntry {
+    /// 镜像路径。
+    iso_path: String,
+    /// 镜像文件长度。
+    iso_len: u64,
+    /// 镜像修改时间秒数。
+    mtime_secs: u64,
+    /// 音频区标识（`2ch` / `mch`）。
+    area: String,
+    /// 区内轨号。
+    track_number: u32,
+    /// 统计到的帧数。
+    frames: u64,
+}
 
 /// 播放模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,9 +155,9 @@ pub(super) fn open_stream(
     let mode = StreamMode::parse(&mode)?;
     let track = resolve_track(&iso_path, &area, track_number)?;
 
-    let (source, virtual_file) = match mode {
-        StreamMode::Dsd => build_dsd(&track)?,
-        StreamMode::Pcm => build_pcm(&track, sample_rate, bit_depth)?,
+    let (config, virtual_file) = match mode {
+        StreamMode::Dsd => build_dsd_config(&track)?,
+        StreamMode::Pcm => build_pcm_config(&track, sample_rate, bit_depth)?,
     };
 
     let bytes_per_second = virtual_file.bytes_per_second.max(1);
@@ -161,7 +183,7 @@ pub(super) fn open_stream(
 
     let session = Arc::new(StreamSession::new(meta));
     let user = Arc::as_ptr(&session) as usize;
-    if let Err(error) = spawn_reader(Arc::clone(&session), source) {
+    if let Err(error) = spawn_reader(Arc::clone(&session), config) {
         log::error!(
             "{error}: iso={iso_path}, area={area}, track={track_number}, mode={}",
             mode.as_str()
@@ -226,9 +248,9 @@ pub(super) fn discard_stream(user: usize) {
     }
 }
 
-/// 构造直解数据源。
+/// 构造直解数据源配置：只做纯计算，真正的数据源在预读线程里构造。
 #[frb(ignore)]
-fn build_dsd(track: &TrackInfo) -> Result<(Source, VirtualFile), String> {
+fn build_dsd_config(track: &TrackInfo) -> Result<(SourceConfig, VirtualFile), String> {
     let data_bytes = dsf_data_bytes(track.duration_ms, track.channels, track.sample_rate);
     if data_bytes == 0 {
         return Err(format!(
@@ -236,10 +258,9 @@ fn build_dsd(track: &TrackInfo) -> Result<(Source, VirtualFile), String> {
             track.iso_path, track.area, track.track_number, track.duration_ms
         ));
     }
-    let source = DsdSource::create(track, data_bytes)?;
     let virtual_file = VirtualFile {
-        length: source.length(),
-        header_len: source.header_len(),
+        length: DSF_HEADER_LEN.saturating_add(data_bytes),
+        header_len: DSF_HEADER_LEN,
         channels: track.channels,
         sample_rate: track.sample_rate,
         bit_depth: 1,
@@ -247,16 +268,20 @@ fn build_dsd(track: &TrackInfo) -> Result<(Source, VirtualFile), String> {
             .saturating_mul(u64::from(track.channels))
             / 8,
     };
-    Ok((Source::Dsd(Box::new(source)), virtual_file))
+    let config = SourceConfig::Dsd(DsdConfig {
+        track: track.clone(),
+        data_bytes,
+    });
+    Ok((config, virtual_file))
 }
 
-/// 构造实时 PCM 数据源。
+/// 构造实时 PCM 数据源配置：只做纯计算，真正的数据源在预读线程里构造。
 #[frb(ignore)]
-fn build_pcm(
+fn build_pcm_config(
     track: &TrackInfo,
     sample_rate: u32,
     bit_depth: u16,
-) -> Result<(Source, VirtualFile), String> {
+) -> Result<(SourceConfig, VirtualFile), String> {
     if !matches!(sample_rate, 44_100 | 48_000 | 88_200 | 96_000 | 192_000) {
         return Err(format!(
             "不支持的 PCM 采样率 {sample_rate}，仅支持 44100/48000/88200/96000/192000"
@@ -266,11 +291,12 @@ fn build_pcm(
         return Err(format!("不支持的 PCM 位深 {bit_depth}，仅支持 16/24"));
     }
     let out_rate = super::pcm::effective_sample_rate(sample_rate);
-    let source = PcmSource::create(track, out_rate, bit_depth)?;
+    let data_bytes =
+        pcm_data_bytes(track.duration_ms, out_rate, track.channels, bit_depth);
     let bytes_per_sample = u64::from(bit_depth / 8);
     let virtual_file = VirtualFile {
-        length: source.length(),
-        header_len: source.header_len(),
+        length: WAV_HEADER_LEN.saturating_add(data_bytes),
+        header_len: WAV_HEADER_LEN,
         channels: track.channels,
         sample_rate: out_rate,
         bit_depth,
@@ -278,7 +304,12 @@ fn build_pcm(
             .saturating_mul(u64::from(track.channels))
             .saturating_mul(bytes_per_sample),
     };
-    Ok((Source::Pcm(Box::new(source)), virtual_file))
+    let config = SourceConfig::Pcm(PcmConfig {
+        track: track.clone(),
+        out_rate,
+        bit_depth,
+    });
+    Ok((config, virtual_file))
 }
 
 /// 解析轨道元数据。
@@ -332,8 +363,17 @@ fn resolve_track(iso_path: &str, area: &str, track_number: u32) -> Result<TrackI
         track.duration_ms
     } else if selected.frame_format == SacdFrameFormat::Dst {
         // DST 是变码率：按 LSN 估算会偏大 2~3 倍，导致虚拟长度虚高、进度条与
-        // 结束时点失真。这里只读扇区头统计帧数，不做 DST 解码。
-        match count_dst_frames(iso_path, track.start_lsn, track.length_lsn) {
+        // 结束时点失真。这里只读扇区头统计帧数（结果按镜像与轨道缓存），
+        // 不做 DST 解码。
+        match cached_dst_frames(
+            iso_path,
+            iso_len,
+            mtime,
+            area,
+            track_number,
+            track.start_lsn,
+            track.length_lsn,
+        ) {
             Ok(frames) if frames > 0 => {
                 let duration = frames.saturating_mul(1_000) / SACD_FRAMES_PER_SECOND;
                 log::info!(
@@ -393,6 +433,98 @@ fn estimate_duration_ms(length_lsn: u32, channels: u8, sample_rate: u32) -> u64 
     }
     let bits = u128::from(length_lsn) * 2_048 * 8 * 1_000;
     u64::try_from(bits / denominator).unwrap_or(u64::MAX)
+}
+
+/// 取 DST 帧数，命中进程内缓存时不再读盘。
+///
+/// 缓存键与 TOC 缓存同粒度：镜像路径 + 长度 + 修改时间 + 区 + 轨号。顺序读取
+/// 整轨扇区在 DST 且缺 SACDTRL2 的镜像上可达数十到数百毫秒，`open_stream` 是
+/// FRB 同步函数，必须在第二次打开时跳过这一步。
+#[frb(ignore)]
+fn cached_dst_frames(
+    iso_path: &str,
+    iso_len: u64,
+    mtime_secs: u64,
+    area: &str,
+    track_number: u32,
+    start_lsn: u32,
+    length_lsn: u32,
+) -> Result<u64, String> {
+    if let Some(frames) = lookup_dst_frames(iso_path, iso_len, mtime_secs, area, track_number) {
+        log::debug!(
+            "命中 SACD DST 帧数缓存: iso={iso_path}, area={area}, track={track_number}, 帧数={frames}"
+        );
+        return Ok(frames);
+    }
+
+    // 查缓存与统计分两次加锁，统计期间不持锁。
+    let frames = count_dst_frames(iso_path, start_lsn, length_lsn)?;
+    store_dst_frames(iso_path, iso_len, mtime_secs, area, track_number, frames);
+    Ok(frames)
+}
+
+/// 在缓存中按完整键查找帧数，命中后把条目移到最近使用位置。
+#[frb(ignore)]
+fn lookup_dst_frames(
+    iso_path: &str,
+    iso_len: u64,
+    mtime_secs: u64,
+    area: &str,
+    track_number: u32,
+) -> Option<u64> {
+    let mut cache = match DST_FRAME_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("SACD DST 帧数缓存锁中毒，降级为重新统计");
+            poisoned.into_inner()
+        }
+    };
+    let position = cache.iter().position(|entry| {
+        entry.iso_path == iso_path
+            && entry.iso_len == iso_len
+            && entry.mtime_secs == mtime_secs
+            && entry.area == area
+            && entry.track_number == track_number
+    })?;
+    let entry = cache.remove(position);
+    let frames = entry.frames;
+    cache.push(entry);
+    Some(frames)
+}
+
+/// 写入 DST 帧数缓存；同一路径的旧条目先移除，超过容量时淘汰最久未使用的条目。
+#[frb(ignore)]
+fn store_dst_frames(
+    iso_path: &str,
+    iso_len: u64,
+    mtime_secs: u64,
+    area: &str,
+    track_number: u32,
+    frames: u64,
+) {
+    let mut cache = match DST_FRAME_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("SACD DST 帧数缓存锁中毒，跳过本次写入");
+            poisoned.into_inner()
+        }
+    };
+    if let Some(position) = cache.iter().position(|entry| {
+        entry.iso_path == iso_path && entry.area == area && entry.track_number == track_number
+    }) {
+        cache.remove(position);
+    }
+    while cache.len() >= DST_FRAME_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(DstFrameCacheEntry {
+        iso_path: iso_path.to_string(),
+        iso_len,
+        mtime_secs,
+        area: area.to_string(),
+        track_number,
+        frames,
+    });
 }
 
 /// 统计一条 DST 轨道的帧数：只读扇区头判断 `frame_start`，不做 DST 解码。

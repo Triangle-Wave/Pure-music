@@ -283,6 +283,12 @@ int externalStreamFlags(int baseFlags) =>
     (baseFlags & ~bass.BASS_ASYNCFILE & ~bass.BASS_UNICODE) |
     bass.BASS_SAMPLE_FLOAT;
 
+/// 路径是否带 SACD 区标记。
+///
+/// 这类路径只能由外部流打开：按文件打开必然失败，且日志会掩盖外部流的真实
+/// 失败原因，所以建流失败时不再回退文件流。
+bool looksLikeExternalPath(String path) => path.contains('::sacd=');
+
 ffi.Pointer<bass.BassFileProcs>? _sharedExternalProcs;
 
 /// 外部流回调结构。
@@ -3147,7 +3153,7 @@ class BassPlayer {
       return discardExternalStream(spec);
     }
 
-    final userText = '0x${(spec.user & 0xFF).toRadixString(16)}';
+    final userText = '0x${spec.user.toUnsigned(64).toRadixString(16)}';
     final flagsText = '0x${flags.toRadixString(16)}';
     if (handle == 0) {
       final code = _bass.BASS_ErrorGetCode();
@@ -3178,6 +3184,14 @@ class BassPlayer {
       bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
     );
     if (handle == 0) {
+      if (looksLikeExternalPath(audioPath)) {
+        log.bass.warn(
+          'legacy',
+          '[bass] external stream unavailable, skip file fallback: '
+              'path=${path.basename(audioPath)}',
+        );
+        return 0;
+      }
       handle = _isUrl(audioPath)
           ? _createUrlStream(
               audioPath,
@@ -3284,6 +3298,14 @@ class BassPlayer {
       bass.BASS_SAMPLE_FLOAT,
     );
     if (externalHandle != 0) return externalHandle;
+    if (looksLikeExternalPath(audioPath)) {
+      log.bass.warn(
+        'legacy',
+        '[bass] external stream unavailable, skip file fallback: '
+            'path=${path.basename(audioPath)}',
+      );
+      return 0;
+    }
 
     const playableFlags =
         bass.BASS_UNICODE | bass.BASS_SAMPLE_FLOAT | bass.BASS_ASYNCFILE;
@@ -4797,6 +4819,13 @@ class BassPlayer {
       bass.BASS_SAMPLE_FLOAT | bass.BASS_STREAM_DECODE,
     );
     if (externalHandle != 0) return externalHandle;
+    if (looksLikeExternalPath(path)) {
+      log.bass.warn(
+        'legacy',
+        '[bass] external stream unavailable, skip file fallback',
+      );
+      return 0;
+    }
     if (_isUrl(path)) {
       return _createUrlStream(
         path,
@@ -5957,6 +5986,16 @@ class BassPlayer {
     _activeSmartTransitionId = null;
     if (smartOutgoing != null && smartOutgoing != _fstream) {
       _bass.BASS_StreamFree(smartOutgoing);
+    }
+
+    // 预建的下一条流持有 Rust 会话，先显式释放，避免会话只能等 BASS_Free 兜底。
+    if (_queuedStream != null) {
+      log.bass.debug(
+        'legacy',
+        '[bass] free: drop queued gapless source',
+        fields: {'path': _queuedPath ?? ''},
+      );
+      discardQueuedGaplessSource();
     }
 
     // 如果当前是独占模式，需要先清理 WASAPI
