@@ -15,6 +15,7 @@ import 'package:pure_music/play_service/playback_session_store.dart';
 import 'package:pure_music/play_service/playback_song_change_tasks.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
 import 'package:pure_music/play_service/sacd_stream_request.dart';
+import 'package:pure_music/play_service/playback_source.dart';
 import 'package:pure_music/core/audio_dsp_settings.dart';
 import 'package:pure_music/play_service/smart_transition_coordinator.dart';
 import 'package:pure_music/play_service/smtc_bridge.dart';
@@ -1432,7 +1433,7 @@ class PlaybackService extends ChangeNotifier {
     }
     if (_invalidateGaplessPreparation()) return;
     // CUE 虚拟轨按段截断混音器长度，预加载整轨会越过段边界；
-    // SACD 播放完整缓存 DSF，按真实路径预建。
+    // SACD 按流式会话预建，不依赖任何缓存文件。
     final currentAudio = nowPlaying;
     if (currentAudio != null && currentAudio.isCueTrack) return;
     if (_pref.transitionMode == TransitionMode.smart) {
@@ -1711,20 +1712,11 @@ class PlaybackService extends ChangeNotifier {
     _invalidateGaplessPreparation();
     developer.Timeline.startSync('playback.loadAndPlay');
     try {
-      var sourcePath = audio.filePath;
-      var startMs = audio.segmentStartMs;
-      var endMs = audio.segmentEndMs;
-      if (audio.isSacdTrack) {
-        // SACD 交虚拟路径，由外部流解析器打开 ISO 会话；段边界由会话自身给出。
-        sourcePath = audio.path;
-        startMs = 0;
-        endMs = 0;
-      }
-      // CUE 虚拟轨用真实源文件建流，段边界由播放器按毫秒截断。
+      final source = resolvePlaybackSource(audio);
       _player.setSource(
-        sourcePath,
-        startMs: startMs,
-        endMs: endMs,
+        source.path,
+        startMs: source.startMs,
+        endMs: source.endMs,
       );
       _eq.reapplyOutputGain();
       _player.start();
@@ -1756,8 +1748,10 @@ class PlaybackService extends ChangeNotifier {
 
   /// 把 SACD 虚拟轨解析为 Rust 流会话；非 SACD 路径返回 null。
   ///
-  /// Rust 侧直接从 ISO 读数据，播放链路不再经过任何缓存文件。
+  /// Rust 侧直接从 ISO 读数据，播放链路不再经过任何缓存文件。打开失败向上抛出，
+  /// 由播放器的 resolver 记录 WARN 后让该轨走失败提示。
   ExternalStreamSpec? _resolveSacdExternalStream(String path) {
+    if (!isSacdStreamPath(path)) return null;
     final settings = _sacdPlaybackSettings();
     final request = buildSacdStreamRequest(
       path: path,
@@ -1766,23 +1760,50 @@ class PlaybackService extends ChangeNotifier {
       bitDepth: settings.bitDepth,
     );
     if (request == null) return null;
-    final descriptor = rust_sacd.sacdStreamOpen(
-      isoPath: request.isoPath,
-      area: request.area,
-      trackNumber: request.trackNumber,
-      mode: request.mode,
-      sampleRate: request.sampleRate,
-      bitDepth: request.bitDepth,
-    );
-    // FRB 2.12 把 Rust usize 映射为 BigInt；BASS 与 Pointer 只接受 int。
-    return ExternalStreamSpec(
-      user: descriptor.user.toInt(),
-      closeProc: descriptor.procs.close.toInt(),
-      lengthProc: descriptor.procs.length.toInt(),
-      readProc: descriptor.procs.read.toInt(),
-      seekProc: descriptor.procs.seek.toInt(),
-      discard: (value) => rust_sacd.sacdStreamDiscard(user: BigInt.from(value)),
-    );
+    rust_sacd.SacdStreamDescriptor? descriptor;
+    try {
+      final opened = rust_sacd.sacdStreamOpen(
+        isoPath: request.isoPath,
+        area: request.area,
+        trackNumber: request.trackNumber,
+        mode: request.mode,
+        sampleRate: request.sampleRate,
+        bitDepth: request.bitDepth,
+      );
+      descriptor = opened;
+      return buildSacdExternalStreamSpec(
+        opened,
+        (value) => rust_sacd.sacdStreamDiscard(user: BigInt.from(value)),
+      );
+    } catch (err, trace) {
+      final opened = descriptor;
+      if (opened != null) {
+        try {
+          rust_sacd.sacdStreamDiscard(user: opened.user);
+        } catch (discardErr, discardTrace) {
+          log.playback.warn(
+            'sacd.stream',
+            'SACD 会话释放失败',
+            fields: {'iso': request.isoPath, 'track': request.trackNumber},
+            error: discardErr,
+            stackTrace: discardTrace,
+          );
+        }
+      }
+      log.playback.warn(
+        'sacd.stream',
+        'SACD 会话打开失败',
+        fields: {
+          'iso': request.isoPath,
+          'area': request.area,
+          'track': request.trackNumber,
+          'mode': request.mode,
+        },
+        error: err,
+        stackTrace: trace,
+      );
+      rethrow;
+    }
   }
 
   /// 读取 SACD 播放设置；读取异常时退回 DSF、44.1kHz、24bit。
@@ -2748,19 +2769,11 @@ class PlaybackService extends ChangeNotifier {
   ) async {
     try {
       final restored = nowPlaying!;
-      var sourcePath = restored.filePath;
-      var startMs = restored.segmentStartMs;
-      var endMs = restored.segmentEndMs;
-      if (restored.isSacdTrack) {
-        // 与播放路径一致：SACD 交虚拟路径，由外部流解析器打开 ISO 会话。
-        sourcePath = restored.path;
-        startMs = 0;
-        endMs = 0;
-      }
+      final source = resolvePlaybackSource(restored);
       _player.setSource(
-        sourcePath,
-        startMs: startMs,
-        endMs: endMs,
+        source.path,
+        startMs: source.startMs,
+        endMs: source.endMs,
       );
       _eq.reapplyOutputGain();
       _loadCurrentReplayGain(restored);

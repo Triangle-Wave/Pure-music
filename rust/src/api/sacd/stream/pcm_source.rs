@@ -15,6 +15,20 @@ use super::layout::{
 };
 use super::TrackInfo;
 
+/// 虚拟 WAV 的 data 字节数：按 RIFF 的 32 位上限截断。
+///
+/// `open_stream` 与 [`PcmSource`] 共用同一计算，保证描述结构的长度、头部声明
+/// 与实际产出完全一致。
+#[frb(ignore)]
+pub(super) fn pcm_data_bytes(
+    duration_ms: u64,
+    out_rate: u32,
+    channels: u32,
+    bit_depth: u16,
+) -> u64 {
+    wav_data_bytes(duration_ms, out_rate, channels, bit_depth).min(u64::from(u32::MAX) - 36)
+}
+
 /// 预滚时长对应的 DSD 字节在 seek 时从目标位置向前多解，保证丢弃预滚后正好
 /// 落在目标附近。
 #[frb(ignore)]
@@ -53,10 +67,7 @@ impl PcmSource {
             return Err(format!("不支持的 PCM 位深 {bit_depth}"));
         }
 
-        // WAV 的 RIFF 与 data 长度字段是 32 位；超限时按上限截断，保证虚拟
-        // 头声明的长度与 length 回调一致。
-        let data_bytes = wav_data_bytes(track.duration_ms, out_rate, track.channels, bit_depth)
-            .min(u64::from(u32::MAX) - 36);
+        let data_bytes = pcm_data_bytes(track.duration_ms, out_rate, track.channels, bit_depth);
         let header = wav_header(track.channels, out_rate, bit_depth, data_bytes);
         let converter = StreamingPcm::new(
             track.channels as usize,

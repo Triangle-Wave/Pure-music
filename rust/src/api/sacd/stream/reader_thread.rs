@@ -11,12 +11,46 @@ use flutter_rust_bridge::frb;
 use super::dsd_source::DsdSource;
 use super::pcm_source::PcmSource;
 use super::session::{apply_seek_result, StreamSession, WAIT_SLICE};
+use super::TrackInfo;
 
 /// 单次产出的字节上限，限制一批数据的规模，让 seek 与停止能及时生效。
 const CHUNK_MAX: usize = 512 * 1024;
 
 /// 连续空批的最大轮数，超过后让出一次时间片，避免 DST 空帧造成忙等。
 const IDLE_ROUNDS_BEFORE_YIELD: u32 = 64;
+
+/// 预读线程的数据源配置。
+///
+/// `sacd_stream_open` 是 FRB 同步函数，运行在 Dart 主 isolate；真正的数据源
+/// （打开镜像、建解析器、预计算滤波器）在这里只做纯计算的配置，实际构造推迟
+/// 到预读线程 `run()` 开头，避免拖慢建流。
+#[frb(ignore)]
+pub(super) enum SourceConfig {
+    /// 直解：ISO → 虚拟 DSF。
+    Dsd(DsdConfig),
+    /// 实时 PCM：ISO → 虚拟 WAV。
+    Pcm(PcmConfig),
+}
+
+/// 直解数据源的构造参数。
+#[frb(ignore)]
+pub(super) struct DsdConfig {
+    /// 轨道元数据。
+    pub(super) track: TrackInfo,
+    /// 虚拟 DSF 的 data 字节数（已对齐）。
+    pub(super) data_bytes: u64,
+}
+
+/// 实时 PCM 数据源的构造参数。
+#[frb(ignore)]
+pub(super) struct PcmConfig {
+    /// 轨道元数据。
+    pub(super) track: TrackInfo,
+    /// 实际输出采样率。
+    pub(super) out_rate: u32,
+    /// 输出位深。
+    pub(super) bit_depth: u16,
+}
 
 /// 预读线程持有的数据源。
 #[frb(ignore)]
@@ -28,6 +62,21 @@ pub(super) enum Source {
 }
 
 impl Source {
+    /// 在预读线程里按配置构造实际数据源。
+    fn build(config: SourceConfig) -> Result<Self, String> {
+        match config {
+            SourceConfig::Dsd(config) => Ok(Self::Dsd(Box::new(DsdSource::create(
+                &config.track,
+                config.data_bytes,
+            )?))),
+            SourceConfig::Pcm(config) => Ok(Self::Pcm(Box::new(PcmSource::create(
+                &config.track,
+                config.out_rate,
+                config.bit_depth,
+            )?))),
+        }
+    }
+
     fn length(&self) -> u64 {
         match self {
             Self::Dsd(source) => source.length(),
@@ -59,11 +108,11 @@ impl Source {
 
 /// 为会话启动预读线程，并把句柄写回会话，供回收线程 join。
 #[frb(ignore)]
-pub(super) fn spawn(session: Arc<StreamSession>, source: Source) -> Result<(), String> {
+pub(super) fn spawn(session: Arc<StreamSession>, config: SourceConfig) -> Result<(), String> {
     let thread_session = Arc::clone(&session);
     let handle = std::thread::Builder::new()
         .name("sacd-stream-reader".to_string())
-        .spawn(move || run(thread_session, source))
+        .spawn(move || run(thread_session, config))
         .map_err(|error| format!("启动 SACD 流预读线程失败: {error}"))?;
 
     match session.thread.lock() {
@@ -81,7 +130,28 @@ pub(super) fn spawn(session: Arc<StreamSession>, source: Source) -> Result<(), S
 
 /// 预读主循环。
 #[frb(ignore)]
-fn run(session: Arc<StreamSession>, mut source: Source) {
+fn run(session: Arc<StreamSession>, config: SourceConfig) {
+    if session.is_stopped() {
+        return;
+    }
+
+    // 数据源构造（打开镜像、建解析器、预计算滤波器）放在预读线程里做，
+    // 失败时通过会话状态上报，read 立即可见 0。
+    let mut source = match Source::build(config) {
+        Ok(source) => source,
+        Err(error) => {
+            log::error!(
+                "SACD 流数据源构造失败: iso={}, area={}, track={}, mode={}, error={error}",
+                session.meta.iso_path,
+                session.meta.area,
+                session.meta.track_number,
+                session.meta.mode
+            );
+            session.fail(format!("SACD 流数据源构造失败: {error}"));
+            return;
+        }
+    };
+
     let mut chunk: Vec<u8> = Vec::new();
     let mut idle_rounds: u32 = 0;
     let mut logged_lengths = false;

@@ -149,6 +149,47 @@ fn dst_image() -> Vec<u8> {
     dst_image_frames(1)
 }
 
+/// 构造 DST 镜像但不写 SACDTRL2：轨道时长为 0，触发 DST 帧数统计路径。
+fn dst_image_without_duration(frames: u32) -> Vec<u8> {
+    let length_lsn = frames as usize;
+    let total_sectors = FRAME_TRACK_START_LSN + length_lsn + 8;
+    let mut image = vec![0u8; total_sectors * PLAIN_SECTOR_SIZE];
+
+    write_master_toc(
+        sector_mut(&mut image, MASTER_TOC_LSN),
+        AREA_TOC_LSN as u32,
+        0,
+        AREA_TOC_SECTORS,
+        0,
+        0,
+        0,
+    );
+    write_area_toc(
+        sector_mut(&mut image, AREA_TOC_LSN),
+        b"TWOCHTOC",
+        2,
+        1,
+        0,
+        (0, 0, 0),
+        FRAME_TRACK_START_LSN as u32,
+        (FRAME_TRACK_START_LSN + length_lsn) as u32,
+    );
+    write_track_list_1(
+        sector_mut(&mut image, AREA_TOC_LSN + 1),
+        &[FRAME_TRACK_START_LSN as u32],
+        &[length_lsn as u32],
+    );
+    for frame in 0..frames as usize {
+        write_dst_audio_sector(
+            sector_mut(&mut image, FRAME_TRACK_START_LSN + frame),
+            DST_FIXTURE,
+            1,
+        );
+    }
+
+    image
+}
+
 fn read_proc(
     descriptor: &SacdStreamDescriptor,
 ) -> unsafe extern "system" fn(*mut c_void, u32, *mut c_void) -> u32 {
@@ -512,6 +553,44 @@ fn dst_seek_lands_on_frame_start() {
         &full[target_data as usize..target_data as usize + written],
         "DST seek 后的字节应与从头读取的对应位置一致"
     );
+}
+
+/// DST 帧数统计结果按镜像与轨道缓存，命中后不再读盘。
+///
+/// 用「删除镜像后仍能取到同值」验证，避免不稳定的耗时断言。
+#[test]
+fn dst_frame_count_is_cached_across_opens() {
+    let iso = TempImage::create(&dst_image_without_duration(4));
+    let iso_path = iso.path.to_string_lossy().into_owned();
+    let metadata = fs::metadata(&iso.path).expect("读取镜像信息");
+    let iso_len = metadata.len();
+    let mtime = super::super::modified_secs(&metadata);
+
+    let first = super::cached_dst_frames(
+        &iso_path,
+        iso_len,
+        mtime,
+        "2ch",
+        1,
+        FRAME_TRACK_START_LSN as u32,
+        4,
+    )
+    .expect("首次统计 DST 帧数");
+    assert_eq!(first, 4, "应统计到 4 个帧起点");
+
+    // 删除镜像：缓存命中时不再读盘，否则会因文件缺失而失败。
+    fs::remove_file(&iso.path).expect("删除镜像");
+    let second = super::cached_dst_frames(
+        &iso_path,
+        iso_len,
+        mtime,
+        "2ch",
+        1,
+        FRAME_TRACK_START_LSN as u32,
+        4,
+    )
+    .expect("缓存命中不应读盘");
+    assert_eq!(second, first, "缓存命中应返回同一帧数");
 }
 
 #[test]
