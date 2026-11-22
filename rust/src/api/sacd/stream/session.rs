@@ -11,6 +11,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use flutter_rust_bridge::frb;
+
 /// `read` 等待一个非空缓冲的最长时间。
 ///
 /// 超时返回 0 会被 BASS 当作 EOF 导致跳曲，因此给足 5 秒；等待使用
@@ -25,6 +27,7 @@ pub(super) const WAIT_SLICE: Duration = Duration::from_millis(50);
 
 /// 会话的只读元数据。
 #[derive(Debug, Clone)]
+#[frb(ignore)]
 pub(super) struct SessionMeta {
     /// 镜像路径，仅用于日志定位。
     pub(super) iso_path: String,
@@ -55,6 +58,7 @@ pub(super) struct SessionMeta {
 }
 
 /// 会话的可变状态。
+#[frb(ignore)]
 pub(super) struct SessionInner {
     /// 已产出、待消费的字节。
     pub(super) buffer: VecDeque<u8>,
@@ -102,6 +106,7 @@ impl Default for SessionInner {
 }
 
 /// 一条 SACD 流会话。
+#[frb(ignore)]
 pub(super) struct StreamSession {
     /// 可变状态，预读线程与回调共享。
     pub(super) inner: Mutex<SessionInner>,
@@ -401,6 +406,7 @@ impl StreamSession {
 ///
 /// 返回值语义：`true` 表示当前（最新）请求定位失败，`failed` 与 `eof` 已在
 /// 本函数内设置，调用方唤醒等待者后应结束预读线程；`false` 表示可以继续。
+#[frb(ignore)]
 pub(super) fn apply_seek_result(
     inner: &mut SessionInner,
     offset: u64,

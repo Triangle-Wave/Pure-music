@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use flutter_rust_bridge::frb;
+
 use super::dsd_source::DsdSource;
 use super::pcm_source::PcmSource;
 use super::session::{apply_seek_result, StreamSession, WAIT_SLICE};
@@ -17,6 +19,7 @@ const CHUNK_MAX: usize = 512 * 1024;
 const IDLE_ROUNDS_BEFORE_YIELD: u32 = 64;
 
 /// 预读线程持有的数据源。
+#[frb(ignore)]
 pub(super) enum Source {
     /// 直解：ISO → 虚拟 DSF。
     Dsd(Box<DsdSource>),
@@ -55,6 +58,7 @@ impl Source {
 }
 
 /// 为会话启动预读线程，并把句柄写回会话，供回收线程 join。
+#[frb(ignore)]
 pub(super) fn spawn(session: Arc<StreamSession>, source: Source) -> Result<(), String> {
     let thread_session = Arc::clone(&session);
     let handle = std::thread::Builder::new()
@@ -76,6 +80,7 @@ pub(super) fn spawn(session: Arc<StreamSession>, source: Source) -> Result<(), S
 }
 
 /// 预读主循环。
+#[frb(ignore)]
 fn run(session: Arc<StreamSession>, mut source: Source) {
     let mut chunk: Vec<u8> = Vec::new();
     let mut idle_rounds: u32 = 0;
@@ -205,12 +210,14 @@ fn run(session: Arc<StreamSession>, mut source: Source) {
 }
 
 /// 是否还有尚未应用的 seek 请求；只读判断，不消费请求。
+#[frb(ignore)]
 fn has_pending_seek(session: &StreamSession) -> bool {
     let inner = session.lock_inner();
     inner.pending_seek.is_some() && inner.seek_generation > inner.applied_seek_generation
 }
 
 /// 读取挂起的 seek 请求；序号已应用或没有请求时返回 `None`。
+#[frb(ignore)]
 fn take_seek_request(session: &StreamSession) -> Option<(u64, u64)> {
     let inner = session.lock_inner();
     let pending = inner.pending_seek?;
@@ -221,6 +228,7 @@ fn take_seek_request(session: &StreamSession) -> Option<(u64, u64)> {
 }
 
 /// 短暂等待消费者取走数据；超时后由主循环重新判断状态。
+#[frb(ignore)]
 fn wait_for_consumer(session: &StreamSession) {
     let _ = session.cond.wait_timeout(session.lock_inner(), WAIT_SLICE);
 }

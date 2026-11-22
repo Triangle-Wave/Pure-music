@@ -288,11 +288,13 @@ impl DsfWriter {
 
 /// 反转字节位序（SACD 的 MSB-first 转 DSF 的 LSB-first）。
 #[inline]
+#[frb(ignore)]
 fn reverse_bits(byte: u8) -> u8 {
     byte.reverse_bits()
 }
 
 /// 按声道数与区附加设置确定 DSF 声道类型。
+#[frb(ignore)]
 pub(crate) fn channel_type(channel_count: u32, extra_setting: u8) -> u32 {
     if channel_count == 2 && extra_setting == 0 {
         return 2;

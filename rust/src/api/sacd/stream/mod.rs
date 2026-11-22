@@ -20,6 +20,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use flutter_rust_bridge::frb;
+
 use super::types::SacdFrameFormat;
 use super::{
     modified_secs, parse_area, read_sacd_toc_cached, SacdFileProcs, SacdStreamDescriptor,
@@ -55,6 +57,7 @@ static RECLAIM: OnceLock<Sender<Arc<StreamSession>>> = OnceLock::new();
 
 /// 播放模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[frb(ignore)]
 enum StreamMode {
     /// DSD 直解（虚拟 DSF）。
     Dsd,
@@ -83,6 +86,7 @@ impl StreamMode {
 
 /// 解析出的轨道信息。
 #[derive(Debug, Clone)]
+#[frb(ignore)]
 pub(super) struct TrackInfo {
     /// 镜像路径。
     pub(super) iso_path: String,
@@ -105,6 +109,7 @@ pub(super) struct TrackInfo {
 }
 
 /// 虚拟文件的关键参数。
+#[frb(ignore)]
 struct VirtualFile {
     length: u64,
     header_len: u64,
@@ -116,6 +121,7 @@ struct VirtualFile {
 }
 
 /// 打开一条 SACD 轨道的流式播放源，返回 BASS 建流所需信息。
+#[frb(ignore)]
 pub(super) fn open_stream(
     iso_path: String,
     area: String,
@@ -206,6 +212,7 @@ pub(super) fn open_stream(
 }
 
 /// 丢弃一条会话；用于 `BASS_StreamCreateFileUser` 失败时。
+#[frb(ignore)]
 pub(super) fn discard_stream(user: usize) {
     if user == 0 {
         return;
@@ -220,6 +227,7 @@ pub(super) fn discard_stream(user: usize) {
 }
 
 /// 构造直解数据源。
+#[frb(ignore)]
 fn build_dsd(track: &TrackInfo) -> Result<(Source, VirtualFile), String> {
     let data_bytes = dsf_data_bytes(track.duration_ms, track.channels, track.sample_rate);
     if data_bytes == 0 {
@@ -243,6 +251,7 @@ fn build_dsd(track: &TrackInfo) -> Result<(Source, VirtualFile), String> {
 }
 
 /// 构造实时 PCM 数据源。
+#[frb(ignore)]
 fn build_pcm(
     track: &TrackInfo,
     sample_rate: u32,
@@ -273,6 +282,7 @@ fn build_pcm(
 }
 
 /// 解析轨道元数据。
+#[frb(ignore)]
 fn resolve_track(iso_path: &str, area: &str, track_number: u32) -> Result<TrackInfo, String> {
     let kind = parse_area(area).map_err(|_| {
         format!(
@@ -374,6 +384,7 @@ fn resolve_track(iso_path: &str, area: &str, track_number: u32) -> Result<TrackI
 }
 
 /// 按 LSN 数估算轨道时长（毫秒）。
+#[frb(ignore)]
 fn estimate_duration_ms(length_lsn: u32, channels: u8, sample_rate: u32) -> u64 {
     let channels = u64::from(channels.max(1));
     let denominator = u128::from(sample_rate) * u128::from(channels);
@@ -385,6 +396,7 @@ fn estimate_duration_ms(length_lsn: u32, channels: u8, sample_rate: u32) -> u64 
 }
 
 /// 统计一条 DST 轨道的帧数：只读扇区头判断 `frame_start`，不做 DST 解码。
+#[frb(ignore)]
 fn count_dst_frames(iso_path: &str, start_lsn: u32, length_lsn: u32) -> Result<u64, String> {
     let mut image = super::reader::ImageReader::open(std::path::Path::new(iso_path)).map_err(
         |error| {
@@ -424,6 +436,7 @@ fn count_dst_frames(iso_path: &str, start_lsn: u32, length_lsn: u32) -> Result<u
 /// 回调持有一份克隆的 `Arc`，因此即便 `close` 同时把会话移出注册表并交给
 /// 回收线程，回调本次执行期间的对象也不会被释放。锁顺序仍是「注册表 →
 /// 会话内部状态」，不新增嵌套。
+#[frb(ignore)]
 pub(super) fn lookup_session(user: usize) -> Option<Arc<StreamSession>> {
     match SESSIONS.lock() {
         Ok(guard) => find_session(&guard, user),
@@ -435,6 +448,7 @@ pub(super) fn lookup_session(user: usize) -> Option<Arc<StreamSession>> {
 }
 
 /// 在会话表中查找并克隆强引用。
+#[frb(ignore)]
 fn find_session(
     entries: &[(usize, Arc<StreamSession>)],
     user: usize,
@@ -446,6 +460,7 @@ fn find_session(
 }
 
 /// 把会话登记到注册表。
+#[frb(ignore)]
 fn register_session(user: usize, session: Arc<StreamSession>) {
     match SESSIONS.lock() {
         Ok(mut guard) => {
@@ -462,6 +477,7 @@ fn register_session(user: usize, session: Arc<StreamSession>) {
 }
 
 /// 从注册表移除会话；返回 `None` 表示已被消费或从未登记。
+#[frb(ignore)]
 pub(super) fn take_registered_session(user: usize) -> Option<Arc<StreamSession>> {
     match SESSIONS.lock() {
         Ok(mut guard) => take_from(&mut guard, user),
@@ -473,6 +489,7 @@ pub(super) fn take_registered_session(user: usize) -> Option<Arc<StreamSession>>
 }
 
 /// 从会话表中取出指定条目。
+#[frb(ignore)]
 fn take_from(
     entries: &mut Vec<(usize, Arc<StreamSession>)>,
     user: usize,
@@ -483,6 +500,7 @@ fn take_from(
 
 /// 当前登记的会话数量，供测试核对回收是否完成。
 #[cfg(test)]
+#[frb(ignore)]
 pub(super) fn registered_session_count() -> usize {
     match SESSIONS.lock() {
         Ok(guard) => guard.len(),
@@ -492,6 +510,7 @@ pub(super) fn registered_session_count() -> usize {
 
 /// 指定指针是否仍在会话表中，供测试核对 `close` 是否消费了会话。
 #[cfg(test)]
+#[frb(ignore)]
 pub(super) fn registered_session_exists(user: usize) -> bool {
     match SESSIONS.lock() {
         Ok(guard) => guard.iter().any(|(key, _)| *key == user),
@@ -500,6 +519,7 @@ pub(super) fn registered_session_exists(user: usize) -> bool {
 }
 
 /// 把会话交给回收线程；`close` 与 `discard` 都走这里。
+#[frb(ignore)]
 pub(super) fn enqueue_reclaim(session: Arc<StreamSession>) {
     let sender = reclaim_sender();
     if let Err(error) = sender.send(Arc::clone(&session)) {
@@ -515,6 +535,7 @@ pub(super) fn enqueue_reclaim(session: Arc<StreamSession>) {
 }
 
 /// 取回收队列发送端；首次调用时启动回收线程。
+#[frb(ignore)]
 fn reclaim_sender() -> &'static Sender<Arc<StreamSession>> {
     RECLAIM.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<Arc<StreamSession>>();
@@ -529,6 +550,7 @@ fn reclaim_sender() -> &'static Sender<Arc<StreamSession>> {
 }
 
 /// 回收线程主循环：等待预读线程结束，记录关闭摘要。
+#[frb(ignore)]
 fn reclaim_loop(receiver: Receiver<Arc<StreamSession>>) {
     for session in receiver {
         let handle = match session.thread.lock() {
