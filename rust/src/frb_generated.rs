@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -64363956;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 632867163;
 
 // Section: executor
 
@@ -2333,6 +2333,80 @@ fn wire__crate__api__library_db__read_index_from_sqlite_impl(
         },
     )
 }
+fn wire__crate__api__sacd__sacd_stream_discard_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "sacd_stream_discard",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_user = <usize>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::sacd::sacd_stream_discard(api_user);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__sacd__sacd_stream_open_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "sacd_stream_open",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_iso_path = <String>::sse_decode(&mut deserializer);
+            let api_area = <String>::sse_decode(&mut deserializer);
+            let api_track_number = <u32>::sse_decode(&mut deserializer);
+            let api_mode = <String>::sse_decode(&mut deserializer);
+            let api_sample_rate = <u32>::sse_decode(&mut deserializer);
+            let api_bit_depth = <u16>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::sacd::sacd_stream_open(
+                    api_iso_path,
+                    api_area,
+                    api_track_number,
+                    api_mode,
+                    api_sample_rate,
+                    api_bit_depth,
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__library_db__set_audios_hidden_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3550,6 +3624,48 @@ impl SseDecode for (u8, u8, u8, u8) {
     }
 }
 
+impl SseDecode for crate::api::sacd::SacdFileProcs {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_close = <usize>::sse_decode(deserializer);
+        let mut var_length = <usize>::sse_decode(deserializer);
+        let mut var_read = <usize>::sse_decode(deserializer);
+        let mut var_seek = <usize>::sse_decode(deserializer);
+        return crate::api::sacd::SacdFileProcs {
+            close: var_close,
+            length: var_length,
+            read: var_read,
+            seek: var_seek,
+        };
+    }
+}
+
+impl SseDecode for crate::api::sacd::SacdStreamDescriptor {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_user = <usize>::sse_decode(deserializer);
+        let mut var_procs = <crate::api::sacd::SacdFileProcs>::sse_decode(deserializer);
+        let mut var_length = <usize>::sse_decode(deserializer);
+        let mut var_durationMs = <usize>::sse_decode(deserializer);
+        let mut var_headerLen = <usize>::sse_decode(deserializer);
+        let mut var_channels = <u32>::sse_decode(deserializer);
+        let mut var_sampleRate = <u32>::sse_decode(deserializer);
+        let mut var_bitDepth = <u16>::sse_decode(deserializer);
+        let mut var_mode = <String>::sse_decode(deserializer);
+        return crate::api::sacd::SacdStreamDescriptor {
+            user: var_user,
+            procs: var_procs,
+            length: var_length,
+            duration_ms: var_durationMs,
+            header_len: var_headerLen,
+            channels: var_channels,
+            sample_rate: var_sampleRate,
+            bit_depth: var_bitDepth,
+            mode: var_mode,
+        };
+    }
+}
+
 impl SseDecode for crate::api::smtc_flutter::SMTCControlEvent {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3932,33 +4048,33 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        58 => {
+        60 => {
             wire__crate__api__library_db__set_audios_hidden_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => wire__crate__api__network_proxy__set_network_proxy_impl(
+        61 => wire__crate__api__network_proxy__set_network_proxy_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => {
+        62 => {
             wire__crate__api__app_env__set_process_temp_dir_impl(port, ptr, rust_vec_len, data_len)
         }
-        61 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__system_theme__system_theme_default_impl(
+        63 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__system_theme__system_theme_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
-        68 => {
+        69 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
+        70 => {
             wire__crate__api__tag_reader__write_audio_cover_impl(port, ptr, rust_vec_len, data_len)
         }
-        69 => {
+        71 => {
             wire__crate__api__tag_reader__write_audio_tags_impl(port, ptr, rust_vec_len, data_len)
         }
-        70 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
+        72 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
             port,
             ptr,
             rust_vec_len,
@@ -4012,22 +4128,24 @@ fn pde_ffi_dispatcher_sync_impl(
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
+        58 => wire__crate__api__sacd__sacd_stream_discard_impl(ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__sacd__sacd_stream_open_impl(ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
+        65 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
+        66 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
+        68 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
             ptr,
             rust_vec_len,
             data_len,
@@ -4454,6 +4572,57 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::library_db::PlayHistoryStats>
     for crate::api::library_db::PlayHistoryStats
 {
     fn into_into_dart(self) -> crate::api::library_db::PlayHistoryStats {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::sacd::SacdFileProcs {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.close.into_into_dart().into_dart(),
+            self.length.into_into_dart().into_dart(),
+            self.read.into_into_dart().into_dart(),
+            self.seek.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::sacd::SacdFileProcs
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::sacd::SacdFileProcs>
+    for crate::api::sacd::SacdFileProcs
+{
+    fn into_into_dart(self) -> crate::api::sacd::SacdFileProcs {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::sacd::SacdStreamDescriptor {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.user.into_into_dart().into_dart(),
+            self.procs.into_into_dart().into_dart(),
+            self.length.into_into_dart().into_dart(),
+            self.duration_ms.into_into_dart().into_dart(),
+            self.header_len.into_into_dart().into_dart(),
+            self.channels.into_into_dart().into_dart(),
+            self.sample_rate.into_into_dart().into_dart(),
+            self.bit_depth.into_into_dart().into_dart(),
+            self.mode.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::sacd::SacdStreamDescriptor
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::sacd::SacdStreamDescriptor>
+    for crate::api::sacd::SacdStreamDescriptor
+{
+    fn into_into_dart(self) -> crate::api::sacd::SacdStreamDescriptor {
         self
     }
 }
@@ -5169,6 +5338,31 @@ impl SseEncode for (u8, u8, u8, u8) {
         <u8>::sse_encode(self.1, serializer);
         <u8>::sse_encode(self.2, serializer);
         <u8>::sse_encode(self.3, serializer);
+    }
+}
+
+impl SseEncode for crate::api::sacd::SacdFileProcs {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <usize>::sse_encode(self.close, serializer);
+        <usize>::sse_encode(self.length, serializer);
+        <usize>::sse_encode(self.read, serializer);
+        <usize>::sse_encode(self.seek, serializer);
+    }
+}
+
+impl SseEncode for crate::api::sacd::SacdStreamDescriptor {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <usize>::sse_encode(self.user, serializer);
+        <crate::api::sacd::SacdFileProcs>::sse_encode(self.procs, serializer);
+        <usize>::sse_encode(self.length, serializer);
+        <usize>::sse_encode(self.duration_ms, serializer);
+        <usize>::sse_encode(self.header_len, serializer);
+        <u32>::sse_encode(self.channels, serializer);
+        <u32>::sse_encode(self.sample_rate, serializer);
+        <u16>::sse_encode(self.bit_depth, serializer);
+        <String>::sse_encode(self.mode, serializer);
     }
 }
 

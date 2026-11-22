@@ -8,6 +8,37 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `ensure_sacd_track_extracted_serialized`, `lock_extraction`, `lookup_cached_toc`, `modified_secs`, `parse_area`, `path_to_string`, `read_sacd_toc_cached`, `read_u64_le`, `remove_cache_file`, `replace_file`, `store_cached_toc`, `temporary_path`, `verify_cached_dsf`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TocCacheEntry`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`
+
+/// 打开一条 SACD 轨道的流式播放源。
+///
+/// `mode` 取 `"dsd"`（直解，虚拟 DSF）或 `"pcm"`（实时转换，虚拟 WAV）。
+/// `sample_rate` 与 `bit_depth` 只在 PCM 模式使用：采样率支持
+/// 44100/48000/88200/96000/192000，位深支持 16/24。48000 会按现有转换器
+/// 的能力回退到 44100，描述结构返回实际输出参数。
+///
+/// 返回的 `user` 与 `procs` 直接交给 `BASS_StreamCreateFileUser`；
+/// 建流失败时调用 [`sacd_stream_discard`] 释放会话，成功时由 BASS 调用
+/// `close` 回调回收。
+SacdStreamDescriptor sacdStreamOpen({
+  required String isoPath,
+  required String area,
+  required int trackNumber,
+  required String mode,
+  required int sampleRate,
+  required int bitDepth,
+}) => RustLib.instance.api.crateApiSacdSacdStreamOpen(
+  isoPath: isoPath,
+  area: area,
+  trackNumber: trackNumber,
+  mode: mode,
+  sampleRate: sampleRate,
+  bitDepth: bitDepth,
+);
+
+/// 丢弃一条未能用于建流的会话；正常结束由 `close` 回调回收。
+void sacdStreamDiscard({required BigInt user}) =>
+    RustLib.instance.api.crateApiSacdSacdStreamDiscard(user: user);
 
 /// 确保指定 SACD 轨道已提取为缓存中的 DSF 文件，并返回其路径。
 ///
@@ -50,3 +81,111 @@ Future<String> ensureSacdTrackPcm({
   sampleRate: sampleRate,
   bitDepth: bitDepth,
 );
+
+/// `BASS_StreamCreateFileUser` 使用的四个回调地址。
+///
+/// 字段是函数指针的地址，Dart 侧用 `ffi.Pointer.fromAddress` 还原成
+/// `ffi.NativeFunction`。x64 下地址与 `usize` 等宽。
+class SacdFileProcs {
+  /// `FILECLOSEPROC`：`void (*)(void *user)`
+  final BigInt close;
+
+  /// `FILELENPROC`：`QWORD (*)(void *user)`
+  final BigInt length;
+
+  /// `FILEREADPROC`：`DWORD (*)(void *buffer, DWORD length, void *user)`
+  final BigInt read;
+
+  /// `FILESEEKPROC`：`BOOL (*)(QWORD offset, void *user)`
+  final BigInt seek;
+
+  const SacdFileProcs({
+    required this.close,
+    required this.length,
+    required this.read,
+    required this.seek,
+  });
+
+  @override
+  int get hashCode =>
+      close.hashCode ^ length.hashCode ^ read.hashCode ^ seek.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SacdFileProcs &&
+          runtimeType == other.runtimeType &&
+          close == other.close &&
+          length == other.length &&
+          read == other.read &&
+          seek == other.seek;
+}
+
+/// 一条 SACD 流式播放源的描述。
+class SacdStreamDescriptor {
+  /// 会话指针，作为 `BASS_StreamCreateFileUser` 的 `user` 参数。
+  final BigInt user;
+
+  /// 四个回调地址。
+  final SacdFileProcs procs;
+
+  /// 虚拟文件总字节数（含头部）。
+  final BigInt length;
+
+  /// 轨道时长（毫秒），界面与进度条使用。
+  final BigInt durationMs;
+
+  /// 虚拟文件头长度（直解 92 字节，PCM 44 字节）。
+  final BigInt headerLen;
+
+  /// 声道数。
+  final int channels;
+
+  /// 虚拟文件的采样率（直解为 DSD 采样率，PCM 为输出采样率）。
+  final int sampleRate;
+
+  /// 虚拟文件的位深（直解为 1，PCM 为 16/24）。
+  final int bitDepth;
+
+  /// 播放模式：`dsd` 或 `pcm`。
+  final String mode;
+
+  const SacdStreamDescriptor({
+    required this.user,
+    required this.procs,
+    required this.length,
+    required this.durationMs,
+    required this.headerLen,
+    required this.channels,
+    required this.sampleRate,
+    required this.bitDepth,
+    required this.mode,
+  });
+
+  @override
+  int get hashCode =>
+      user.hashCode ^
+      procs.hashCode ^
+      length.hashCode ^
+      durationMs.hashCode ^
+      headerLen.hashCode ^
+      channels.hashCode ^
+      sampleRate.hashCode ^
+      bitDepth.hashCode ^
+      mode.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SacdStreamDescriptor &&
+          runtimeType == other.runtimeType &&
+          user == other.user &&
+          procs == other.procs &&
+          length == other.length &&
+          durationMs == other.durationMs &&
+          headerLen == other.headerLen &&
+          channels == other.channels &&
+          sampleRate == other.sampleRate &&
+          bitDepth == other.bitDepth &&
+          mode == other.mode;
+}

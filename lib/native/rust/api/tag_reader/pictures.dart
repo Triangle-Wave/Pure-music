@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `embedded_from_id3`, `embedded_from_parts`, `embedded_from_ratag`, `finish`, `kind_from_id3`, `kind_from_lofty`, `kind_from_ratag`, `kind_from_symphonia`, `load_pictures`, `new`, `normalize_description`, `normalize_mime`, `preferred_picture`, `push`, `read_asf_pictures`, `read_dsf_pictures`, `read_fallback_pictures`, `read_id3_pictures`, `read_lofty_pictures`, `resize_picture_to_png`, `sniff_mime`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EmbeddedPicture`, `PictureCollector`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 /// 列出文件的全部内嵌图片元数据，不解码图片。
 ///

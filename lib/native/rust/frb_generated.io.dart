@@ -268,6 +268,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   (int, int, int, int) dco_decode_record_u_8_u_8_u_8_u_8(dynamic raw);
 
   @protected
+  SacdFileProcs dco_decode_sacd_file_procs(dynamic raw);
+
+  @protected
+  SacdStreamDescriptor dco_decode_sacd_stream_descriptor(dynamic raw);
+
+  @protected
   SMTCControlEvent dco_decode_smtc_control_event(dynamic raw);
 
   @protected
@@ -559,6 +565,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (int, int, int, int) sse_decode_record_u_8_u_8_u_8_u_8(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SacdFileProcs sse_decode_sacd_file_procs(SseDeserializer deserializer);
+
+  @protected
+  SacdStreamDescriptor sse_decode_sacd_stream_descriptor(
     SseDeserializer deserializer,
   );
 
@@ -933,6 +947,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_record_u_8_u_8_u_8_u_8(
     (int, int, int, int) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_sacd_file_procs(SacdFileProcs self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sacd_stream_descriptor(
+    SacdStreamDescriptor self,
     SseSerializer serializer,
   );
 
