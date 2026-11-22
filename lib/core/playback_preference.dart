@@ -26,6 +26,8 @@ class PlaybackPreference {
   int transitionFadeInMs;
   SleepTimerAction sleepTimerAction;
   String dsdPlaybackMode;
+
+  /// 历史兼容标记：旧版本据此做一次性迁移，现在只保留键位与 true 值。
   bool dsdPlaybackModeMigratedToDsf;
   int sacdPcmSampleRate;
   int sacdPcmBitDepth;
@@ -87,7 +89,7 @@ class PlaybackPreference {
     this.transitionFadeOutMs = 300,
     this.transitionFadeInMs = 200,
     this.sleepTimerAction = SleepTimerAction.pause,
-    this.dsdPlaybackMode = dsdPlaybackModeDsf,
+    this.dsdPlaybackMode = dsdPlaybackModePcm,
     this.dsdPlaybackModeMigratedToDsf = true,
     this.sacdPcmSampleRate = defaultSacdPcmSampleRate,
     this.sacdPcmBitDepth = defaultSacdPcmBitDepth,
@@ -223,27 +225,19 @@ class PlaybackPreference {
     );
   }
 
-  /// 读取 DSD 播放模式，并把旧配置中默认的 PCM 一次性迁移到 DSF。
+  /// 读取 SACD 播放方式，完全尊重存储值。
   ///
-  /// 迁移标记随播放偏好一起保存：没有标记且存储为 `pcm` 的记录按旧默认值处理，
-  /// 迁移为 `dsf`；带标记的记录完全尊重存储值，用户手动选择的 `pcm` 会保留。
+  /// 历史标记 `dsdPlaybackModeMigratedToDsf` 仍随配置保存，仅为保持配置结构，
+  /// 不再参与迁移；键缺失或取值未知时回退实时 PCM。
   static String _dsdPlaybackModeFromMap(Map<String, dynamic> map) {
-    final migrated = _normalizedBool(
-      map['dsdPlaybackModeMigratedToDsf'],
-      defaultValue: false,
-    );
-    final storedMode = _normalizedString(map['dsdPlaybackMode']).toLowerCase();
-    if (!migrated && storedMode == dsdPlaybackModePcm) {
-      return dsdPlaybackModeDsf;
-    }
     return _dsdPlaybackModeFromStored(map['dsdPlaybackMode']);
   }
 
   static String _dsdPlaybackModeFromStored(Object? value) {
     final mode = _normalizedString(value).toLowerCase();
-    return mode == dsdPlaybackModePcm
-        ? dsdPlaybackModePcm
-        : dsdPlaybackModeDsf;
+    return mode == dsdPlaybackModeDsf
+        ? dsdPlaybackModeDsf
+        : dsdPlaybackModePcm;
   }
 
   static int _sacdPcmSampleRateFromStored(Object? value) {
