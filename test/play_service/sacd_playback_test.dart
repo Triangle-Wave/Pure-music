@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pure_music/library/audio_library.dart';
 import 'package:pure_music/play_service/sacd_gapless_guard.dart';
+import 'package:pure_music/play_service/sacd_stream_request.dart';
 
 Audio _sacdAudio(String track, {int endMs = 90333}) {
   return Audio(
@@ -123,6 +124,23 @@ void main() {
         ),
         isFalse,
       );
+    });
+  });
+
+  group('外部流解析不触碰磁盘', () {
+    test('ISO 不存在时仍返回建流参数', () {
+      const path =
+          r'Z:\definitely-missing\album.iso'
+          '::track=01::start=0::end=1000::sacd=2ch';
+      final request = buildSacdStreamRequest(
+        path: path,
+        preferPcm: true,
+        sampleRate: 44100,
+        bitDepth: 24,
+      );
+      expect(request, isNotNull);
+      expect(request!.isoPath, r'Z:\definitely-missing\album.iso');
+      expect(request.trackNumber, 1);
     });
   });
 }
