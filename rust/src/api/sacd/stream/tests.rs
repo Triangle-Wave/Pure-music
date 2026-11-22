@@ -609,9 +609,11 @@ fn pcm_push_matches_file_conversion() {
         })
         .max()
         .unwrap_or(0);
+    // 两条路径各自持有独立的 TPDF 抖动实例，随机序列不同；两个独立三角分布
+    // 之差的最大幅度为 2 LSB。超过 2 说明滤波、抽取或缩放路径不一致，而不是抖动。
     assert!(
-        max_diff <= 1,
-        "TPDF 抖动只会带来不超过 1 LSB 的差异，实际 {max_diff}"
+        max_diff <= 2,
+        "流式与文件转换各用独立 TPDF 抖动，最大差应为 2 LSB；超过即说明滤波或缩放路径不一致，实际 {max_diff}"
     );
 }
 
@@ -666,9 +668,10 @@ fn pcm_192k24_matches_file_conversion() {
         .map(|(left, right)| (read_i24(left) - read_i24(right)).abs())
         .max()
         .unwrap_or(0);
+    // 同上：两条路径各用独立的 TPDF 抖动实例，24-bit 下最大差为 2 LSB。
     assert!(
-        max_diff <= 1,
-        "192k/24 只应有不超过 1 LSB 的抖动差异，实际 {max_diff}"
+        max_diff <= 2,
+        "192k/24 两条路径各用独立 TPDF 抖动，最大差应为 2 LSB；超过即说明 LM 滤波或 24 位缩放路径不一致，实际 {max_diff}"
     );
 }
 
