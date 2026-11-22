@@ -216,11 +216,85 @@ impl StreamingPcm {
 
     /// Flush the converter at end of track.
     ///
-    /// The whole-file path does not pull the remaining filter tail either, so
-    /// this returns nothing: emitting extra samples here would make the
-    /// stream differ from a file conversion of the same input.
+    /// Feeds the per-channel remainder (less than one 4096-byte block) through
+    /// the converters without zero padding, matching what the whole-file path
+    /// does with the last partial DSF block: it converts `valid_bytes` only.
+    /// Without this the tail of every track (up to ~11 ms) would be dropped and
+    /// the streamed output would be shorter than a file conversion.
     pub fn flush(&mut self) -> Result<Vec<u8>, String> {
-        Ok(Vec::new())
+        let channels = self.channels;
+        if channels == 0 {
+            return Err("流式 PCM 转换器声道数为 0".to_string());
+        }
+
+        let leftover = self
+            .channel_buffers
+            .first()
+            .map(|buffer| buffer.len())
+            .unwrap_or(0);
+        if leftover == 0 {
+            return Ok(Vec::new());
+        }
+
+        // 输入按通道轮转，只有完整轮转才会触发块处理，因此各通道残余长度
+        // 必须相同；不一致说明状态被破坏，直接报错而不是继续产出错位音频。
+        if self
+            .channel_buffers
+            .iter()
+            .any(|buffer| buffer.len() != leftover)
+        {
+            let lengths: Vec<usize> = self
+                .channel_buffers
+                .iter()
+                .map(|buffer| buffer.len())
+                .collect();
+            return Err(format!(
+                "流式 PCM 转换器各通道残余长度不一致: 期望 {leftover} 字节, 实际 {lengths:?}"
+            ));
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut produced_min: Option<usize> = None;
+        for channel in 0..channels {
+            let produced = {
+                let input = match self.channel_buffers.get(channel) {
+                    Some(buffer) => buffer.as_slice(),
+                    None => return Err(format!("通道索引 {channel} 越界")),
+                };
+                if let Some(resamplers) = self.lm.as_mut() {
+                    let resampler = resamplers
+                        .get_mut(channel)
+                        .ok_or_else(|| format!("重采样器缺少通道 {channel}"))?;
+                    let float_data = self.writer.float_data_mut();
+                    resampler.process_bytes_lm(input, float_data)
+                } else if let Some(decimators) = self.precalc.as_mut() {
+                    let decimator = decimators
+                        .get_mut(channel)
+                        .ok_or_else(|| format!("抽取器缺少通道 {channel}"))?;
+                    let float_data = self.writer.float_data_mut();
+                    decimator.process_bytes(input, float_data)
+                } else {
+                    return Err("流式 PCM 转换器状态未初始化".to_string());
+                }
+            };
+
+            produced_min = Some(match produced_min {
+                Some(current) => current.min(produced),
+                None => produced,
+            });
+            self.writer.write_to_buffer(produced, channel);
+        }
+
+        let frames = produced_min.unwrap_or(0);
+        if frames > 0 {
+            let pcm_bytes = frames * channels * self.writer.bytes_per_sample();
+            out.extend_from_slice(&self.writer.take_memory(pcm_bytes));
+        }
+
+        for buffer in &mut self.channel_buffers {
+            buffer.clear();
+        }
+        Ok(out)
     }
 
     /// Reset filter, dither and block state after a seek.
