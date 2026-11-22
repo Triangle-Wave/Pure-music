@@ -5,9 +5,25 @@ description: Pure Music 更新日志，自 2.0.0 起按版本折叠。
 
 # 更新日志
 
-从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.40**。
+从 **2.0.0** 起。每个版本默认折叠，点版本号展开。最新：**2.3.41**。
 
 完整发布页：[GitHub](https://github.com/Triangle-Wave/Pure-music/releases)（未配置 Gitee 镜像）
+
+<details>
+<summary><strong>2.3.41</strong></summary>
+
+**SACD 播放**
+
+- SACD 播放不再写入磁盘缓存：音频从 ISO 直接读取并供给 BASS，长时间试听不再累积缓存文件。已有的历史缓存可在缓存目录中手动清理。
+- 默认播放方式为实时 PCM：先解码到 PCM 再输出，CPU 占用更低。
+- 支持 DSF 直解：交给 BASS 的 DSD 解码，可在「设置 → 音频输出 → SACD 播放方式」切换，下一轨生效。
+
+**优化**
+
+- SACD 拖动进度条按音频帧定位，裸 DSD 与 DST 轨道都能快速跳转。
+- 播放 SACD 时不再产生额外的提取与转换等待，起播更快。
+
+</details>
 
 <details>
 <summary><strong>2.3.40</strong></summary>
