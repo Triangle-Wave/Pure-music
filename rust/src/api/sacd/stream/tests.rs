@@ -417,21 +417,15 @@ fn pcm_stream_length_matches_descriptor() {
     let length = descriptor.length;
     stream_close(&descriptor);
 
-    // 尾部不足一块（最多 4095 字节/通道）的余量不产出 PCM：
-    // 4095 * 8 / 64 = 511 帧/通道，加 1 帧余量取整为 512 帧。
+    // flush 处理尾部不足一块的残余后，实际产出与虚拟长度只差不足一帧。
     let bytes_per_sample = 2usize;
     let channels = 2usize;
-    let tail_pcm_bytes =
-        (4_096 * 8 / 64) * channels * bytes_per_sample + channels * bytes_per_sample;
-    let difference = length.saturating_sub(all.len());
+    let frame_bytes = channels * bytes_per_sample;
+    let difference = all.len().abs_diff(length);
     assert!(
-        all.len() <= length,
-        "PCM 产出 {} 字节不应超过虚拟长度 {length}",
+        difference <= frame_bytes,
+        "实际产出 {} 字节与虚拟长度 {length} 的差值 {difference} 应小于一帧对应的 {frame_bytes} 字节",
         all.len()
-    );
-    assert!(
-        difference <= tail_pcm_bytes,
-        "PCM 产出与虚拟长度的差值 {difference} 应不超过尾部不足一块对应的 {tail_pcm_bytes} 字节"
     );
 }
 
@@ -595,11 +589,9 @@ fn pcm_push_matches_file_conversion() {
     )
     .expect("创建流式转换器");
 
-    // 文件路径读到的是按 4096 字节块补齐后的 data，这里补同样的尾部零。
-    let aligned = per_channel.div_ceil(4_096) * 4_096;
-    let mut input = DST_DSD_FIXTURE.to_vec();
-    input.resize(aligned * 2, 0);
-    let mut pcm = converter.push(&input).expect("流式转换");
+    // 与文件转换一致：只喂有效字节（每通道 4704），尾部不足一块的残余由
+    // flush 处理，不做人为的块补齐。
+    let mut pcm = converter.push(DST_DSD_FIXTURE).expect("流式转换");
     pcm.extend(converter.flush().expect("冲刷转换器"));
 
     assert_eq!(
@@ -659,10 +651,8 @@ fn pcm_192k24_matches_file_conversion() {
     )
     .expect("创建 192k 流式转换器");
 
-    let aligned = per_channel.div_ceil(4_096) * 4_096;
-    let mut input = DST_DSD_FIXTURE.to_vec();
-    input.resize(aligned * 2, 0);
-    let mut pcm = converter.push(&input).expect("流式转换");
+    // 同样只喂有效字节，尾部不足一块的残余交给 flush。
+    let mut pcm = converter.push(DST_DSD_FIXTURE).expect("流式转换");
     pcm.extend(converter.flush().expect("冲刷转换器"));
 
     assert_eq!(
