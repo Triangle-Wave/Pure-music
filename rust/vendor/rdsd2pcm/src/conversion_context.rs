@@ -278,7 +278,10 @@ impl ConversionContext {
             self.pcm_writer.clips()
         );
 
-        if self.pcm_writer.output() != OutputType::Stdout {
+        if !matches!(
+            self.pcm_writer.output(),
+            OutputType::Stdout | OutputType::Memory
+        ) {
             self.finalize_file()?;
         }
 
@@ -302,7 +305,10 @@ impl ConversionContext {
     fn open_streamed_output_if_needed(
         &mut self,
     ) -> Result<(), Box<dyn Error>> {
-        if self.pcm_writer.output() == OutputType::Stdout {
+        if matches!(
+            self.pcm_writer.output(),
+            OutputType::Stdout | OutputType::Memory
+        ) {
             return Ok(());
         }
 
@@ -390,8 +396,10 @@ impl ConversionContext {
             self.pcm_writer.flush_stream()?;
             let pcm_frame_bytes =
                 self.track_io(read_size, samples_used_per_chan, sender);
-            if self.pcm_writer.output() == OutputType::Stdout
-                && pcm_frame_bytes > 0
+            if matches!(
+                self.pcm_writer.output(),
+                OutputType::Stdout | OutputType::Memory
+            ) && pcm_frame_bytes > 0
             {
                 self.pcm_writer.write_stdout(pcm_frame_bytes)?;
             }

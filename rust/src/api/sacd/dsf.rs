@@ -41,6 +41,126 @@ pub(crate) const DSF_BLOCK_SIZE_PER_CHANNEL: usize = 4096;
 /// DSF 写入缓冲大小（1 MiB），减少高频小块写入的系统调用次数。
 const WRITE_BUFFER_SIZE: usize = 1 << 20;
 
+/// DSF data 区编码器。
+///
+/// 输入是交织、MSB-first 的 DSD 字节（SACD 音频解析器的输出）。编码器按轮转
+/// 顺序把字节分派到各通道，每字节反位为 LSB-first；当所有通道都累积满
+/// [`DSF_BLOCK_SIZE_PER_CHANNEL`] 字节时，按通道顺序输出一整块。输出与 DSF
+/// 规范要求的块交织布局逐字节一致。
+#[frb(ignore)]
+pub(crate) struct DsfStreamEncoder {
+    /// 声道数，至少为 1。
+    channels: usize,
+    /// 每通道的样本缓冲。
+    channel_buffers: Vec<Vec<u8>>,
+    /// 下一个字节所属通道的轮转位置。
+    channel_pos: usize,
+    /// 已输出的音频数据字节数（含补齐的块）。
+    bytes_out: u64,
+    /// 收到的实际音频字节数（不含补齐的块）。
+    decoded_total: u64,
+}
+
+impl DsfStreamEncoder {
+    /// 按声道数创建编码器；`channels` 为 0 时按 1 处理，避免除零。
+    pub(crate) fn new(channels: usize) -> Self {
+        let channels = channels.max(1);
+        Self {
+            channels,
+            channel_buffers: vec![Vec::with_capacity(DSF_BLOCK_SIZE_PER_CHANNEL); channels],
+            channel_pos: 0,
+            bytes_out: 0,
+            decoded_total: 0,
+        }
+    }
+
+    /// 送入交织、MSB-first 的裸 DSD 字节，把成块的编码结果追加到 `out`。
+    pub(crate) fn push(&mut self, data: &[u8], out: &mut Vec<u8>) {
+        self.decoded_total = self.decoded_total.saturating_add(data.len() as u64);
+
+        for &byte in data {
+            let channel_index = self.channel_pos % self.channels;
+            if let Some(buffer) = self.channel_buffers.get_mut(channel_index) {
+                buffer.push(reverse_bits(byte));
+            }
+            self.channel_pos = self.channel_pos.wrapping_add(1);
+
+            // 只有完成一整轮后所有通道才可能同时满一块：用轮转位置判断，
+            // 避免每个字节都遍历所有通道缓冲。
+            if self.channel_pos % self.channels == 0
+                && self
+                    .channel_buffers
+                    .iter()
+                    .all(|buffer| buffer.len() >= DSF_BLOCK_SIZE_PER_CHANNEL)
+            {
+                self.drain_full_blocks(out);
+            }
+        }
+    }
+
+    /// 轨道结束：把最后一个不满的块补零后输出。
+    pub(crate) fn finish(&mut self, out: &mut Vec<u8>) {
+        let has_partial = self
+            .channel_buffers
+            .iter()
+            .any(|buffer| !buffer.is_empty());
+        if !has_partial {
+            return;
+        }
+        for buffer in &mut self.channel_buffers {
+            if buffer.len() < DSF_BLOCK_SIZE_PER_CHANNEL {
+                buffer.resize(DSF_BLOCK_SIZE_PER_CHANNEL, 0);
+            }
+        }
+        self.drain_full_blocks(out);
+    }
+
+    /// 已输出的音频数据字节数（含补齐的块）。
+    pub(crate) fn bytes_out(&self) -> u64 {
+        self.bytes_out
+    }
+
+    /// 收到的实际音频字节数（不含补齐的块）。
+    pub(crate) fn decoded_total(&self) -> u64 {
+        self.decoded_total
+    }
+
+    /// 把所有已满的通道块按通道顺序追加到 `out`，并清空对应缓冲。
+    fn drain_full_blocks(&mut self, out: &mut Vec<u8>) {
+        if self.channel_buffers.is_empty() {
+            return;
+        }
+        if self
+            .channel_buffers
+            .iter()
+            .any(|buffer| buffer.len() < DSF_BLOCK_SIZE_PER_CHANNEL)
+        {
+            log::warn!("DSF 编码器在通道块未满时被要求输出，跳过本次写入");
+            return;
+        }
+
+        for buffer in &mut self.channel_buffers {
+            match buffer.get(..DSF_BLOCK_SIZE_PER_CHANNEL) {
+                Some(block) => out.extend_from_slice(block),
+                None => {
+                    log::warn!("DSF 编码器通道块长度不足，跳过本次写入");
+                    return;
+                }
+            }
+            let remaining = buffer.len() - DSF_BLOCK_SIZE_PER_CHANNEL;
+            if remaining > 0 {
+                buffer.copy_within(DSF_BLOCK_SIZE_PER_CHANNEL.., 0);
+                buffer.truncate(remaining);
+            } else {
+                buffer.clear();
+            }
+        }
+
+        let block_bytes = DSF_BLOCK_SIZE_PER_CHANNEL.saturating_mul(self.channels);
+        self.bytes_out = self.bytes_out.saturating_add(block_bytes as u64);
+    }
+}
+
 /// DSF 文件写入器。
 #[frb(ignore)]
 pub(crate) struct DsfWriter {
@@ -50,14 +170,10 @@ pub(crate) struct DsfWriter {
     channel_count: u32,
     /// data chunk 头在文件中的偏移。
     data_chunk_offset: u64,
-    /// 已写入的音频数据字节数（含补齐的块）。
-    bytes_written: u64,
-    /// 收到的实际音频字节数（不含补齐的块）。
-    decoded_bytes_total: u64,
-    /// 每通道的样本缓冲，每满 4096 字节写出一块。
-    channel_buffers: Vec<Vec<u8>>,
-    /// 下一个字节所属通道的轮转位置。
-    channel_buffer_pos: usize,
+    /// 块交织编码器。
+    encoder: DsfStreamEncoder,
+    /// 复用的编码输出缓冲。
+    encode_buffer: Vec<u8>,
 }
 
 impl DsfWriter {
@@ -112,76 +228,37 @@ impl DsfWriter {
         writer.write_all(DATA_CHUNK_ID)?;
         writer.write_all(&0u64.to_le_bytes())?;
 
-        let channel_buffers =
-            vec![Vec::with_capacity(DSF_BLOCK_SIZE_PER_CHANNEL); channel_count as usize];
-
         Ok(Self {
             writer,
             channel_count,
             data_chunk_offset,
-            bytes_written: 0,
-            decoded_bytes_total: 0,
-            channel_buffers,
-            channel_buffer_pos: 0,
+            encoder: DsfStreamEncoder::new(channel_count as usize),
+            encode_buffer: Vec::new(),
         })
     }
 
     /// 写入字节交织、MSB-first 的裸 DSD 数据。
     ///
-    /// 数据按轮转顺序分派到各通道缓冲，每个字节反位为 LSB-first；当所有
-    /// 通道都累积满 4096 字节时，按通道顺序写出一整块。
+    /// 数据交给 [`DsfStreamEncoder`] 分派、反位并按块写出。
     pub(crate) fn write_samples(&mut self, data: &[u8]) -> Result<(), SacdError> {
-        let channels = self.channel_count as usize;
-        if channels == 0 {
+        if self.channel_count == 0 {
             return Err(SacdError::invalid("DSF 声道数不能为 0"));
         }
 
-        self.decoded_bytes_total = self
-            .decoded_bytes_total
-            .saturating_add(data.len() as u64);
-
-        for &byte in data {
-            let channel_index = self.channel_buffer_pos % channels;
-            let buffer = self
-                .channel_buffers
-                .get_mut(channel_index)
-                .ok_or_else(|| SacdError::invalid(format!("DSF 通道索引 {channel_index} 越界")))?;
-            buffer.push(reverse_bits(byte));
-            self.channel_buffer_pos = self.channel_buffer_pos.wrapping_add(1);
-
-            if self
-                .channel_buffers
-                .iter()
-                .all(|buffer| buffer.len() >= DSF_BLOCK_SIZE_PER_CHANNEL)
-            {
-                Self::drain_full_blocks(
-                    &mut self.writer,
-                    &mut self.channel_buffers,
-                    &mut self.bytes_written,
-                )?;
-            }
+        self.encode_buffer.clear();
+        self.encoder.push(data, &mut self.encode_buffer);
+        if !self.encode_buffer.is_empty() {
+            self.writer.write_all(&self.encode_buffer)?;
         }
-
         Ok(())
     }
 
     /// 补齐最后一个不满的块并回填 chunk 长度，完成文件写入。
     pub(crate) fn finalize(mut self) -> Result<(), SacdError> {
-        let has_partial = self
-            .channel_buffers
-            .iter()
-            .any(|buffer| !buffer.is_empty());
-        if has_partial {
-            for buffer in &mut self.channel_buffers {
-                if buffer.len() < DSF_BLOCK_SIZE_PER_CHANNEL {
-                    buffer.resize(DSF_BLOCK_SIZE_PER_CHANNEL, 0);
-                }
-            }
-            Self::drain_full_blocks(
-                &mut self.writer,
-                &mut self.channel_buffers,
-                &mut self.bytes_written,
-            )?;
+        self.encode_buffer.clear();
+        self.encoder.finish(&mut self.encode_buffer);
+        if !self.encode_buffer.is_empty() {
+            self.writer.write_all(&self.encode_buffer)?;
         }
 
         let total_file_size = self.writer.stream_position()?;
@@ -193,56 +270,18 @@ impl DsfWriter {
 
         // 按实际音频字节修正每通道样本数，避免估算值大于真实数据长度。
         let channels = u64::from(self.channel_count.max(1));
-        let sample_count = self.decoded_bytes_total / channels * 8;
+        let sample_count = self.encoder.decoded_total() / channels * 8;
         self.writer
             .seek(SeekFrom::Start(FMT_SAMPLE_COUNT_OFFSET))?;
         self.writer.write_all(&sample_count.to_le_bytes())?;
 
         // 回填 data chunk 长度：12 字节头 + 音频数据。
-        let data_chunk_size = DATA_CHUNK_HEADER_SIZE.saturating_add(self.bytes_written);
+        let data_chunk_size = DATA_CHUNK_HEADER_SIZE.saturating_add(self.encoder.bytes_out());
         self.writer
             .seek(SeekFrom::Start(self.data_chunk_offset.saturating_add(4)))?;
         self.writer.write_all(&data_chunk_size.to_le_bytes())?;
 
         self.writer.flush()?;
-        Ok(())
-    }
-
-    /// 把所有已满的通道块按通道顺序写出，并清空对应缓冲。
-    fn drain_full_blocks(
-        writer: &mut BufWriter<File>,
-        buffers: &mut [Vec<u8>],
-        bytes_written: &mut u64,
-    ) -> Result<(), SacdError> {
-        if buffers.is_empty() {
-            return Err(SacdError::invalid("DSF 通道缓冲区为空"));
-        }
-        for (index, buffer) in buffers.iter().enumerate() {
-            if buffer.len() < DSF_BLOCK_SIZE_PER_CHANNEL {
-                return Err(SacdError::invalid(format!(
-                    "DSF 通道 {index} 的缓冲区只有 {} 字节，不足一个块",
-                    buffer.len()
-                )));
-            }
-        }
-
-        let mut written = 0u64;
-        for (index, buffer) in buffers.iter_mut().enumerate() {
-            let block = buffer
-                .get(..DSF_BLOCK_SIZE_PER_CHANNEL)
-                .ok_or_else(|| SacdError::invalid(format!("DSF 通道 {index} 的块长度不足")))?;
-            writer.write_all(block)?;
-            let remaining = buffer.len() - DSF_BLOCK_SIZE_PER_CHANNEL;
-            if remaining > 0 {
-                buffer.copy_within(DSF_BLOCK_SIZE_PER_CHANNEL.., 0);
-                buffer.truncate(remaining);
-            } else {
-                buffer.clear();
-            }
-            written = written.saturating_add(DSF_BLOCK_SIZE_PER_CHANNEL as u64);
-        }
-
-        *bytes_written = bytes_written.saturating_add(written);
         Ok(())
     }
 }
@@ -254,7 +293,7 @@ fn reverse_bits(byte: u8) -> u8 {
 }
 
 /// 按声道数与区附加设置确定 DSF 声道类型。
-fn channel_type(channel_count: u32, extra_setting: u8) -> u32 {
+pub(crate) fn channel_type(channel_count: u32, extra_setting: u8) -> u32 {
     if channel_count == 2 && extra_setting == 0 {
         return 2;
     }

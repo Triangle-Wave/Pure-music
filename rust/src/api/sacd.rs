@@ -13,6 +13,7 @@ mod extract;
 mod master_toc;
 mod pcm;
 mod reader;
+mod stream;
 mod tracklist;
 mod types;
 
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::UNIX_EPOCH;
 
+use flutter_rust_bridge::frb;
 use md5::{Digest, Md5};
 
 pub(crate) use extract::extract_track_to_dsf;
@@ -46,6 +48,73 @@ static EXTRACT_LOCK: Mutex<()> = Mutex::new(());
 
 /// 进程内 TOC 缓存，键为 ISO 路径、文件长度与修改时间秒数。
 static TOC_CACHE: Mutex<Vec<TocCacheEntry>> = Mutex::new(Vec::new());
+
+/// `BASS_StreamCreateFileUser` 使用的四个回调地址。
+///
+/// 字段是函数指针的地址，Dart 侧用 `ffi.Pointer.fromAddress` 还原成
+/// `ffi.NativeFunction`。x64 下地址与 `usize` 等宽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SacdFileProcs {
+    /// `FILECLOSEPROC`：`void (*)(void *user)`
+    pub close: usize,
+    /// `FILELENPROC`：`QWORD (*)(void *user)`
+    pub length: usize,
+    /// `FILEREADPROC`：`DWORD (*)(void *buffer, DWORD length, void *user)`
+    pub read: usize,
+    /// `FILESEEKPROC`：`BOOL (*)(QWORD offset, void *user)`
+    pub seek: usize,
+}
+
+/// 一条 SACD 流式播放源的描述。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SacdStreamDescriptor {
+    /// 会话指针，作为 `BASS_StreamCreateFileUser` 的 `user` 参数。
+    pub user: usize,
+    /// 四个回调地址。
+    pub procs: SacdFileProcs,
+    /// 虚拟文件总字节数（含头部）。
+    pub length: usize,
+    /// 轨道时长（毫秒），界面与进度条使用。
+    pub duration_ms: usize,
+    /// 虚拟文件头长度（直解 92 字节，PCM 44 字节）。
+    pub header_len: usize,
+    /// 声道数。
+    pub channels: u32,
+    /// 虚拟文件的采样率（直解为 DSD 采样率，PCM 为输出采样率）。
+    pub sample_rate: u32,
+    /// 虚拟文件的位深（直解为 1，PCM 为 16/24）。
+    pub bit_depth: u16,
+    /// 播放模式：`dsd` 或 `pcm`。
+    pub mode: String,
+}
+
+/// 打开一条 SACD 轨道的流式播放源。
+///
+/// `mode` 取 `"dsd"`（直解，虚拟 DSF）或 `"pcm"`（实时转换，虚拟 WAV）。
+/// `sample_rate` 与 `bit_depth` 只在 PCM 模式使用：采样率支持
+/// 44100/48000/88200/96000/192000，位深支持 16/24。48000 会按现有转换器
+/// 的能力回退到 44100，描述结构返回实际输出参数。
+///
+/// 返回的 `user` 与 `procs` 直接交给 `BASS_StreamCreateFileUser`；
+/// 建流失败时调用 [`sacd_stream_discard`] 释放会话，成功时由 BASS 调用
+/// `close` 回调回收。
+#[frb(sync)]
+pub fn sacd_stream_open(
+    iso_path: String,
+    area: String,
+    track_number: u32,
+    mode: String,
+    sample_rate: u32,
+    bit_depth: u16,
+) -> Result<SacdStreamDescriptor, String> {
+    stream::open_stream(iso_path, area, track_number, mode, sample_rate, bit_depth)
+}
+
+/// 丢弃一条未能用于建流的会话；正常结束由 `close` 回调回收。
+#[frb(sync)]
+pub fn sacd_stream_discard(user: usize) {
+    stream::discard_stream(user);
+}
 
 /// 进程内 TOC 缓存条目；最近使用的条目排在末尾。
 struct TocCacheEntry {
@@ -446,29 +515,29 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const PLAIN_SECTOR_SIZE: usize = 2048;
-    const HEADERED_SECTOR_SIZE: usize = 2064;
-    const HEADERED_SECTOR_HEADER: usize = 12;
-    const IMAGE_SECTOR_COUNT: usize = 640;
-    const MASTER_TOC_LSN: usize = 510;
-    const AREA_TOC_LSN: usize = 544;
+    pub(crate) const PLAIN_SECTOR_SIZE: usize = 2048;
+    pub(crate) const HEADERED_SECTOR_SIZE: usize = 2064;
+    pub(crate) const HEADERED_SECTOR_HEADER: usize = 12;
+    pub(crate) const IMAGE_SECTOR_COUNT: usize = 640;
+    pub(crate) const MASTER_TOC_LSN: usize = 510;
+    pub(crate) const AREA_TOC_LSN: usize = 544;
     const AREA_TOC_FALLBACK_LSN: usize = 560;
-    const AREA_TOC_SECTORS: u16 = 5;
+    pub(crate) const AREA_TOC_SECTORS: u16 = 5;
 
     /// 可提取测试镜像中首轨的起始 LSN。
-    const EXTRACT_TRACK_LSN: usize = 600;
+    pub(crate) const EXTRACT_TRACK_LSN: usize = 600;
     /// 可提取测试镜像中首轨占用的 LSN 数。
-    const EXTRACT_TRACK_LENGTH_LSN: u32 = 2;
+    pub(crate) const EXTRACT_TRACK_LENGTH_LSN: u32 = 2;
     /// 单扇区音频负载：2048 - 1 字节扇区头 - 2 字节包信息 - 3 字节帧信息。
-    const AUDIO_PAYLOAD_SIZE: usize = PLAIN_SECTOR_SIZE - 6;
+    pub(crate) const AUDIO_PAYLOAD_SIZE: usize = PLAIN_SECTOR_SIZE - 6;
 
     /// 测试结束后自动删除的临时镜像文件。
-    struct TempImage {
-        path: PathBuf,
+    pub(crate) struct TempImage {
+        pub(crate) path: PathBuf,
     }
 
     impl TempImage {
-        fn create(data: &[u8]) -> Self {
+        pub(crate) fn create(data: &[u8]) -> Self {
             let path = unique_temp_path();
             fs::write(&path, data).expect("写入临时镜像失败");
             Self { path }
@@ -481,7 +550,7 @@ mod tests {
         }
     }
 
-    fn unique_temp_path() -> PathBuf {
+    pub(crate) fn unique_temp_path() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -496,7 +565,7 @@ mod tests {
         ))
     }
 
-    fn unique_temp_dir() -> PathBuf {
+    pub(crate) fn unique_temp_dir() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -512,12 +581,12 @@ mod tests {
     }
 
     /// 测试结束后自动删除的临时缓存目录。
-    struct TempDir {
-        path: PathBuf,
+    pub(crate) struct TempDir {
+        pub(crate) path: PathBuf,
     }
 
     impl TempDir {
-        fn unused() -> Self {
+        pub(crate) fn unused() -> Self {
             Self {
                 path: unique_temp_dir(),
             }
@@ -531,14 +600,14 @@ mod tests {
     }
 
     /// 按 2048 或 2064 字节布局逐扇区构造镜像。
-    struct ImageBuilder {
+    pub(crate) struct ImageBuilder {
         data: Vec<u8>,
         stride: usize,
         header_len: usize,
     }
 
     impl ImageBuilder {
-        fn new(headered: bool) -> Self {
+        pub(crate) fn new(headered: bool) -> Self {
             let (stride, header_len) = if headered {
                 (HEADERED_SECTOR_SIZE, HEADERED_SECTOR_HEADER)
             } else {
@@ -551,26 +620,26 @@ mod tests {
             }
         }
 
-        fn sector_mut(&mut self, lsn: usize) -> &mut [u8] {
+        pub(crate) fn sector_mut(&mut self, lsn: usize) -> &mut [u8] {
             let start = lsn * self.stride + self.header_len;
             let end = start + SACD_LSN_SIZE;
             assert!(end <= self.data.len(), "测试镜像扇区越界");
             &mut self.data[start..end]
         }
 
-        fn into_data(self) -> Vec<u8> {
+        pub(crate) fn into_data(self) -> Vec<u8> {
             self.data
         }
     }
 
-    fn put_u16(sector: &mut [u8], offset: usize, value: u16) {
+    pub(crate) fn put_u16(sector: &mut [u8], offset: usize, value: u16) {
         let target = sector
             .get_mut(offset..offset + 2)
             .expect("测试写入 u16 越界");
         target.copy_from_slice(&value.to_be_bytes());
     }
 
-    fn put_u32(sector: &mut [u8], offset: usize, value: u32) {
+    pub(crate) fn put_u32(sector: &mut [u8], offset: usize, value: u32) {
         let target = sector
             .get_mut(offset..offset + 4)
             .expect("测试写入 u32 越界");
@@ -578,7 +647,7 @@ mod tests {
     }
 
     /// 按 Master TOC 字段偏移写入（见 master_toc.rs 的偏移注释）。
-    fn write_master_toc(
+    pub(crate) fn write_master_toc(
         sector: &mut [u8],
         area_1_toc_1_start: u32,
         area_1_toc_2_start: u32,
@@ -602,7 +671,7 @@ mod tests {
     }
 
     /// 按 Area TOC 字段偏移写入（见 area_toc.rs 的偏移注释）。
-    fn write_area_toc(
+    pub(crate) fn write_area_toc(
         sector: &mut [u8],
         signature: &[u8],
         channel_count: u8,
@@ -627,7 +696,7 @@ mod tests {
         put_u32(sector, 76, track_end_lsn);
     }
 
-    fn write_track_list_1(sector: &mut [u8], starts: &[u32], lengths: &[u32]) {
+    pub(crate) fn write_track_list_1(sector: &mut [u8], starts: &[u32], lengths: &[u32]) {
         sector[0..8].copy_from_slice(b"SACDTRL1");
         for (index, value) in starts.iter().enumerate() {
             put_u32(sector, 8 + index * 4, *value);
@@ -638,7 +707,7 @@ mod tests {
         }
     }
 
-    fn write_track_list_2(
+    pub(crate) fn write_track_list_2(
         sector: &mut [u8],
         starts: &[(u8, u8, u8)],
         durations: &[(u8, u8, u8)],
@@ -659,7 +728,7 @@ mod tests {
         }
     }
 
-    fn put_timecode(sector: &mut [u8], offset: usize, minutes: u8, seconds: u8, frames: u8) {
+    pub(crate) fn put_timecode(sector: &mut [u8], offset: usize, minutes: u8, seconds: u8, frames: u8) {
         let target = sector
             .get_mut(offset..offset + 4)
             .expect("测试写入时间码越界");
@@ -670,7 +739,7 @@ mod tests {
     }
 
     /// 构造最小镜像：1 个 2CH 区、2 轨、裸 DSD（3-in-14）、TOC 1 与 TOC 2 都存在。
-    fn minimal_image(headered: bool) -> Vec<u8> {
+    pub(crate) fn minimal_image(headered: bool) -> Vec<u8> {
         let mut image = ImageBuilder::new(headered);
         write_master_toc(
             image.sector_mut(MASTER_TOC_LSN),
@@ -712,7 +781,7 @@ mod tests {
     }
 
     /// 构造一个只含扇区头的裸 DSD 音频扇区。
-    fn write_audio_sector(target: &mut [u8], payload: &[u8], frame_start: bool) {
+    pub(crate) fn write_audio_sector(target: &mut [u8], payload: &[u8], frame_start: bool) {
         let needed = 6 + payload.len();
         assert!(needed <= target.len(), "测试音频负载超出扇区");
         target.fill(0);
@@ -725,7 +794,7 @@ mod tests {
     }
 
     /// 构造可提取的最小镜像：1 个 2CH 区、2 轨、裸 DSD，首轨从 LSN 600 起占 2 个扇区。
-    fn extractable_image() -> Vec<u8> {
+    pub(crate) fn extractable_image() -> Vec<u8> {
         let mut image = ImageBuilder::new(false);
         write_master_toc(
             image.sector_mut(MASTER_TOC_LSN),

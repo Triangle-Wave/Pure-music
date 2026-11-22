@@ -13,7 +13,7 @@ use flutter_rust_bridge::frb;
 const AUDIO_SECTOR_SIZE: usize = 2048;
 
 /// 数据包类型：音频数据。
-const DATA_TYPE_AUDIO: u8 = 2;
+pub(crate) const DATA_TYPE_AUDIO: u8 = 2;
 
 /// 单帧 DST 压缩数据的上限，与参考实现的最大帧缓冲区一致。
 const MAX_DST_FRAME_BYTES: usize = 64 * 1024;

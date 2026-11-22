@@ -10,7 +10,7 @@ import 'package:pure_music/native/bass/bass_player.dart';
 import 'package:pure_music/page/settings_page/tabs/settings_section_header.dart';
 import 'package:pure_music/play_service/play_service.dart';
 
-/// 音频输出设置：设备、共享/独占、采样率、格式、PCM 缓存与 DSD 模式。
+/// 音频输出设置：设备、共享/独占、采样率、格式、实时转换格式与 SACD 播放方式。
 class AudioOutputSettingsPanel extends StatefulWidget {
   const AudioOutputSettingsPanel({super.key});
 
@@ -395,8 +395,8 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         ),
         const SizedBox(height: 16.0),
         SettingsTile(
-          description: 'PCM 缓存格式',
-          subtitle: '仅 PCM 缓存模式使用，采样率与位深按此设置；下次加载 SACD 音轨时生效',
+          description: '实时转换格式',
+          subtitle: '仅实时 PCM 使用，采样率与位深影响 CPU 占用，不再写磁盘缓存',
           action: DropdownMenu<String>(
             key: ValueKey('pcm-cache-$_pcmCacheSelection'),
             initialSelection: _pcmCacheSelection,
@@ -438,9 +438,9 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
         ),
         const SizedBox(height: 16.0),
         SettingsTile(
-          description: 'DSD 播放模式',
-          subtitle: '推荐 DSF 直解：源 DSF 原样输出，不生成 PCM 缓存，采样率与上方 PCM 缓存格式无关；'
-              'PCM 缓存会生成 WAV，采样率按上方设置，首次转换较慢',
+          description: 'SACD 播放方式',
+          subtitle: '实时 PCM：解码到 PCM 输出，CPU 占用低；'
+              'DSF 直解：交给 BASS 的 DSD 解码，CPU 占用随设备与轨道变化',
           action: SegmentedButton<String>(
             showSelectedIcon: false,
             segments: const [
@@ -450,7 +450,7 @@ class _AudioOutputSettingsPanelState extends State<AudioOutputSettingsPanel> {
               ),
               ButtonSegment(
                 value: PlaybackPreference.dsdPlaybackModePcm,
-                label: Text('PCM 缓存'),
+                label: Text('实时 PCM'),
               ),
             ],
             selected: {_pref.dsdPlaybackMode},

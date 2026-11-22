@@ -28,15 +28,18 @@ mod filters_lm;
 mod lm_resampler;
 mod pcm_writer;
 mod audio_file;
+mod streaming;
 mod tag_util;
 
 use std::sync::atomic::AtomicBool;
 use std::{error::Error, fs, io, path::PathBuf, sync::mpsc};
 
 pub use crate::conversion_context::ProgressUpdate;
+pub use crate::lm_resampler::compute_decim_and_upsample;
+pub use crate::streaming::StreamingPcm;
 use crate::{
     conversion_context::ConversionContext, dither::Dither,
-    lm_resampler::compute_decim_and_upsample, pcm_writer::PcmWriter,
+    pcm_writer::PcmWriter,
 };
 
 pub use dsd_reader::DsdRate;
@@ -257,7 +260,7 @@ impl Rdsd2Pcm {
 
     /// Worst-case frames per channel per input block:
     /// ceil((bits_in * L) / M). Add small slack for LM paths to avoid edge truncation.
-    fn calc_frames_cap(
+    pub(crate) fn calc_frames_cap(
         block_size: usize,
         decim: i32,
         upsample: u32,
@@ -331,6 +334,8 @@ pub enum FilterType {
 pub enum OutputType {
     /// Raw PCM to stdout
     Stdout,
+    /// Raw PCM kept in an in-memory buffer (see `PcmWriter::new_memory`)
+    Memory,
     Wav,
     Aiff,
     Aifc,

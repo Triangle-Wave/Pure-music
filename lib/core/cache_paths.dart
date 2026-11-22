@@ -30,7 +30,7 @@ const String _legacyAmllIndexDirectoryName = 'amll';
 /// 旧版 AMLL 索引文件在缓存根下的相对路径，用于清理早期布局。
 const String _legacyAmllIndexFileName = 'raw-lyrics-index.jsonl';
 
-/// SACD 提取产物后缀；清理 PCM 缓存时保留该后缀。
+/// 旧版 SACD 提取产物后缀；清理历史缓存时保留该后缀的文件。
 const String _dsfFileExtension = '.dsf';
 
 bool _isDsfFile(String path) =>
@@ -204,7 +204,9 @@ Future<Directory> getLyricIndexCacheDirectory() async {
   return directory;
 }
 
-/// SACD 提取缓存目录。
+/// 历史 SACD 缓存的目录。
+///
+/// 播放链路不再写入该目录，仅用于清理旧版本遗留的提取产物。
 Future<Directory> getSacdCacheDirectory() async {
   await _migrateLegacySacdCache();
   return getCacheSubdirectory(cacheSacdDirectoryName);
@@ -246,8 +248,8 @@ Future<void> ensureCacheDirectories() async {
 
 /// 清空全部缓存内容，返回删除统计。设置、数据库、日志与更新包不受影响。
 ///
-/// SACD 缓存目录只删除 PCM 派生文件与转换临时文件，保留已提取的 DSF，
-/// 清理后无需重新从 ISO 提取。
+/// SACD 目录只承载历史残留：删除 PCM 派生文件与转换临时文件，保留已提取的
+/// DSF 文件，需要时由用户手动清理。
 Future<CacheClearReport> clearCache() async {
   final root = await getCacheRoot();
   final dataRoot = await _dataRoot();
