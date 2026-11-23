@@ -6,6 +6,7 @@ import 'package:pure_music/core/preference.dart';
 import 'package:pure_music/core/cache.dart';
 import 'package:pure_music/core/enums.dart';
 import 'package:pure_music/library/audio_library.dart';
+import 'package:pure_music/lyric/romanizer_bridge.dart';
 import 'package:pure_music/play_service/play_service.dart';
 import 'package:pure_music/play_service/audio_echo_log_recorder.dart';
 import 'package:pure_music/play_service/audio_tag_write_scheduler.dart';
@@ -271,6 +272,8 @@ class PlaybackService extends ChangeNotifier {
     _bindSmtcControls();
     _bindEqualizerAndSmartTransitions();
     _bindSleepTimer();
+    // 词典加载较慢，后台预热，失败只记 WARN 不影响启动。
+    unawaited(warmUpRomanizer());
     _scheduleSessionRestore();
   }
 

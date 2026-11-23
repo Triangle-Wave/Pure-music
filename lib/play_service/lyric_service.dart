@@ -871,13 +871,17 @@ class LyricService extends ChangeNotifier {
       final token = _lyricRequestToken;
       final path = _activeLyricPath;
       final future = currLyricFuture;
-      future.then((value) {
+      future.then((value) async {
         if (path == null || !_isCurrentLyricRequest(token, path, future)) {
           return;
         }
         if (value == null) return;
-        _setCurrLyric(value);
-        forceEmitCurrentLine();
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: token,
+          audioPath: path,
+        );
+        if (applied) forceEmitCurrentLine();
       });
       return;
     }
@@ -908,13 +912,17 @@ class LyricService extends ChangeNotifier {
       final token = _lyricRequestToken;
       final path = _activeLyricPath;
       final future = currLyricFuture;
-      future.then((value) {
+      future.then((value) async {
         if (path == null || !_isCurrentLyricRequest(token, path, future)) {
           return;
         }
         if (value == null) return;
-        _setCurrLyric(value);
-        findCurrLyricLineAt(positionSeconds);
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: token,
+          audioPath: path,
+        );
+        if (applied) findCurrLyricLineAt(positionSeconds);
       });
       return;
     }
@@ -1017,6 +1025,37 @@ class LyricService extends ChangeNotifier {
       }
     }
     return switchStarts;
+  }
+
+  /// 应用歌词：先补全词典罗马音，再设置当前歌词。
+  ///
+  /// 返回 false 表示等待期间用户已切歌或切换请求，调用方不应再做后续刷新。
+  /// [requestToken] 与 [audioPath] 传当前请求的实际值，无法取得时传 null。
+  Future<bool> _applyLyricWithRomanization(
+    Lyric lyric, {
+    required int? requestToken,
+    required String? audioPath,
+  }) async {
+    try {
+      await applyLyricRomanization(
+        lyric,
+        enabled: AppSettings.instance.autoRomanizeLyric,
+      );
+    } catch (err, trace) {
+      log.lyric.warn(
+        'lyric.romanizer',
+        '词典罗马音生成失败，使用本地转写',
+        error: err,
+        stackTrace: trace,
+      );
+    }
+    if (_disposed) return false;
+    if (requestToken != null && requestToken != _lyricRequestToken) {
+      return false;
+    }
+    if (audioPath != null && _activeLyricPath != audioPath) return false;
+    _setCurrLyric(lyric);
+    return true;
   }
 
   void _setCurrLyric(Lyric lyric) {
@@ -1274,7 +1313,25 @@ class LyricService extends ChangeNotifier {
     );
     currLyricFuture = future;
     future.then(
-      (value) {
+      (value) async {
+        if (value != null && AppSettings.instance.autoRomanizeLyric) {
+          // 词典生成整首罗马音后再一次性显示；等待期间不设置 _currLyric。
+          await applyDictionaryRomanization(value).catchError((
+            Object error,
+            StackTrace trace,
+          ) {
+            log.lyric.warn(
+              'lyric.romanizer',
+              '词典罗马音应用失败，使用本地转写',
+              error: error,
+              stackTrace: trace,
+            );
+          });
+          if (_disposed) return;
+          if (!_isCurrentLyricRequest(requestToken, audioPath, future)) {
+            return;
+          }
+        }
         _applyLoadedLyric(
           value,
           requestToken: requestToken,
@@ -1501,7 +1558,12 @@ class LyricService extends ChangeNotifier {
       if (lyric == null || _currLyric != null) return;
       if (_getNowPlaying()?.path != audio.path || record.disabled) return;
       _activeLyricSourceType = _lyricSourceTypeFromCandidate(candidate);
-      _setCurrLyric(lyric);
+      final applied = await _applyLyricWithRomanization(
+        lyric,
+        requestToken: null,
+        audioPath: audio.path,
+      );
+      if (!applied) return;
       findCurrLyricLineAt(playService.playbackService.position);
       _notifyLyricChangeListeners();
     } catch (error, trace) {
@@ -1610,11 +1672,16 @@ class LyricService extends ChangeNotifier {
 
     _cancelLyricWritePrompt();
     _onlineFallbackForWrite = false;
-    _beginLyricRequest(audio.path);
+    final requestToken = _beginLyricRequest(audio.path);
     _activeLyricSourceType = _lyricSourceTypeFromCandidate(candidate);
     _activeLocalIsExternal = null;
     currLyricFuture = Future.value(lyric);
-    _setCurrLyric(lyric);
+    final applied = await _applyLyricWithRomanization(
+      lyric,
+      requestToken: requestToken,
+      audioPath: audio.path,
+    );
+    if (!applied || _disposed) return false;
     findCurrLyricLineAt(playService.playbackService.position);
     _scheduleLyricWritePrompt(audio.path);
     unawaited(_autoSaveExternalLyric(audio.path, lyric));
@@ -1685,11 +1752,16 @@ class LyricService extends ChangeNotifier {
     _activeLocalIsExternal = null;
     currLyricFuture = _loadLocalLyric(audioPath, notifyFailure: false);
     final future = currLyricFuture;
-    future.then((value) {
+    future.then((value) async {
       if (_disposed) return;
       if (!_isCurrentLyricRequest(requestToken, audioPath, future)) return;
       if (value != null) {
-        _setCurrLyric(value);
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: requestToken,
+          audioPath: audioPath,
+        );
+        if (!applied) return;
       } else {
         _currLyric = null;
       }
@@ -1963,10 +2035,15 @@ class LyricService extends ChangeNotifier {
     currLyricFuture = _loadLocalLyric(audioPath, notifyFailure: true);
     _reportLyricUpdate(mode: 'local', source: 'local');
     final future = currLyricFuture;
-    future.then((value) {
+    future.then((value) async {
       if (!_isCurrentLyricRequest(requestToken, audioPath, future)) return;
       if (value != null) {
-        _setCurrLyric(value);
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: requestToken,
+          audioPath: audioPath,
+        );
+        if (!applied) return;
         _putLocalLyricCache(cacheKey, value);
       } else {
         _currLyric = null;
@@ -2150,10 +2227,18 @@ class LyricService extends ChangeNotifier {
     _putLocalLyricCache(cacheKey, parsed);
     // 画面读的是这份 Future。不换的话，行号已经按新时间走，歌词还是旧的。
     currLyricFuture = Future.value(parsed);
-    _setCurrLyric(parsed);
-    findCurrLyricLineAt(playService.playbackService.position);
+    unawaited(
+      _applyLyricWithRomanization(
+        parsed,
+        requestToken: null,
+        audioPath: audioPath,
+      ).then((applied) {
+        if (!applied || _disposed) return;
+        findCurrLyricLineAt(playService.playbackService.position);
+        _notifyLyricChangeListeners();
+      }),
+    );
     LyricManualOffset.instance.notifyListeners();
-    _notifyLyricChangeListeners();
   }
 
   /// 写入标签后刷新当前歌词：清除本地缓存并重新从标签加载
@@ -2175,10 +2260,15 @@ class LyricService extends ChangeNotifier {
     final requestToken = _beginLyricRequest(audioPath);
     currLyricFuture = _onlineLyricFuture(nowPlaying, audioPath, requestToken);
     final future = currLyricFuture;
-    future.then((value) {
+    future.then((value) async {
       if (!_isCurrentLyricRequest(requestToken, audioPath, future)) return;
       if (value != null) {
-        _setCurrLyric(value);
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: requestToken,
+          audioPath: audioPath,
+        );
+        if (!applied) return;
         _scheduleLyricWritePrompt(audioPath);
       } else {
         _currLyric = null;
@@ -2297,10 +2387,15 @@ class LyricService extends ChangeNotifier {
 
     currLyricFuture = Future.value(lyric);
     final future = currLyricFuture;
-    future.then((value) {
+    future.then((value) async {
       if (!_isCurrentLyricRequest(requestToken, audioPath, future)) return;
       if (value != null) {
-        _setCurrLyric(value);
+        final applied = await _applyLyricWithRomanization(
+          value,
+          requestToken: requestToken,
+          audioPath: audioPath,
+        );
+        if (!applied) return;
       } else {
         _currLyric = null;
       }
@@ -2352,6 +2447,23 @@ class LyricService extends ChangeNotifier {
     final lyric = _currLyric;
     if (lyric == null) return;
     revertAutoRomanization(lyric);
+    unawaited(_rebuildRomanization(lyric));
+  }
+
+  Future<void> _rebuildRomanization(Lyric lyric) async {
+    if (AppSettings.instance.autoRomanizeLyric) {
+      try {
+        await applyDictionaryRomanization(lyric);
+      } catch (err, trace) {
+        log.lyric.warn(
+          'lyric.romanizer',
+          '重建词典罗马音失败，使用本地转写',
+          error: err,
+          stackTrace: trace,
+        );
+      }
+    }
+    if (_disposed || !identical(_currLyric, lyric)) return;
     _setCurrLyric(lyric);
     _notifyLyricChangeListeners();
   }

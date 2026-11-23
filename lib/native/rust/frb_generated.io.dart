@@ -9,6 +9,7 @@ import 'api/installed_font.dart';
 import 'api/library_db.dart';
 import 'api/library_db/play_counts.dart';
 import 'api/logger.dart';
+import 'api/lyric_romanizer.dart';
 import 'api/ne.dart';
 import 'api/network_proxy.dart';
 import 'api/sacd.dart';

@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 632867163;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1307578714;
 
 // Section: executor
 
@@ -2333,6 +2333,75 @@ fn wire__crate__api__library_db__read_index_from_sqlite_impl(
         },
     )
 }
+fn wire__crate__api__lyric_romanizer__romanize_japanese_texts_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "romanize_japanese_texts",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_texts = <Vec<String>>::sse_decode(&mut deserializer);
+            let api_include_kanji_only = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::lyric_romanizer::romanize_japanese_texts(
+                        api_texts,
+                        api_include_kanji_only,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__lyric_romanizer__romanizer_warmup_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "romanizer_warmup",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::lyric_romanizer::romanizer_warmup()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__sacd__sacd_stream_discard_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -4048,33 +4117,45 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        60 => {
-            wire__crate__api__library_db__set_audios_hidden_impl(port, ptr, rust_vec_len, data_len)
-        }
-        61 => wire__crate__api__network_proxy__set_network_proxy_impl(
+        58 => wire__crate__api__lyric_romanizer__romanize_japanese_texts_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        59 => wire__crate__api__lyric_romanizer__romanizer_warmup_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
         62 => {
-            wire__crate__api__app_env__set_process_temp_dir_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__library_db__set_audios_hidden_impl(port, ptr, rust_vec_len, data_len)
         }
-        63 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__system_theme__system_theme_default_impl(
+        63 => wire__crate__api__network_proxy__set_network_proxy_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
-        70 => {
+        64 => {
+            wire__crate__api__app_env__set_process_temp_dir_impl(port, ptr, rust_vec_len, data_len)
+        }
+        65 => wire__crate__api__utils__show_in_explorer_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__system_theme__system_theme_default_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        71 => wire__crate__api__tag_reader__update_index_impl(port, ptr, rust_vec_len, data_len),
+        72 => {
             wire__crate__api__tag_reader__write_audio_cover_impl(port, ptr, rust_vec_len, data_len)
         }
-        71 => {
+        73 => {
             wire__crate__api__tag_reader__write_audio_tags_impl(port, ptr, rust_vec_len, data_len)
         }
-        72 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
+        74 => wire__crate__api__tag_reader__write_lyric_to_path_impl(
             port,
             ptr,
             rust_vec_len,
@@ -4128,24 +4209,24 @@ fn pde_ffi_dispatcher_sync_impl(
             rust_vec_len,
             data_len,
         ),
-        58 => wire__crate__api__sacd__sacd_stream_discard_impl(ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__sacd__sacd_stream_open_impl(ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
+        60 => wire__crate__api__sacd__sacd_stream_discard_impl(ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__sacd__sacd_stream_open_impl(ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__smart_transition__smart_transition_analysis_config_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
+        67 => wire__crate__api__smart_transition__smart_transition_capabilities_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
+        68 => wire__crate__api__smart_transition__smart_transition_diagnostics_json_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
+        70 => wire__crate__api__system_theme__system_theme_get_system_theme_impl(
             ptr,
             rust_vec_len,
             data_len,

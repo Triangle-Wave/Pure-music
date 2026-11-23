@@ -1,6 +1,8 @@
 import 'dart:collection';
 
 import 'package:pure_music/lyric/lyric.dart';
+import 'package:pure_music/lyric/roman_word_mapper.dart';
+import 'package:pure_music/lyric/romanizer_bridge.dart';
 
 /// 假名到罗马音的本地转写，用于为缺少罗马音的日文歌词生成显示文本。
 ///
@@ -32,6 +34,28 @@ class JapaneseRomanizer {
     }
     if (kana < 2) return false;
     return kanji == 0;
+  }
+
+  /// 行内是否含假名，含假名的行总是交给词典。
+  static bool containsKana(String text) => text.runes.any(_isKanaRune);
+
+  /// 整行只有汉字与标点、空白，没有假名、拉丁字母、数字与韩文。
+  ///
+  /// 这类行在整首判定为日语时才交给词典，避免中文歌词被误转写。
+  static bool isKanjiOnly(String text) {
+    var kanji = 0;
+    for (final rune in text.runes) {
+      if (_isKanjiRune(rune)) {
+        kanji++;
+        continue;
+      }
+      if (_isKanaRune(rune) ||
+          _isLatinOrDigit(rune) ||
+          _isHangulRune(rune)) {
+        return false;
+      }
+    }
+    return kanji > 0;
   }
 
   /// 把假名文本转写为罗马音，汉字与非假名字符跳过。
@@ -211,6 +235,12 @@ class JapaneseRomanizer {
         (rune >= 0xF900 && rune <= 0xFAFF);
   }
 
+  static bool _isHangulRune(int rune) {
+    return (rune >= 0x1100 && rune <= 0x11FF) ||
+        (rune >= 0x3130 && rune <= 0x318F) ||
+        (rune >= 0xAC00 && rune <= 0xD7A3);
+  }
+
   static bool _isWhitespace(int code) {
     return code == 0x20 ||
         code == 0x09 ||
@@ -307,6 +337,74 @@ void applyAutoRomanization(Lyric lyric) {
     line.romanWords = built.words;
     line.autoRomanized = true;
   }
+}
+
+/// 为整首歌词补全罗马音：先尝试词典（含汉字），失败回退纯假名转写。
+///
+/// 含假名的行总是交给词典；纯汉字行只在整首判定为日语时提交。判定依据是
+/// 含假名行占比不低于 30%，或前 5 行至少 2 行含假名。没有任何假名行的歌词
+/// 直接跳过，中文、英文、韩文歌词不会被转换。
+Future<void> applyDictionaryRomanization(Lyric lyric) async {
+  final candidates = <SyncLyricLine>[];
+  for (final line in lyric.lines) {
+    // 元数据行按纯文本绘制，罗马音不会被使用。
+    if (line.isMetadata) continue;
+    if (line is! SyncLyricLine) continue;
+    if (line.autoRomanized) continue;
+    final existing = line.romanLyric;
+    if (existing != null && existing.trim().isNotEmpty) continue;
+    candidates.add(line);
+  }
+  if (candidates.isEmpty) return;
+
+  final kanaFlags = [
+    for (final line in candidates) JapaneseRomanizer.containsKana(line.content),
+  ];
+  final kanaLines = kanaFlags.where((flag) => flag).length;
+  if (kanaLines == 0) return;
+  final leading = kanaFlags.length <= 5 ? kanaFlags : kanaFlags.sublist(0, 5);
+  final leadingKanaLines = leading.where((flag) => flag).length;
+  final japaneseSong =
+      kanaLines / candidates.length >= 0.3 || leadingKanaLines >= 2;
+
+  final selected = <SyncLyricLine>[];
+  final texts = <String>[];
+  for (var i = 0; i < candidates.length; i++) {
+    final line = candidates[i];
+    if (kanaFlags[i]) {
+      selected.add(line);
+      texts.add(line.content);
+    } else if (japaneseSong && JapaneseRomanizer.isKanjiOnly(line.content)) {
+      selected.add(line);
+      texts.add(line.content);
+    }
+  }
+  if (texts.isEmpty) return;
+
+  // 一次调用整批转换，返回顺序与输入一致。
+  final results = await romanizeLines(texts, includeKanjiOnly: japaneseSong);
+  var applied = false;
+  for (var i = 0; i < selected.length && i < results.length; i++) {
+    final text = results[i].trim();
+    if (text.isEmpty) continue;
+    final line = selected[i];
+    line.romanLyric = text;
+    line.romanWords = mapRomanWords(
+      romanText: text,
+      words: line.words,
+      lineStart: line.start,
+      lineLength: line.length,
+    );
+    line.autoRomanized = true;
+    applied = true;
+  }
+  if (!applied) applyAutoRomanization(lyric);
+}
+
+/// 按开关为整首歌词补全词典罗马音；开关关闭时不做任何事。
+Future<void> applyLyricRomanization(Lyric lyric, {required bool enabled}) async {
+  if (!enabled) return;
+  await applyDictionaryRomanization(lyric);
 }
 
 /// 移除本地生成的罗马音，保留歌词文件自带的罗马音。
