@@ -4,8 +4,9 @@
 //! 被缓存，后续调用直接返回同一条可读错误。每行文本的转换结果缓存在 `HashMap` 中，
 //! 上限 4096 条，超限时丢弃一半条目。
 //!
-//! 只有含假名（或日文特有标记 々 〆 〇）的连续片段参与转换：纯中文、英文、
-//! 韩文、数字与符号被丢弃，因此非日文行返回空串。多个片段之间以一个空格连接。
+//! 只有含假名（或日文特有标记 々 〆 〇）的连续片段参与转换；`include_kanji_only`
+//! 为真时纯 CJK 汉字片段也参与转换。英文、韩文、数字与符号在任何开关下都被丢弃，
+//! 多个片段之间以一个空格连接。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -30,18 +31,25 @@ pub fn romanizer_warmup() -> Result<(), String> {
 
 /// 把若干行歌词转换为罗马音。
 ///
-/// 每个输入行独立处理：不含假名的行返回空串；单行转换失败时记录 WARN
-/// （只带文本长度，不打印歌词）并返回空串，不中断整批。
+/// `include_kanji_only` 为 true 时，纯 CJK 汉字片段也交给引擎转换；为 false 时
+/// 只有含假名（或 々 〆 〇）的片段参与转换。纯中文行在 false 时返回空串，
+/// 在 true 时由引擎决定返回空串或读音。
+///
+/// 每个输入行独立处理：单行转换失败时记录 WARN（只带文本长度，不打印歌词）
+/// 并返回空串，不中断整批。
 ///
 /// # 错误
 ///
 /// 引擎初始化失败时返回可读错误，此时整批都不产生结果。
-pub fn romanize_japanese_texts(texts: Vec<String>) -> Result<Vec<String>, String> {
+pub fn romanize_japanese_texts(
+    texts: Vec<String>,
+    include_kanji_only: bool,
+) -> Result<Vec<String>, String> {
     let engine = engine()?;
     let opts = options();
     Ok(texts
         .iter()
-        .map(|text| romanize_line(engine, &opts, text))
+        .map(|text| romanize_line(engine, &opts, text, include_kanji_only))
         .collect())
 }
 
@@ -76,16 +84,22 @@ fn engine() -> Result<&'static Sabiyomi, String> {
     engine.as_ref().map_err(|message| message.clone())
 }
 
-fn romanize_line(engine: &Sabiyomi, opts: &Options, text: &str) -> String {
+fn romanize_line(
+    engine: &Sabiyomi,
+    opts: &Options,
+    text: &str,
+    include_kanji_only: bool,
+) -> String {
     if text.is_empty() {
         return String::new();
     }
-    if let Some(cached) = cache_get(text) {
+    let key = cache_key(include_kanji_only, text);
+    if let Some(cached) = cache_get(&key) {
         return cached;
     }
-    match convert_japanese_runs(engine, opts, text) {
+    match convert_japanese_runs(engine, opts, text, include_kanji_only) {
         Ok(romaji) => {
-            cache_put(text, &romaji);
+            cache_put(&key, &romaji);
             romaji
         }
         Err(err) => {
@@ -100,18 +114,28 @@ fn romanize_line(engine: &Sabiyomi, opts: &Options, text: &str) -> String {
     }
 }
 
-/// 扫描整行，只转换含假名（或日文特有标记）的连续日文片段。
-fn convert_japanese_runs(engine: &Sabiyomi, opts: &Options, text: &str) -> Result<String, String> {
+/// 缓存键包含开关，避免 `false` 的空结果污染 `true` 的查询。
+fn cache_key(include_kanji_only: bool, text: &str) -> String {
+    format!("{include_kanji_only}\u{0}{text}")
+}
+
+/// 扫描整行，按开关决定纯汉字片段是否参与转换。
+fn convert_japanese_runs(
+    engine: &Sabiyomi,
+    opts: &Options,
+    text: &str,
+    include_kanji_only: bool,
+) -> Result<String, String> {
     let mut output = String::new();
     let mut run_start: Option<usize> = None;
-    let mut run_is_japanese = false;
+    let mut run_has_marker = false;
 
     for (index, ch) in text.char_indices() {
         if is_japanese_char(ch) {
             if run_start.is_none() {
                 run_start = Some(index);
             }
-            run_is_japanese |= is_japanese_marker(ch);
+            run_has_marker |= is_japanese_marker(ch);
             continue;
         }
         if let Some(start) = run_start.take() {
@@ -121,10 +145,10 @@ fn convert_japanese_runs(engine: &Sabiyomi, opts: &Options, text: &str) -> Resul
                 text,
                 start,
                 index,
-                run_is_japanese,
+                run_has_marker || include_kanji_only,
                 &mut output,
             )?;
-            run_is_japanese = false;
+            run_has_marker = false;
         }
     }
     if let Some(start) = run_start {
@@ -134,7 +158,7 @@ fn convert_japanese_runs(engine: &Sabiyomi, opts: &Options, text: &str) -> Resul
             text,
             start,
             text.len(),
-            run_is_japanese,
+            run_has_marker || include_kanji_only,
             &mut output,
         )?;
     }
@@ -147,10 +171,10 @@ fn push_run(
     text: &str,
     start: usize,
     end: usize,
-    is_japanese: bool,
+    should_convert: bool,
     output: &mut String,
 ) -> Result<(), String> {
-    if !is_japanese {
+    if !should_convert {
         return Ok(());
     }
     let fragment = &text[start..end];
@@ -202,27 +226,28 @@ fn cache() -> &'static Mutex<HashMap<String, String>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cache_get(text: &str) -> Option<String> {
+fn cache_get(key: &str) -> Option<String> {
     let cache = cache().lock().unwrap_or_else(|err| err.into_inner());
-    cache.get(text).cloned()
+    cache.get(key).cloned()
 }
 
-fn cache_put(text: &str, romaji: &str) {
+fn cache_put(key: &str, romaji: &str) {
     let mut cache = cache().lock().unwrap_or_else(|err| err.into_inner());
-    if cache.len() >= CACHE_LIMIT && !cache.contains_key(text) {
+    if cache.len() >= CACHE_LIMIT && !cache.contains_key(key) {
         let remove_count = cache.len() / 2;
         let keys: Vec<String> = cache.keys().take(remove_count).cloned().collect();
         for key in keys {
             cache.remove(&key);
         }
     }
-    cache.insert(text.to_string(), romaji.to_string());
+    cache.insert(key.to_string(), romaji.to_string());
 }
 
 #[cfg(test)]
-pub(crate) fn cache_contains(text: &str) -> bool {
+pub(crate) fn cache_contains(text: &str, include_kanji_only: bool) -> bool {
+    let key = cache_key(include_kanji_only, text);
     let cache = cache().lock().unwrap_or_else(|err| err.into_inner());
-    cache.contains_key(text)
+    cache.contains_key(&key)
 }
 
 #[cfg(test)]
@@ -230,7 +255,11 @@ mod tests {
     use super::*;
 
     fn romanize(text: &str) -> String {
-        romanize_japanese_texts(vec![text.to_string()])
+        romanize_with(text, false)
+    }
+
+    fn romanize_with(text: &str, include_kanji_only: bool) -> String {
+        romanize_japanese_texts(vec![text.to_string()], include_kanji_only)
             .expect("引擎初始化不应失败")
             .remove(0)
     }
@@ -270,7 +299,7 @@ mod tests {
     fn reuses_cached_line() {
         let text = "桜の花";
         let first = romanize(text);
-        assert!(cache_contains(text), "首次转换应写入缓存");
+        assert!(cache_contains(text, false), "首次转换应写入缓存");
         let second = romanize(text);
         assert_eq!(first, second);
         assert_eq!(second, "sakuranohana");
@@ -280,6 +309,38 @@ mod tests {
     fn keeps_only_japanese_runs_in_mixed_line() {
         // 拉丁字母、数字与非日文内容被丢弃，只输出日文片段的罗马音。
         assert_eq!(romanize("hello 東京へ行こう 123"), "toukyoueikou");
+    }
+
+    #[test]
+    fn ignores_kanji_only_line_without_flag() {
+        assert_eq!(romanize("東京"), "");
+    }
+
+    #[test]
+    fn converts_kanji_only_line_with_flag() {
+        // IPADIC 读作 とうきょう，Spelled 长音预期输出 "toukyou"；
+        // 词典读音不同时以实际非空结果为准，这里只断言非空并记录实际值。
+        let romaji = romanize_with("東京", true);
+        assert!(!romaji.is_empty(), "纯汉字日语行应得到罗马音");
+        println!("東京(include_kanji_only=true) -> {romaji}");
+    }
+
+    #[test]
+    fn reports_chinese_line_result_with_flag() {
+        // 开关打开时纯中文行交给引擎决定：可能返回空串，也可能给出汉字读音。
+        // Dart 侧只在整首判定为日语时才传 true，因此这里记录实际值、不做断言。
+        let romaji = romanize_with("你好", true);
+        println!("你好(include_kanji_only=true) -> {romaji}");
+    }
+
+    #[test]
+    fn cache_separates_kanji_only_flag() {
+        let text = "東京";
+        assert_eq!(romanize_with(text, false), "");
+        assert!(cache_contains(text, false), "false 查询应写入缓存");
+        let converted = romanize_with(text, true);
+        assert!(!converted.is_empty(), "true 不应复用 false 的空结果");
+        assert!(cache_contains(text, true), "true 查询应写入独立缓存键");
     }
 
     #[test]

@@ -17,7 +17,9 @@ permissions:
 jobs:
   test:
     runs-on: windows-2022
-    timeout-minutes: 30
+    # sabiyomi 内置 lindera 与 IPADIC，首次编译需下载并构建词典；
+    # 缓存未命中时 30 分钟不足，留出 45 分钟。
+    timeout-minutes: 45
 
     steps:
       - name: Checkout

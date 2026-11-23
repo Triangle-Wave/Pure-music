@@ -162,3 +162,9 @@ foreach(FFMPEG_DOC LICENSE README-ffmpeg.txt THIRD-PARTY-NOTICES.txt)
         COMPONENT Runtime)
   endif()
 endforeach()
+
+# Install third-party license notices for bundled Rust dependencies
+# (sabiyomi and lindera with mecab-ipadic dictionary data).
+install(FILES "${CMAKE_SOURCE_DIR}/../licenses/lindera-ipadic-NOTICE.txt"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/licenses"
+    COMPONENT Runtime)

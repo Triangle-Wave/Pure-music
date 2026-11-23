@@ -598,6 +598,7 @@ function Test-KeyFiles([string]$appDir) {
         "ffmpeg\LICENSE",
         "ffmpeg\README-ffmpeg.txt",
         "ffmpeg\THIRD-PARTY-NOTICES.txt",
+        "licenses\lindera-ipadic-NOTICE.txt",
         "tool\apply_installer_update.ps1",
         "desktop_lyric\desktop_lyric.exe"
     )

@@ -48,7 +48,12 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 60
+    # 编译链路含两个 cargo install、cargo build、两次 flutter build windows；
+    # sabiyomi 内置 lindera 与 IPADIC，首次编译需下载并构建词典，缓存未命中时预留 75 分钟。
+    timeout-minutes: 75
+    env:
+      # lindera 构建脚本复用该目录缓存编译后的词典，避免每次构建重新生成。
+      LINDERA_BUILD_DICTIONARY_CACHE_DIR: ${{ github.workspace }}/.lindera-cache
 
     steps:
       - name: Checkout
@@ -56,6 +61,15 @@ jobs:
         with:
           # 预演固定构建当前 ref，忽略 tag 输入，避免误用未验证的 tag 源码。
           ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
+
+      # 词典缓存与 rust/Cargo.lock 绑定：依赖版本变化时重新生成，避免复用过期词典。
+      - name: Cache lindera dictionary
+        uses: actions/cache@v4
+        with:
+          path: .lindera-cache
+          key: lindera-dict-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            lindera-dict-${{ runner.os }}-
 
       # 版本号取自 pubspec.yaml，两个 flutter build 都以 APP_VERSION 传入 Dart。
       - name: Resolve app version
@@ -331,6 +345,7 @@ jobs:
             "$out/ffmpeg/LICENSE",
             "$out/ffmpeg/README-ffmpeg.txt",
             "$out/ffmpeg/THIRD-PARTY-NOTICES.txt",
+            "$out/licenses/lindera-ipadic-NOTICE.txt",
             "$out/desktop_lyric/desktop_lyric.exe"
           )
           $missing = @($required | Where-Object { -not (Test-Path $_) })
@@ -339,6 +354,17 @@ jobs:
           }
           if (Test-Path -LiteralPath "$out/ffmpeg/ffmpeg.exe") {
             throw "Static ffmpeg.exe must not be shipped; TAK decodes through bass_ffmpeg.dll"
+          }
+          # 体积观察：内置 IPADIC 后 rust 库明显变大，只记录数值，不设阈值。
+          $rustDll = $null
+          foreach ($candidate in @("$out/rust_lib_pure_music.dll", "$out/dll/rust_lib_pure_music.dll")) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $rustDll = Get-Item -LiteralPath $candidate; break }
+          }
+          if ($null -eq $rustDll) {
+            Write-Warning "rust_lib_pure_music.dll not found in $out; size not reported"
+          }
+          else {
+            "SIZE {0}: {1:N2} MiB ({2:N0} bytes)" -f $rustDll.Name, ($rustDll.Length / 1MB), $rustDll.Length
           }
           "Build output verified."
 
@@ -629,7 +655,8 @@ jobs:
               "dll/BASS/swresample-6.dll",
               "ffmpeg/LICENSE",
               "ffmpeg/README-ffmpeg.txt",
-              "ffmpeg/THIRD-PARTY-NOTICES.txt"
+              "ffmpeg/THIRD-PARTY-NOTICES.txt",
+              "licenses/lindera-ipadic-NOTICE.txt"
             )) {
               if ($entries -notcontains $entry) {
                 throw "Portable archive missing $entry"
@@ -641,6 +668,14 @@ jobs:
           }
           finally {
             $zip.Dispose()
+          }
+          # 体积观察：记录安装包与便携包的体积，便于跟踪内置 IPADIC 带来的增长。
+          foreach ($name in @(
+            "pure_music_${env:VERSION}_release_installer.exe",
+            "pure_music_${env:VERSION}_release_portable.zip"
+          )) {
+            $item = Get-Item -LiteralPath "output/$name"
+            "SIZE {0}: {1:N2} MiB ({2:N0} bytes)" -f $item.Name, ($item.Length / 1MB), $item.Length
           }
           Get-ChildItem output -File | Select-Object Name, Length
 

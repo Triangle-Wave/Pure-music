@@ -99,6 +99,8 @@ Type: filesandordirs; Name: "{app}\data"
 Type: filesandordirs; Name: "{app}\dll"
 Type: filesandordirs; Name: "{app}\ffmpeg"
 Type: filesandordirs; Name: "{app}\desktop_lyric"
+; 第三方许可声明随版本变化，覆盖安装前清空，避免旧版 NOTICE 残留。
+Type: filesandordirs; Name: "{app}\licenses"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"

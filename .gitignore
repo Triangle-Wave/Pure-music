@@ -63,6 +63,9 @@ target/
 .cargo/
 **/*.rs.bk
 
+# lindera 构建期词典缓存（CI 复用，见 build-windows.yml）
+.lindera-cache/
+
 # CMake and Visual Studio build cache
 CMakeUserPresets.json
 .cmake/
