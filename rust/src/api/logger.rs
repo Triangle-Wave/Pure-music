@@ -9,7 +9,7 @@ static LOGGER: RwLock<Option<StreamSink<String>>> = RwLock::new(None);
 static INSTALL: Once = Once::new();
 
 const ALLOWED_TARGETS: &[&str] = &[
-    "smtc", "tag", "library", "font", "theme", "color", "util", "ne", "proxy", "app_env",
+    "smtc", "tag", "library", "font", "theme", "color", "util", "ne", "proxy", "app_env", "lyric",
 ];
 
 struct DartLogger;

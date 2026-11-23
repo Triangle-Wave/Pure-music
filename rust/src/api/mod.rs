@@ -8,6 +8,7 @@ pub mod color_extraction;
 pub mod installed_font;
 pub mod library_db;
 pub mod logger;
+pub mod lyric_romanizer;
 pub mod ne;
 pub mod network_proxy;
 pub mod sacd;
