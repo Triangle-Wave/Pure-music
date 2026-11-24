@@ -7,12 +7,15 @@
 //! 只有含假名（或日文特有标记 々 〆 〇）的连续片段参与转换；`include_kanji_only`
 //! 为真时纯 CJK 汉字片段也参与转换。英文、韩文、数字与符号在任何开关下都被丢弃，
 //! 多个片段之间以一个空格连接。
+//!
+//! 输出布局为 `Mode::Spaced`：片段内部还会按形态素边界插入空格，助词独立成词，
+//! 例如 `東京へ行こう` 输出 `toukyou e ikou`。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use sabiyomi::{LongVowels, Options, RomajiSystem, Sabiyomi, Target};
+use sabiyomi::{LongVowels, Mode, Options, RomajiSystem, Sabiyomi, Target};
 
 /// 行级缓存条目上限，超过后丢弃一半。
 const CACHE_LIMIT: usize = 4096;
@@ -30,6 +33,9 @@ pub fn romanizer_warmup() -> Result<(), String> {
 }
 
 /// 把若干行歌词转换为罗马音。
+///
+/// 输出按形态素分词、以空格分隔，例如 `東京へ行こう` 得到 `toukyou e ikou`；
+/// 同一行内的多个日文片段之间同样以空格连接。
 ///
 /// `include_kanji_only` 为 true 时，纯 CJK 汉字片段也交给引擎转换；为 false 时
 /// 只有含假名（或 々 〆 〇）的片段参与转换。纯中文行在 false 时返回空串，
@@ -56,6 +62,8 @@ pub fn romanize_japanese_texts(
 fn options() -> Options {
     Options {
         to: Target::Romaji,
+        // 按形态素边界分词输出，助词独立成词，避免整行连写。
+        mode: Mode::Spaced,
         long_vowels: Some(LongVowels::Spelled),
         system: RomajiSystem::Hepburn,
         ..Options::default()
@@ -266,13 +274,13 @@ mod tests {
 
     #[test]
     fn converts_kanji_with_kana() {
-        assert_eq!(romanize("君の名前"), "kiminonamae");
+        assert_eq!(romanize("君の名前"), "kimi no namae");
     }
 
     #[test]
     fn spells_long_vowels() {
-        // とうきょう + へ(助词读 e) + いこう
-        assert_eq!(romanize("東京へ行こう"), "toukyoueikou");
+        // とうきょう + へ(助词读 e) + いこう，按形态素以空格分隔。
+        assert_eq!(romanize("東京へ行こう"), "toukyou e ikou");
     }
 
     #[test]
@@ -302,13 +310,13 @@ mod tests {
         assert!(cache_contains(text, false), "首次转换应写入缓存");
         let second = romanize(text);
         assert_eq!(first, second);
-        assert_eq!(second, "sakuranohana");
+        assert_eq!(second, "sakura no hana");
     }
 
     #[test]
     fn keeps_only_japanese_runs_in_mixed_line() {
         // 拉丁字母、数字与非日文内容被丢弃，只输出日文片段的罗马音。
-        assert_eq!(romanize("hello 東京へ行こう 123"), "toukyoueikou");
+        assert_eq!(romanize("hello 東京へ行こう 123"), "toukyou e ikou");
     }
 
     #[test]
@@ -318,11 +326,8 @@ mod tests {
 
     #[test]
     fn converts_kanji_only_line_with_flag() {
-        // IPADIC 读作 とうきょう，Spelled 长音预期输出 "toukyou"；
-        // 词典读音不同时以实际非空结果为准，这里只断言非空并记录实际值。
-        let romaji = romanize_with("東京", true);
-        assert!(!romaji.is_empty(), "纯汉字日语行应得到罗马音");
-        println!("東京(include_kanji_only=true) -> {romaji}");
+        // IPADIC 读作 とうきょう，Spelled 长音输出 "toukyou"；单个形态素不含空格。
+        assert_eq!(romanize_with("東京", true), "toukyou");
     }
 
     #[test]
